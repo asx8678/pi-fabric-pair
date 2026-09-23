@@ -12,9 +12,9 @@ JavaScript Pi extension. No build step is required.
 
 ## Release status
 
-Version **0.1.0**, implementation in progress. The current suite has 59 offline tests plus five deterministic native scenarios against Pi **0.87.1**, Fabric **0.93.0**, and Fovea **0.29.2** on Node 24/macOS. The native provider is local and makes no network or paid model request.
+Version **0.1.0**, implementation in progress. At the owner's direction, all automated tests, test fixtures, test runners, native/live probes, and generated test-result artifacts have been removed. Do not treat earlier 86-offline/5-native pass counts as current or reproducible evidence. The all-production strict typecheck still has 620 Pair-source diagnostics, and broader migration, safety, and release work remains open.
 
-Those scenarios qualify only the narrow single-writer startup/report/background/idle-session gates documented in [the integration probe](docs/INTEGRATION_PROBE.md). They are not a full live-provider, TUI, compaction, permission, or release certification. Validate the remaining workflow in [Testing](docs/TESTING.md) before using valuable repositories or unattended work. See [Compatibility](docs/COMPATIBILITY.md).
+There is no retained automated acceptance or regression suite. Do not use this version for valuable repositories or unattended work on the basis of earlier test claims. See the current [testing policy](docs/TESTING.md) and [compatibility notes](docs/COMPATIBILITY.md).
 
 ## What is implemented
 
@@ -23,8 +23,7 @@ Those scenarios qualify only the narrow single-writer startup/report/background/
 - Disabled by default; after explicit enablement, automatic startup is available once a worker model has been configured. V1 permits one live worker and one unresolved assignment. Up to eight configured slot identities are preserved for sequential use/future qualification, but parallel activation fails closed.
 - Work orders, questions, blockers, checkpoints, final review, approve/revise,
   cancellation, pause, explicit recovery, and duplicate-decision protection.
-- Durable controller state outside model context; nonce/session/task/lease-bound
-  reports; no automatic replay after an uncertain failure.
+- Durable controller state outside model context; owner-epoch/worker-generation/attempt/session/lease-bound reports and delivery-operation IDs; no automatic replay after an uncertain failure. Same-session branch recovery remains unqualified.
 - Immutable Git-worktree evidence, hash-bound approvals, and human-configured
   verification commands. A worker saying “tests passed” is not independently
   verified evidence.
@@ -116,6 +115,7 @@ silently intercept every natural-language request or replace Prewalk.
 | `/pair transcript [worker]` | Read-only recent worker transcript. No arbitrary control-message injection. |
 | `/pair inbox` | Inspect unresolved reports and explicitly redeliver after recovery. |
 | `/pair reset-worker [worker]` | Confirm a new conversation; old state/history remains archived. |
+| `/pair import-backup <global\|project> <absolute-path>` | Preview and confirm deferred policy fields from one explicitly selected retained `.v1.bak`; never searches for a backup. |
 | `/pair indicator off` | Remove only Pair's widget. |
 | `/pair indicator minimal` | Show the compact widget again. |
 
@@ -160,12 +160,13 @@ synthetic global `pair` API exists. The bundled skill contains exact examples.
 ### Review policies
 
 - **Milestones:** every dispatched plan milestone requires review. Recommended.
-- **Strict:** the same enforced gate, with Main instructed to plan smaller steps.
-  This is not semantic proof that every individual edit stayed in scope.
-- **Adaptive:** milestone gates plus early risk/uncertainty reports. Extra
-  `stepComplete:false` checkpoints do not advance the plan.
-- **Final:** all listed steps are authorized in one assignment; questions and
+- **Every-step:** Main must plan and approve each small step. This is not semantic
+  proof that every individual edit stayed in scope.
+- **Final-only:** all listed steps are authorized in one assignment; questions and
   blockers are still allowed; final acceptance is still mandatory.
+
+Legacy `final` and `strict` names migrate to `final-only` and `every-step`.
+`adaptive` is not silently weakened; migration requires an explicit V1 policy.
 
 The controller enforces valid transitions and withholding the next lease. It
 cannot prove code quality, prevent every side effect of an already-running shell
@@ -183,6 +184,24 @@ Behavior settings are merged from:
 Project settings load only when Pi says that project is trusted. The default
 agent directory is `~/.pi/agent`. Personal cosmetic preferences in
 `<PI_CODING_AGENT_DIR>/fabric-pair-ui.json` override only the indicator.
+
+Configuration schema **V2** uses `final-only`, `milestones`, and `every-step`.
+Arrays replace the lower-precedence array; they are not concatenated.
+`pair_status` and `/pair doctor` expose field provenance (`default`, `global`,
+`project`, or cosmetic `ui`). Untrusted project configuration is not read.
+
+Existing shipped V1 `fabric-pair.json` files and the handoff's `pair.json` shape
+are loaded only as a disabled migration preview. Legacy `enabled:true` never
+carries forward as consent, and Pair does not infer a missing provider. Review
+the settings and Apply the affected scope to archive the exact legacy source as
+a `.v1.bak` file and atomically write V2. If `pair.json` and
+`fabric-pair.json` coexist in one scope, Pair reports a conflict instead of
+choosing silently. Handoff queue/report/repair/recovery values and the distinct
+active-step/per-step semantics are preserved in V2 assignment policy, but are not
+advertised as enforced until their R5 consumers land. An already archived handoff
+backup can be imported only by explicitly naming it with `/pair import-backup` and
+confirming the field preview; Pair never guesses the newest backup. `adaptive`
+requires an explicit supported-policy choice.
 
 Start with the UI or [the complete example](fabric-pair.example.json). Replace the
 placeholder model/provider with identifiers actually shown by your Pi registry.
@@ -292,29 +311,19 @@ retry. A missing session file is an error, never a blank replacement.
 Message delivery across a crash is not exactly once. Reports have durable IDs;
 use `/pair inbox` after recovery. Duplicate decisions cannot repeat a step.
 
-## Develop and test
+## Development checks
+
+The repository intentionally contains no automated tests or executable test/probe runners. Do not add or regenerate them.
+
+The remaining commands are static/package checks, not behavioral tests:
 
 ```bash
 cd /path/to/pi-fabric-pair
-npm test
-npm run check
+npm run typecheck
 npm run pack:check
 ```
 
-No downloads or model credentials are needed for these commands. The source ZIP
-contains development tests; the smaller npm manifest omits them.
-
-For an opt-in check of your own installed stack:
-
-```bash
-npm run test:live -- --cwd /path/to/disposable/git/repository \
-  --config /absolute/path/to/your/fabric-pair.json
-```
-
-This requests startup/identity checks, not model inference. It forwards permission
-prompts to a terminal and cancels them in noninteractive mode. Existing third-party
-extensions still run their own startup hooks. Full instructions and the bounded
-live acceptance checklist are in [Testing](docs/TESTING.md).
+`typecheck` is still an open gate and currently fails on Pair source diagnostics. `pack:check` only performs an npm package dry run; it does not qualify runtime behavior.
 
 ## Deliberate boundaries
 
@@ -323,7 +332,4 @@ automatic merge, arbitrary direct worker chat, recursive worker spawning, custom
 compactor, or fork of upstream TUI is included. The transcript viewer is read-only;
 use the review protocol to issue work and decisions.
 
-Linux subprocess behavior is exercised by the supplied test run. macOS and Windows
-terminal/runtime compatibility remain to be tested locally. On Windows, configure
-an actual executable (or `node` plus the appropriate CLI path) rather than relying
-on a shell-only command shim.
+No operating-system subprocess behavior is currently qualified by a retained automated suite. On Windows, configure an actual executable (or `node` plus the appropriate CLI path) rather than relying on a shell-only command shim.

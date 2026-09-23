@@ -7,14 +7,17 @@
   "engines": { "node": ">=24" },
   "keywords": ["pi-package", "pi-extension", "fabric", "fovea", "persistent-workers"],
   "pi": { "extensions": ["./src/extension.js"], "skills": ["./skills"] },
-  "files": ["src", "skills", "docs", "scripts", "README.md", "LICENSE", "CHANGELOG.md", "fabric-pair.example.json"],
+  "files": ["src", "skills", "docs", "README.md", "LICENSE", "CHANGELOG.md", "fabric-pair.example.json"],
   "scripts": {
-    "test": "node --test tests/*.test.js",
-    "check": "node scripts/check.js",
-    "test:live": "node scripts/live-smoke.js",
-    "test:native": "node scripts/native-regressions.js --all",
+    "typecheck": "tsc -p tsconfig.json",
     "pack:check": "npm pack --dry-run --ignore-scripts"
   },
   "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
-  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true } }
+  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true } },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@types/node": "24.13.6",
+    "typescript": "5.9.3"
+  }
 }

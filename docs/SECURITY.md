@@ -17,14 +17,14 @@ container/OS/tool permissions for security-sensitive work.
 
 The human configures models, workspaces, verification argv, and limits. Main authorizes bounded implementation steps; that is distinct from the human's permission for commands or external actions. Worker UI requests are forwarded to the human. Missing UI means cancel/deny, never implicit approval.
 
-Pair is disabled by default and requires deliberate enablement. V1 qualifies one writer. A read-only worker with generic Fabric is rejected before inference because generic provider actions do not expose Pi's pre-effect `tool_call` hook. The writer profile requires Fabric `agents.maxDepth:0`, `executor.shellHangMs:0`, and disabled Prewalk. A successful `pair_report` aborts the containing Fabric invocation so subsequent provider calls cannot execute. Explicit background shells are blocked.
+Pair is disabled by default and requires deliberate enablement. Legacy enablement is never migrated as consent. Retained V1 policy fields can be imported only from an explicitly selected, scope-matching regular `.v1.bak` after a field preview and human confirmation; project imports require Pi project trust, stale previews fail, the backup remains unchanged, and no worker inference is requested. V1 qualifies one writer. A read-only worker with generic Fabric is rejected before inference because generic provider actions do not expose Pi's pre-effect `tool_call` hook. The writer profile requires Fabric `agents.maxDepth:0`, `executor.shellHangMs:0`, and disabled Prewalk. A successful `pair_report` aborts the containing Fabric invocation so subsequent provider calls cannot execute. Explicit background shells are blocked.
 
 Direct file edits are checked against workspace boundaries and symlink escapes. Raw shell commands and external tool servers still need independent permission controls; a workflow gate cannot determine every possible shell side effect. Main's read-only-during-task option covers recognized direct mutation tools, not arbitrary shell execution. It is an ergonomic safeguard, not complete isolation.
 
 ## Report handling
 
-Worker reports are schema validated and bound to an owner, worker, process nonce,
-session, task, plan revision and implementation lease. IDs are path-safe, reject
+Worker reports are schema validated and bound to an owner session/epoch, worker slot/generation, process nonce,
+session, task attempt, plan revision and implementation lease. IDs are path-safe, reject
 prototype-inherited names, and are not accepted as arbitrary file paths. Duplicate
 report decisions cannot advance a step twice.
 

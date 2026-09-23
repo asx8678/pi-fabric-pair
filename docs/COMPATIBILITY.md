@@ -1,8 +1,6 @@
 # Compatibility and inspected upstream contracts
 
-Originally inspected on **2026-09-23** from the supplied reference sources. The current implementation was also exercised against installed Pi 0.87.1, Fabric 0.93.0, and Fovea 0.29.2 with a deterministic local provider on Node 24/macOS. No credentials, network request, paid inference, upstream patch, or installed-file modification was used.
-
-That native run qualifies the narrow scenarios in `docs/INTEGRATION_PROBE.md`, not every provider, operating system, terminal path, or live model workflow.
+Originally inspected on **2026-09-23** from the supplied reference sources: Pi 0.87.1, Fabric 0.93.0 and Fovea 0.29.2. Before test removal, a checkpoint was run against installed Pi 0.87.1, Fabric 0.93.1 and Fovea 0.29.2 with a deterministic local provider on Node 24/macOS. Those results are historical only: their runners and artifacts were removed at the owner's direction and are no longer reproducible from this repository. No current native, provider, operating-system, terminal, or live-model qualification is claimed.
 
 ## Source targets
 
@@ -70,11 +68,23 @@ They are independently loaded Pi extensions. Local JSON tool schemas are ordinar
 JSON Schema objects; real Pi/Fabric schema capture must be verified in the first
 local integration test. No mock test can certify an upstream schema-loader change.
 
+Pair configuration schema V2 is the current package format. Shipped V1
+`fabric-pair.json` and handoff V1 `pair.json` are accepted only as disabled
+migration previews; explicit settings Apply archives the legacy source before
+writing V2. Settings writes update only changed fields in the selected raw scope layer, preserving inherited values and unrelated overrides. Same-scope old/new filename conflicts and `adaptive` migration fail
+with actionable errors. Handoff queue/report/repair/recovery limits plus distinct
+active-step/per-step fields are retained in V2 assignment snapshots. A previously
+archived handoff `.v1.bak` is imported only from an explicitly selected, scope-matching
+regular file after confirmation; Pair does not search for one. These limits are not
+yet enforced by R5 runtime consumers. Migration and selected-layer settings behavior
+have offline coverage only. The five deterministic native scenarios exercise narrow
+worker safety/retention paths, not native migration/settings or a full Main-and-Worker workflow. Clean packaged installation remains open.
+
 ## Environment
 
 Target: Node >=24, because Fabric 0.93.0 requires it. The current working-tree checks passed on Darwin 27.2.0 arm64, Node 24.21.0, and Apple Git 2.54.0. The historical source artifact also ran its earlier 55-test suite on Linux/Node 22, but that does **not** qualify the upstream Fabric stack on Node 22.
 
-The currently qualified native profile is explicitly enabled and uses one writer with persisted sessions, `prewalk.enabled:false`, `executor.shellHangMs:0`, and `agents.maxDepth:0`. Explicit background shells and read-only workers with generic Fabric are rejected. Windows/Linux native operation, Bun-compiled Pi, specific live providers, custom extension combinations, terminal input/rendering, and provider cache warming still need profile-specific verification.
+The profile exercised by the five native scenarios is explicitly enabled and uses one writer with persisted sessions; this is not full V1 profile qualification. Its restrictions include `prewalk.enabled:false`, `executor.shellHangMs:0`, and `agents.maxDepth:0`. Explicit background shells and read-only workers with generic Fabric are rejected. Windows/Linux native operation, Bun-compiled Pi, specific live providers, custom extension combinations, terminal input/rendering, and provider cache warming still need profile-specific verification.
 
 ## Upgrade checklist
 

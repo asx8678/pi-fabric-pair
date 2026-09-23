@@ -1,5 +1,5 @@
 import { PairController } from './controller.js';
-import { configPaths, loadConfig, saveConfig, saveIndicator } from './config.js';
+import { configPaths, loadConfig, previewBackupImport, saveBackupImport, saveConfig, saveIndicator, updateConfigLayer } from './config.js';
 import { decisionSchema, dispatchSchema, inspectSchema, statusSchema, validate } from './schema.js';
 import { isDirectMutation, nativeSettings, probeNative, sourcePaths } from './native.js';
 import { normalizedUsage } from './metrics.js';
@@ -16,7 +16,7 @@ const result = value => ({ content: [{ type: 'text', text: JSON.stringify(value)
 const cancelSchema = { type: 'object', properties: { workerId: { type: 'string', minLength: 1, maxLength: 80 }, reason: { type: 'string', minLength: 1, maxLength: 4000 } }, required: ['workerId', 'reason'], additionalProperties: false };
 
 export function registerMain(pi) {
-  let controller = null, ctxRef = null, config = null, scope = 'global', busy = false, stopped = false, initialized = false;
+  let controller = null, ctxRef = null, config = null, configState = null, scope = 'global', busy = false, stopped = false, initialized = false;
   const lifecycle = new Serial();
   function render() {
     if (!ctxRef || ctxRef.mode !== 'tui') return;
@@ -27,6 +27,9 @@ export function registerMain(pi) {
     const old = controller?.mainObservation || {};
     return { ...old, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null, busy,
       context: ctx.getContextUsage?.() || null, ...(usage === undefined ? {} : { lastUsage: usage }) };
+  }
+  function configObservation() {
+    return { version: config?.version, scope, provenance: configState?.provenance || {}, pendingMigrations: (configState?.migrations || []).map(({ scope: migrationScope, kind, sourceFile, targetFile, fromVersion, toVersion, warnings }) => ({ scope: migrationScope, kind, sourceFile, targetFile, fromVersion, toVersion, warnings })) };
   }
   async function startConfigured() {
     if (!controller || !config.enabled || !config.autoStart) return;
@@ -40,7 +43,7 @@ export function registerMain(pi) {
     const owner = ctx.sessionManager.getSessionId();
     if (controller && controller.ownerSession === owner && controller.cwd === ctx.cwd) return controller;
     if (controller) { await controller.close(); controller = null; }
-    const loaded = await loadConfig(ctx.cwd, ctx.isProjectTrusted?.() === true); config = loaded.config; scope = loaded.scope;
+    const loaded = await loadConfig(ctx.cwd, ctx.isProjectTrusted?.() === true); configState = loaded; config = loaded.config; scope = loaded.scope;
     const boundOwner = String(owner);
     controller = await new PairController({ config, cwd: ctx.cwd, ownerSession: boundOwner,
       sourcePaths: sourcePaths(pi), callbacks: {
@@ -48,7 +51,7 @@ export function registerMain(pi) {
         notifyMain(message, details) {
           assert(!stopped && ctxRef?.sessionManager.getSessionId() === boundOwner, 'Main session changed; report is retained in the old Pair inbox');
           pi.sendMessage({ customType: 'fabric-pair.report', content: message, display: true, details }, { deliverAs: 'followUp', triggerTurn: true });
-          pi.appendEntry('fabric-pair.delivery', { reportId: details.reportId, workerId: details.workerId, at: Date.now() });
+          pi.appendEntry('fabric-pair.delivery', { reportId: details.reportId, workerId: details.workerId, taskId: details.taskId, ownerEpoch: details.ownerEpoch, workerGeneration: details.workerGeneration, attemptId: details.attemptId, deliveryOperationId: details.deliveryOperationId, at: Date.now() });
         },
         async promptUser(workerId, event) {
           if (!ctxRef?.hasUI || stopped) return { cancelled: true };
@@ -66,6 +69,7 @@ export function registerMain(pi) {
       }
     }).init();
     controller.on('change', render); controller.setMainObservation(modelObservation(ctx, null)); render();
+    if (loaded.migrations.length) ctx.ui.notify(`Pair configuration migration pending for ${loaded.migrations.map(item => item.scope).join(', ')}. Legacy enablement was removed; review and Apply each affected scope in /pair settings.`, 'warning');
     return controller;
   }
   async function ready(ctx) {
@@ -85,27 +89,48 @@ export function registerMain(pi) {
   });
   tool('pair_decide', 'Answer, approve, revise or cancel an exact worker report. Approval requires the current checkpoint hash and inspected evidence.', decisionSchema, (c, p) => c.decide(p));
   tool('pair_inspect', 'Read immutable checkpoint evidence or one changed file. Use before approval; ordinary live workspace reads can change underneath a review.', inspectSchema, (c, p) => c.inspect(p.workerId, p.reportId, p.file));
-  tool('pair_status', 'Read Pair readiness, active task, context and observed cache usage. Do not poll; worker reports are delivered automatically.', statusSchema, c => c.summary());
+  tool('pair_status', 'Read Pair readiness, active task, context and observed cache usage. Do not poll; worker reports are delivered automatically.', statusSchema, c => ({ ...c.summary(), configuration: configObservation() }));
   tool('pair_cancel', 'Cancel the current assigned worker task without resetting its conversation. Does not roll back files.', cancelSchema, (c, p) => c.cancel(p.workerId, p.reason));
 
   async function apply(next, targetScope) {
     const files = configPaths(ctxRef.cwd);
     const behaviorChanged = digest({ ...config, indicator: null }) !== digest({ ...next, indicator: null });
+    const migration = configState?.migrations?.find(item => item.scope === targetScope) || null;
+    const baseLayer = migration?.migrated || configState?.layers?.[targetScope] || { version: 2 };
+    const behavioralNext = { ...next, indicator: config.indicator };
+    const selectedLayer = updateConfigLayer(baseLayer, config, behavioralNext);
+    const saved = behaviorChanged || migration ? await saveConfig(files[targetScope], selectedLayer, { migration, layer: true }) : null;
     await saveIndicator(files.ui, next.indicator);
-    if (behaviorChanged) await saveConfig(files[targetScope], next);
-    config = next; scope = targetScope; controller.updateConfig(next); render();
-    ctxRef.ui.notify('Pair settings saved. Model/policy changes apply at safe task boundaries; hiding the indicator changes rendering only.', 'info');
-    if (behaviorChanged) await startConfigured();
+    const loaded = await loadConfig(ctxRef.cwd, ctxRef.isProjectTrusted?.() === true);
+    configState = loaded; config = loaded.config; scope = targetScope; controller.updateConfig(config); render();
+    const backup = saved?.backup ? ` Legacy source archived at ${saved.backup}.` : '';
+    ctxRef.ui.notify(`Pair settings saved.${backup} Model/policy changes apply at safe task boundaries; hiding the indicator changes rendering only.`, 'info');
+    if (behaviorChanged || migration) await startConfigured();
   }
   pi.registerCommand('pair', {
-    description: 'Pair settings/status/start/stop/pause/resume/cancel/indicator/inbox/transcript/doctor/reset-worker',
+    description: 'Pair settings/status/start/stop/pause/resume/cancel/indicator/inbox/transcript/doctor/reset-worker/import-backup',
     getArgumentCompletions(prefix) {
-      return ['settings', 'status', 'start', 'stop', 'pause', 'resume', 'cancel', 'indicator minimal', 'indicator off', 'inbox', 'transcript', 'doctor', 'reset-worker'].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }));
+      return ['settings', 'status', 'start', 'stop', 'pause', 'resume', 'cancel', 'indicator minimal', 'indicator off', 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup global ', 'import-backup project '].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }));
     },
     async handler(args, ctx) {
       try {
         await lifecycle.drain(); if (!controller) await lifecycle.run(() => bind(ctx)); ctxRef = ctx;
-        const c = controller; const [command = '', idArg, ...rest] = args.trim().split(/\s+/); const id = idArg || config.workers[0].id;
+        const c = controller; const input = args.trim();
+        if (input.startsWith('import-backup')) {
+          const match = /^import-backup\s+(global|project)\s+(.+)$/.exec(input);
+          assert(match, 'Use /pair import-backup <global|project> <absolute .v1.bak path>');
+          let backupFile = match[2].trim();
+          if ((backupFile.startsWith('"') && backupFile.endsWith('"')) || (backupFile.startsWith("'") && backupFile.endsWith("'"))) backupFile = backupFile.slice(1, -1);
+          const preview = await previewBackupImport(ctx.cwd, ctx.isProjectTrusted?.() === true, match[1], backupFile);
+          const summary = Object.entries(preview.fields).map(([key, value]) => `${key}=${value}`).join('\n');
+          if (!await ctx.ui.confirm('Import retained Pair V1 limits', `Source: ${preview.sourceFile}\nTarget scope: ${preview.scope}\n\n${summary}\n\nThese values are preserved in new assignment policy, but queue/report/repair/recovery and active-step/per-step enforcement remains pending. Import?`)) return;
+          const saved = await saveBackupImport(preview);
+          const loaded = await loadConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+          configState = loaded; config = loaded.config; scope = match[1]; c.updateConfig(config); render();
+          ctx.ui.notify(saved.changed ? `Imported ${Object.keys(saved.fields).length} retained V1 fields; the backup was preserved.` : 'The selected V1 fields already match this scope; nothing was written.', 'info');
+          return;
+        }
+        const [command = '', idArg, ...rest] = input.split(/\s+/); const id = idArg || config.workers[0].id;
         if (command === 'settings') return settingsUI(ctx, config, scope, apply);
         if (command === 'indicator') {
           assert(['off', 'minimal'].includes(idArg), 'Use /pair indicator off or /pair indicator minimal');
@@ -125,7 +150,7 @@ export function registerMain(pi) {
           if (inbox.length && await ctx.ui.confirm('Redeliver saved reports', 'Deliver unresolved reports to this Main session again? Decisions remain idempotent.')) await c.inbox(true);
           return;
         }
-        if (command === 'doctor') return textView(ctx, 'Pair doctor (no inference)', JSON.stringify({ main: await probeNative(pi, ctx), pair: c.summary(), requirements: config.requirements }, null, 2));
+        if (command === 'doctor') return textView(ctx, 'Pair doctor (no inference)', JSON.stringify({ main: await probeNative(pi, ctx), pair: c.summary(), configuration: configObservation(), requirements: config.requirements }, null, 2));
         if (command && command !== 'status') throw new Error('Unknown Pair command. Use /pair for the dashboard.');
         if (command === 'status') return textView(ctx, 'Pair status', statusText(c.summary(), await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true)));
         const choice = await ctx.ui.select('Fabric Pair', ['Settings', 'Status', 'Worker transcript', 'Start default worker', 'Pause default worker', 'Stop all workers', 'Close']);

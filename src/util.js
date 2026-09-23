@@ -3,14 +3,17 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
+import { WIRE_VERSION } from './contracts.js';
 
 export const VERSION = '0.1.0';
-export const PROTOCOL = 1;
+export const PROTOCOL = WIRE_VERSION;
 export const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const clone = value => structuredClone(value);
 export const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 export const uid = prefix => `${prefix}-${randomUUID()}`;
+/** @param {unknown} condition @param {string} message @returns {asserts condition} */
 export function assert(condition, message) { if (!condition) throw new Error(message); }
+/** @param {unknown} value @param {string} [label] @returns {string} */
 export function safeId(value, label = 'id') {
   assert(typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(value), `${label} must contain 1–80 letters, digits, underscores or hyphens`);
   assert(!['prototype', ...Object.getOwnPropertyNames(Object.prototype)].includes(value), `${label} is reserved`);
@@ -24,7 +27,13 @@ export function cleanText(value, max = 4000) {
 export function briefError(error) { return cleanText(error instanceof Error ? error.message : error, 2000); }
 export function bounded(value, limit = 16000) {
   const text = String(value ?? '');
-  return text.length <= limit ? text : `${text.slice(0, Math.floor(limit * .7))}\n… [truncated; inspect the local artifact] …\n${text.slice(-Math.floor(limit * .3))}`;
+  assert(Number.isSafeInteger(limit) && limit >= 0, 'Bounded text limit must be a nonnegative safe integer');
+  if (text.length <= limit) return text;
+  const marker = '\n… [truncated; inspect the local artifact] …\n';
+  if (limit <= marker.length) return text.slice(0, limit);
+  const available = limit - marker.length;
+  const head = Math.ceil(available * .7), tail = available - head;
+  return `${text.slice(0, head)}${marker}${tail ? text.slice(-tail) : ''}`;
 }
 export async function mkdirPrivate(dir) { await fs.mkdir(dir, { recursive: true, mode: 0o700 }); }
 export async function atomicJSON(file, value) {

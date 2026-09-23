@@ -108,7 +108,7 @@ export async function settingsUI(ctx, original, initialScope, onApply) {
       else if (index === 6) w.readOnly = !w.readOnly;
       else if (index === 7) { const value = await ctx.ui.input('Worker workspace: absolute path, or blank for Main', w.cwd || ''); if (value !== undefined) w.cwd = value.trim() || null; }
       else if (index === 8) {
-        const modes = { 'Final: review after the complete plan; questions always allowed': 'final', 'Milestones: approve each dispatched plan milestone': 'milestones', 'Strict: approve each small plan step; no step skipping': 'strict', 'Adaptive: milestone gates plus early risk/uncertainty checkpoints': 'adaptive' };
+        const modes = { 'Final-only: review after the complete plan; questions always allowed': 'final-only', 'Milestones: approve each dispatched plan milestone': 'milestones', 'Every-step: approve each small plan step; no step skipping': 'every-step' };
         const pick = await ctx.ui.select('Review policy · final acceptance is always required', Object.keys(modes)); if (pick) draft.supervision.mode = modes[pick];
       }
       else if (index === 9) { const input = await ctx.ui.input('Revision limit (0–20)', String(draft.supervision.maxRevisions)); if (input !== undefined) draft.supervision.maxRevisions = Number(input); }

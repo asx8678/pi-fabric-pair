@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicJSON, assert, briefError, digest, inside, mkdirPrivate, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
 import { reportSchema, validateReport } from './schema.js';
+import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
 import { gateTool, isDirectMutation, nativeSettings, probeNative, requestsDetachedEffect, toolName } from './native.js';
 import { normalizedUsage } from './metrics.js';
 
@@ -17,10 +18,11 @@ Do not deploy, push, commit, remove history, access unrelated secrets, or run de
 function statePacket(authority, report) {
   if (!authority?.task) return 'No implementation lease is active. Remain idle until the Pair controller assigns work.';
   const t = authority.task;
-  return JSON.stringify({ type: 'fabric-pair.task-state', taskId: t.id, planRevision: t.planRevision,
+  return JSON.stringify({ type: 'fabric-pair.task-state', ownerEpoch: authority.ownerEpoch, workerGeneration: authority.workerGeneration,
+    taskId: t.id, planRevision: t.planRevision, attemptId: t.attemptId, attemptNumber: t.attemptNumber,
     phase: authority.phase, leaseId: authority.leaseId, objective: t.objective,
     constraints: t.constraints, authorizedStep: t.steps[t.stepIndex],
-    supervision: t.policy.mode, mayCompleteRemainingPlan: t.policy.mode === 'final',
+    supervision: t.policy.mode, mayCompleteRemainingPlan: t.policy.mode === 'final-only',
     lastDecision: t.lastDecision || null, submittedReportId: report?.reportId || null,
     instruction: authority.phase === 'running' && !report ? 'Execute only the authorized scope.' : 'Wait; do not execute additional work.' });
 }
@@ -29,26 +31,29 @@ function statePacket(authority, report) {
 export function registerWorker(pi, env = process.env) {
   const workerId = safeId(env.PI_FABRIC_PAIR_WORKER_ID, 'worker ID');
   const ownerSession = String(env.PI_FABRIC_PAIR_OWNER || '');
+  const ownerEpoch = Number(env.PI_FABRIC_PAIR_OWNER_EPOCH), workerGeneration = Number(env.PI_FABRIC_PAIR_WORKER_GENERATION);
   const nonce = String(env.PI_FABRIC_PAIR_NONCE || '');
   const dir = env.PI_FABRIC_PAIR_WORKER_DIR;
-  assert(path.isAbsolute(dir || '') && ownerSession && nonce, 'Invalid Pair worker environment');
+  assert(path.isAbsolute(dir || '') && ownerSession && nonce && Number.isSafeInteger(ownerEpoch) && ownerEpoch > 0 && Number.isSafeInteger(workerGeneration) && workerGeneration > 0, 'Invalid Pair worker environment');
   const gateFile = path.join(dir, 'authority.json');
   const latchFile = path.join(dir, 'latch.json');
   const reportSerial = new Serial(), telemetrySerial = new Serial();
   let ctxRef, authority = null, report = null, currentTool = null, lastUsage = null, compacting = false, detachedEffect = null, parentTimer, stopped = false;
 
   async function load() {
-    const next = await readJSON(gateFile, null);
-    assert(next?.version === PROTOCOL && next.ownerSession === ownerSession && next.workerId === workerId, 'Pair authority identity mismatch');
+    const next = validateAuthority(await readJSON(gateFile, null), { ownerSession, ownerEpoch, workerId, workerGeneration });
     authority = next;
-    const latch = await readJSON(latchFile, null);
-    report = latch?.leaseId === next.leaseId ? latch.report : null;
+    const rawLatch = await readJSON(latchFile, null);
+    const latch = rawLatch === null ? null : validateLatch(rawLatch);
+    const currentLatch = latch?.ownerEpoch === ownerEpoch && latch?.workerGeneration === workerGeneration && latch?.leaseId === next.leaseId && latch?.attemptId === next.attemptId;
+    if (currentLatch) { validateReport(latch.report.payload); assert(latch.report.payloadHash === digest(latch.report.payload), 'Latched report payload hash mismatch'); }
+    report = currentLatch ? latch.report : null;
     return next;
   }
   async function telemetry(ctx = ctxRef) {
     if (!ctx || stopped) return;
     return telemetrySerial.run(async () => atomicJSON(path.join(dir, 'telemetry.json'), {
-      version: PROTOCOL, nonce, workerId, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
+      version: PROTOCOL, nonce, ownerSession, ownerEpoch, workerId, workerGeneration, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
       context: ctx.getContextUsage?.() || null, currentTool, lastUsage, compacting, detachedEffect,
       phase: report ? 'waiting' : authority?.phase || 'idle', model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
       at: Date.now()
@@ -57,7 +62,7 @@ export function registerWorker(pi, env = process.env) {
   async function probe(ctx) {
     ctxRef = ctx; await load();
     const status = await probeNative(pi, ctx);
-    await atomicJSON(path.join(dir, 'probe.json'), { ...status, nonce, workerId, ownerSession });
+    await atomicJSON(path.join(dir, 'probe.json'), { ...status, nonce, workerId, ownerSession, ownerEpoch, workerGeneration });
     await telemetry(ctx);
   }
   function expectedModel(ctx) {
@@ -84,14 +89,14 @@ export function registerWorker(pi, env = process.env) {
           assert(report.payloadHash === digest(params), 'A different report already closed this lease');
           return { content: [{ type: 'text', text: `Report ${report.reportId} already submitted. Stop and wait.` }], details: { pairReportId: report.reportId }, terminate: true };
         }
-        if (task.policy.mode === 'final') assert(params.kind !== 'checkpoint', 'Final-only policy requires final_review after the whole plan, or a question/blocker.');
-        if (params.kind === 'final_review') assert(task.policy.mode === 'final' || task.stepIndex === task.steps.length - 1, 'Not authorized to finish later steps');
-        const result = { version: PROTOCOL, reportId: uid('report'), workerId, ownerSession, nonce,
-          sessionId: ctx.sessionManager.getSessionId(), leaseId: authority.leaseId, planRevision: task.planRevision,
-          payload: params, payloadHash: digest(params), createdAt: Date.now() };
+        if (task.policy.mode === 'final-only') assert(params.kind !== 'checkpoint', 'Final-only policy requires final_review after the whole plan, or a question/blocker.');
+        if (params.kind === 'final_review') assert(task.policy.mode === 'final-only' || task.stepIndex === task.steps.length - 1, 'Not authorized to finish later steps');
+        const result = validateReportEnvelope({ version: PROTOCOL, reportId: uid('report'), workerId, ownerSession, ownerEpoch, workerGeneration, nonce,
+          sessionId: ctx.sessionManager.getSessionId(), leaseId: authority.leaseId, attemptId: task.attemptId, attemptNumber: task.attemptNumber, planRevision: task.planRevision,
+          payload: params, payloadHash: digest(params), createdAt: Date.now() });
         // Latch before exposing the report, so sibling/nested tool hooks see the stop immediately.
         report = result;
-        await atomicJSON(latchFile, { leaseId: authority.leaseId, report: result });
+        await atomicJSON(latchFile, validateLatch({ ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: task.attemptId, report: result }));
         await mkdirPrivate(path.join(dir, 'inbox'));
         await atomicJSON(path.join(dir, 'inbox', `${result.reportId}.json`), result);
         await telemetry(ctx);
@@ -129,7 +134,7 @@ export function registerWorker(pi, env = process.env) {
     assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
     return { systemPrompt: `${event.systemPrompt}\n\n${WORKER_GUIDE}`, message: {
       customType: 'fabric-pair.task-state', content: statePacket(authority, report), display: false,
-      details: { leaseId: authority.leaseId, planRevision: authority.task.planRevision }
+      details: { ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: authority.task.attemptId, planRevision: authority.task.planRevision }
     } };
   });
   pi.on('turn_start', async (_event, ctx) => {

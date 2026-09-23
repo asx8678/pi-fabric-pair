@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "useUnknownInCatchVariables": true,
+    "skipLibCheck": false,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.js"]
+}

@@ -15,20 +15,21 @@ JSONL RPC rather than inheriting private fields from its `RpcClient`: the adapte
 needs access to extension UI replies, process ownership, uncertain-response
 handling, and bounded stream parsing. This is not a new wire protocol or gRPC.
 
+`src/contracts.js` is the runtime trust boundary for decoded coordination data. It keeps the persisted-state version separate from the wire version, validates exact state/policy/limit/authority/latch/report shapes, binds latch and nested report identities, and performs only explicit known-legacy migration. Present malformed or exhausted identity counters fail closed rather than being normalized. Static types do not replace these checks.
+
 ## Normal workflow
 
 1. Main dispatches a work order with a client request ID and complete bounded plan.
 2. Controller checks Main/worker prerequisites, selects a retained worker, checks
    overlap with active workers, and snapshots the initial source state.
-3. Controller writes an implementation authority containing the exact task, plan
-   revision, step, model and lease. A `/pair-bridge load` command refreshes worker
+3. Controller writes a validated implementation authority containing the exact task, plan
+   revision, step, model, owner epoch, worker generation, task attempt, lease, assignment policy and assignment limits. The Worker validates it again before use. A `/pair-bridge load` command refreshes worker
    state without invoking a model. The work prompt is then sent once.
 4. Worker uses normal Fabric/Fovea and returns a structured `pair_report` tool call.
-5. The bridge latches that lease before publishing a report into a private local
+5. The bridge latches that epoch/generation/attempt/lease tuple before publishing a report into a private local
    outbox. Later tool calls under the same lease are blocked. A UI notification is
    only a wakeup; the outbox is authoritative.
-6. Controller validates the incarnation nonce, owner, worker/session identity,
-   lease, plan revision, task, step, schema, and payload hash.
+6. Controller validates the decoded report envelope before reading identities, then checks the incarnation nonce, owner session/epoch, worker slot/generation, session, task attempt/lease, plan revision, step, payload schema, and payload hash.
 7. Controller waits for the native settled event, runs preconfigured checks, and
    freezes/rechecks a source snapshot. It does not review a moving checkpoint.
 8. Main gets a compact custom follow-up in its current conversation. No entire
@@ -36,7 +37,7 @@ handling, and bounded stream parsing. This is not a new wire protocol or gRPC.
 9. Main retrieves immutable evidence, then answers, approves, revises or cancels
    through the decision tool. Approval binds to the snapshot hash and requires the
    live source snapshot still to match.
-10. A continuation grants a fresh lease only after the previous worker run has
+10. A continuation grants a fresh attempt ID and lease only after the previous worker run has
     settled and native readiness has been rechecked. Completion revokes authority
     but leaves the process/session open.
 
@@ -68,13 +69,13 @@ Revision count is per task, not an unlimited count reset at every checkpoint.
 
 The workspace/Main-session identity selects a private state directory. A PID
 ownership lock prevents two live controllers attaching to the same state. Failed
-initialization releases its lock. A dead owner can be reconciled on restart.
+initialization releases its lock. Controller replacement advances a durable owner epoch; each worker process replacement advances its generation. A dead owner can be reconciled on restart.
 State files are atomically replaced with restrictive permissions; this is not a
 transactional database or a distributed exactly-once guarantee.
 
 Stored data includes:
 
-- `state.json`: workers, current task, request IDs, decisions and delivery records.
+- `state.json`: owner epoch, worker generations, task attempts, request IDs, decisions and delivery operation records.
 - `workers/<id>/sessions/`: Pi-owned session JSONL files.
 - `workers/<id>/authority.json`: current controller-issued implementation lease.
 - `workers/<id>/latch.json`: worker report already committed for the lease.
