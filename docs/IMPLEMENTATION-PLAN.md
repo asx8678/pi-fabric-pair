@@ -1,6 +1,6 @@
 # Implementation plan — remediate and qualify Fabric Pair V1
 
-**Status:** ready for implementation review/approval; no production changes made by preparing this plan.
+**Status:** implementation in progress; first safety slice committed as `7583104`. No R0–R7 package is yet certified complete.
 
 **Scope:** [SCOPE-OF-WORK.md](SCOPE-OF-WORK.md).
 
@@ -9,6 +9,12 @@
 **Principle:** retain the working architecture; prove safety-critical integration before expanding features.
 
 R0–R7 below are **remediation work packages**, not assertions that the original handoff's P0–P7 were completed.
+
+## Current checkpoint
+
+The first slice implements explicit opt-in, one live/unresolved worker, narrow Fabric profile restrictions, sequential post-report abort, Pi-owned idle-session persistence, symlink-ancestor rejection and batch-level verification identity. Existing evidence is 59 offline tests and five deterministic native scenarios, not full V1 qualification.
+
+The source-reviewed remaining scope and exit checks are in [SCOPE-OF-WORK.md §8](SCOPE-OF-WORK.md#8-remaining-scope-after-the-first-safety-slice). Start with R1 migrations/shared contracts while closing R0 effect-coverage feasibility, then R2/R4/R3 safety, R5 cooperation, and R6/R7 qualification. Additional OS/runtime profiles and separately budgeted paid evidence are not mandatory for a deliberately macOS-only first release.
 
 ## 1. Dependency order and working method
 
@@ -27,7 +33,7 @@ R0: public-interface feasibility + reproducible failing regressions
 R3's isolated evidence work can proceed during an R0 integration blocker. R2 and R4 share grant/ownership contracts: agree those in R1 and integrate sequentially where they touch the same controller transitions. No phase may advertise a supported profile before the relevant native gates pass.
 
 - Work only in `pi-fabric-pair` and disposable fixtures. Do not mutate `source refernce` or installed packages.
-- Work from the existing clean source-control baseline (`054952d`, `Initial commit`). Keep planning documents and implementation edits visible as uncommitted work until the owner requests commits; do not commit unrelated workspace content.
+- Original baseline: `054952d` (`Initial commit`). The owner-authorized first implementation slice is `7583104`; use it as the remaining-work baseline. Follow the user's commit/push policy and never include unrelated workspace content.
 - Keep a small change per invariant with regression evidence; follow the user's commit policy.
 - Preserve the original acceptance wording/layers. Update ledger status with test names, version/build identities, commands and redacted artifacts.
 - Prefer existing modules; extract a small state/authorization helper only when it gives transitions an independent test boundary. Do not add a generic workflow engine or new backend.
@@ -176,9 +182,9 @@ A supported mechanism demonstrated in a small harness is the R0 feasibility exit
 
 ## 10. Proposed verification commands and final handoff
 
-Existing commands: `npm test`, `npm run check`, `npm run pack:check`. The last is only a tarball dry-run; `test:live` currently checks startup/identity only.
+Existing commands: `npm test`, `npm run check`, `npm run test:native`, `npm run pack:check`. The native command covers five deterministic safety/retention scenarios; the last command is only a tarball dry-run. `test:live` currently checks startup/identity only.
 
-Add clearly separated commands during implementation: `test:unit`, `test:rpc`, `test:native` (real stack, deterministic provider), `test:tui`, `test:package`, and `typecheck`. Keep `npm test` offline; native tests must resolve an explicitly configured isolated profile and fail clearly if prerequisites are missing. Paid tests must use a separate opt-in command/budget, never default CI.
+Add clearly separated commands during implementation: `test:unit`, `test:rpc`, `test:tui`, `test:package`, and `typecheck`; extend the existing `test:native` to the full deterministic Main/Worker matrix. Keep `npm test` offline; native tests must resolve an explicitly configured isolated profile and fail clearly if prerequisites are missing. Paid tests must use a separate opt-in command/budget, never default CI.
 
 Run the smallest relevant checks for each change; rerun broad native/packaging qualification at the release boundary. Do not repeatedly rerun unchanged passing tests as a substitute for closing a failed invariant.
 

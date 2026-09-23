@@ -1,6 +1,6 @@
 # Scope of work — qualify Fabric Pair V1
 
-**Status:** proposed remediation scope; not an implementation or release certification.
+**Status:** implementation in progress; first safety slice committed as `7583104`. Not a V1 release certification.
 
 **Baseline:** submitted `pi-fabric-pair` 0.1.0, the original handoff, and the review performed in this conversation.
 
@@ -28,7 +28,9 @@ The pre-implementation review ran **55 offline tests** and reproduced three nati
 
 Implemented so far: disabled-by-default opt-in, one live/unresolved worker across preserved slots, unsupported read-only Fabric rejection, post-report outer-invocation abort, explicit-background rejection, required zero shell auto-spill/no agent recursion, Pi-owned empty-session materialization, symlink-ancestor evidence rejection, snapshot-bound verification, and exact Fovea read-tool names. This is progress evidence, not whole-matrix release certification; admitted-effect concurrency, Main writer coverage, branch fencing, lifecycle semantics, queues/budgets, UI/permissions/context, and packaging installation gates remain.
 
-## 3. Mandatory defect remediation
+## 3. Original defects and remaining remediation
+
+The table records the original review findings, not eleven unchanged failures. Narrow regression fixes for DEF-01–DEF-05 and DEF-09 are recorded in section 2 and the acceptance ledger; remaining coverage and product work are prioritized in section 8. No remediation package is certified complete.
 
 | ID | Work item and observed gap | Primary code | Phase |
 |---|---|---|---|
@@ -40,7 +42,7 @@ Implemented so far: disabled-by-default opt-in, one live/unresolved worker acros
 | DEF-06 | Fence ownership on same-session `/tree` navigation. No branch event/epoch currently invalidates old grants. Source finding; native reproduction still required. | `src/main.js`, `src/controller.js`, `src/worker.js` | R4 |
 | DEF-07 | Make stop sticky and implement distinct on/off/pause/resume semantics. Dispatch currently restarts a stopped worker; disabling leaves its grant active. | `src/main.js`, `src/controller.js`, `src/config.js` | R1, R4 |
 | DEF-08 | Exclude human waiting from active execution budgets. Review waiting currently consumes `taskTimeoutMs`. | `src/metrics.js`, `src/controller.js` | R5 |
-| DEF-09 | Use real Fovea tool names and prove coverage. Current read-only classification rejects `fovea_sketch` and `fovea_dwell`. | `src/native.js`, tests | R2, R6 |
+| DEF-09 | Use real Fovea tool names and prove coverage. The original classifier rejected `fovea_sketch` and `fovea_dwell`; the names are now corrected, but native root/parser coverage remains. | `src/native.js`, tests | R2, R6 |
 | DEF-10 | Enforce Main's single-writer policy across the supported effect surface, not just direct edit/write names. | `src/main.js`, capability-profile integration | R2 |
 | DEF-11 | Complete bounded cooperation: queued tasks/reviews, report limits, per-step revisions, plan revisions, escalation and delivery recovery. | `src/controller.js`, `src/schema.js`, `src/config.js` | R4, R5 |
 
@@ -69,7 +71,7 @@ No Pi/Fabric/Fovea source, installed dependency, production settings or credenti
 
 ## 6. Proposed compatibility decisions
 
-These are implementation recommendations, not changes already made:
+Unless explicitly marked implemented below, these remain recommendations requiring a recorded compatibility decision:
 
 | Decision | Recommendation / required treatment |
 |---|---|
@@ -97,3 +99,38 @@ Completion means:
 6. No upstream modifications, unwanted model calls, hidden privilege grants or fabricated cost claims.
 
 Do not assign a firm delivery date before R0 establishes the public API path. The critical uncertainty is feasibility of enforcement/persistence, not the amount of UI work.
+
+## 8. Remaining scope after the first safety slice
+
+**Reviewed baseline:** `7583104` on `main`. The existing 59 offline passes and five deterministic native passes cover narrow scenarios; they do not close R0–R7. This review changes planning/evidence records only, not runtime behavior.
+
+### Release boundary
+
+- **Required for the first V1:** all applicable core ledger rows on one explicitly advertised Node 24+/macOS Pi/Fabric/Fovea profile. Main-write authorization, known-effect reconciliation, ownership fencing and recovery are release blockers, not optional hardening.
+- **Separate profile expansion:** Linux, Windows, Bun and additional upstream/provider combinations need their own applicable qualification before being advertised. They do not block a deliberately macOS-only release. Unsafe effect/configuration profiles must still be rejected; an untested OS is not automatically certified by the package manifest.
+- **Optional, separately authorized evidence:** paid live-provider workflows and cost/cache benchmarks (H06–H07). Require an explicit provider/budget decision; do not include them in default CI or claim savings without measurements. Deterministic native Main/Worker qualification remains mandatory.
+- **Still VNext:** parallel workers/investigators, parallel worktree writers and integration/merge automation. Do not expand these while completing the one-worker invariants.
+
+### Required work packages and exit checks
+
+Paths below are relative to the package root. References identify the inspected baseline, not new implementation claims.
+
+| Work package | Remaining scope and source witness | Completion evidence |
+|---|---|---|
+| **R1 — Configuration, consent and contracts** | `src/config.js:19–75` validates only version 1, merges global/trusted project values, and saves the effective object. Add versioned migration/import with backup and dry-run, filename-conflict handling, field provenance and scope-safe saves. Distinguish legacy persisted `enabled:true` from deliberate new consent. Complete role guards, review-policy aliases, host-owned identity/report contracts, native effort validation, strict checking and a pinned development lockfile. | A02, A04–A07 and contract tests: old/current/handoff input, untrusted project, conflict, malformed role, invalid effort, cancelled settings and no-inference opt-in. Preserve configured slots/history; do not silently reinterpret `adaptive`. |
+| **R0/R2 — Main authorization and admitted effects** | `src/main.js:152–156` gates only direct mutation names. `src/controller.js:307–319` uses settlement/idle/compaction observations, and `src/worker.js` retains a single `currentTool`, not an operation barrier. Prove a public enforcement mechanism or an immutable restricted surface for Main and Worker; close admission atomically and reconcile every admitted call/job by grant/generation before evidence capture. Include profile widening, recursion, sibling calls, cancellation and another Pair owner in the same workspace. | E01–E04, E12, F10, H11 with real native/captured/provider paths. Adversarial simultaneous calls must finish or become explicitly uncertain before review; sequential post-report abort alone is insufficient. Missing public coverage is a no-go requiring rejection or a separately approved upstream request. |
+| **R3 — Finish evidence qualification** | Symlink-ancestor and batch-level mutation regressions pass. `src/evidence.js:163–175` still runs checks without per-command source identity; `src/controller.js:344–366` compares only around the whole batch. Add identity-bound results and checks between commands, continuation-time revalidation, path-swap/storage integrity cases, dirty/mode/comment/binary/rename coverage and explicit omissions. | E05–E11, including mutation followed by restoration within a batch, stale approval during a readiness wait, outside-path sentinel exclusion and dirty-user-change preservation. No claim of an OS sandbox or immunity to arbitrary hostile filesystem races. |
+| **R1/R4 — Branch and generation fencing** | `src/main.js:38–43` binds by session/root; its event registrations have no same-session tree-navigation fence. Existing worker nonces/task leases do not replace owner epochs. Define durable owner epoch, worker generation and delivery-operation identities, then carry them through grants, reports, decisions and rebinds. | C08–C11, D12–D13, H01–H02: native `/tree`, fork/new/reload, stale queued reports/decisions and competing owners cannot renew obsolete authority. Normal message progression must not invalidate legitimate work. |
+| **R4 — Lifecycle, transport and crash recovery** | `stopUnlocked` closes a process without a durable dispatch hold; `resume` renews a lease instead of restoring a pending question/review as waiting. Add distinct on/off/start/stop/pause/resume semantics, resource deduplication, conservative session observations, durable delivery reconciliation, schema-validated state, bounded transport/UI buffers and idempotent owned-process shutdown. | B02–B13, C01–C12, H01–H03: three native assignments retain identity/PID during normal use; explicit restart retains conversation, not PID. Crash windows, missing history, parent death, disk failure, negative/late RPC responses and cancellation never cause blind replay or kill an unrelated PID. |
+| **R5 — Queues, policies and budgets** | `dispatchUnlocked` rejects another unresolved assignment rather than queueing it. `src/metrics.js:19–24` counts time since `startedAt`; `resume` resets that timestamp/turns and copies current policy. Implement finite durable task/review queues, UTF-8 report limits, per-step revisions, plan revisions, `needs_user`, bounded report-only repair and deduplicated delivery. Accumulate active time by state, excluding review/question/permission/queue/paused waits without erasing prior work on resume. | D01–D15 and G15 with fake-clock and crash/replay tests; overflow is explicit backpressure, approvals cannot advance twice, resumed work cannot reset budgets, and task policy remains immutable except explicitly authorized changes. |
+| **R6 — Context, permissions, native UI and accounting** | Existing registration/mock tests are not native qualification. Complete real Main/Worker compaction and recovery, bounded/deduplicated restoration, actual Fovea root/parser coverage, all four permission-dialog paths, cancellation/rebind, pending settings, native effort/reviewer observations, usage-event deduplication and narrow/ASCII/theme/input behavior. | F01–F15 and G01–G15 at their specified layers: no hidden inference/warmer, no privilege from code approval, no lost decision during compaction, no misleading unknown cost/cache data, and UI remains cosmetic. |
+| **R7 — Installable release and evidence** | `pack:check` is a dry-run only. Produce/inspect a real tarball; install in a fresh isolated profile outside the source tree; verify imports, skills, one-copy resource loading, disable/removal and preserved histories. Add opt-in redacted diagnostics and update every public schema/example/skill/doc against actual behavior. | A01, A11–A12, G16, H04–H05 plus the full ledger: deterministic native Main-and-Worker plan/question/revision/final workflow, native TUI checks, supported/rejected-profile evidence and durable sanitized artifacts tied to exact source/build identities. |
+
+### Recommended execution order
+
+1. **Next implementation slice: R1 contracts and migration.** Settle compatibility decisions and define shared epoch/generation/grant/delivery/hold contracts. Keep GATE-A/GATE-B feasibility probes active in parallel; five green native scenarios do not settle those gates.
+2. **Safety slice: R2 plus R4 ownership/lifecycle, with R3 evidence completion.** Integrate shared controller transitions sequentially. Do not proceed to a release claim if admitted effects or stale ownership can bypass the barrier.
+3. **Cooperation slice: R5.** Build queues, review policies and active-only budgets on the proven state/ownership transitions; do not paper over missing recovery with retries.
+4. **Qualification slice: R6 then R7.** Complete native context/permission/UI/accounting evidence, clean installation/removal and the full applicable acceptance ledger.
+
+Each slice needs small invariant-focused commits, targeted tests and direct behavioral probes. Keep required-but-unrun rows open. The quoted outstanding list is a summary, not permission to omit R3 evidence cases, strict checking, resource selection, context/permissions or accounting.

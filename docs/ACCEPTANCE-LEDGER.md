@@ -1,6 +1,6 @@
 # V1 acceptance ledger
 
-**Status:** baseline/planning ledger, not a pass report. No remediation phase is marked complete.
+**Status:** partial implementation evidence through `7583104`, not a release pass report. No remediation phase is marked complete.
 
 **Plan:** [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md). **Scope:** [SCOPE-OF-WORK.md](SCOPE-OF-WORK.md).
 
@@ -10,7 +10,7 @@ This ledger preserves every required-result row and test layer from the original
 
 - U = unit, R = fake RPC child, N = actual Pi/Fabric/Fovea with deterministic provider, T = terminal/package, L = separately authorized paid-provider evidence.
 - The owner column identifies the primary work package; R7 checks every applicable V1 row, including cross-phase dependencies.
-- Baseline notes describe the prior review. Existing 55 passing offline tests do not certify the same behavior at N/T layers. A native failure is not waived because its unit counterpart passes.
+- Notes distinguish the original 55-test review baseline from current progress: 59 offline tests and five narrow deterministic native scenarios. Neither pass count certifies the remaining N/T behavior. A native failure is not waived because its unit counterpart passes. See [remaining scope](SCOPE-OF-WORK.md#8-remaining-scope-after-the-first-safety-slice).
 - Replace/add evidence as work proceeds: source revision/hash, test name, command, OS/Node, exact runtime/build/resource identities, observed IDs/PIDs, result, sanitized artifact path and limitations. Do not include credentials or full source/transcripts in shared evidence.
 - Allowed final statuses: pass, fail, blocked, or explicitly rejected unsupported profile. Skipped/unrun required tests cannot be marked pass. An unsafe supported profile is a failure, not a documentation-only exception.
 
@@ -26,7 +26,7 @@ This ledger preserves every required-result row and test layer from the original
 | A06 | V1 | U | R1 | Config exists; migration/provenance incomplete | Documented precedence and provenance; native context settings remain upstream-owned. |
 | A07 | V1 | N | R1 | Unqualified; required-layer evidence pending | No implied trust, no unauthorized config or resource execution. |
 | A08 | V1 | N | R4 | Native narrow-profile startup only; dedup not qualified | One canonical Fabric/Fovea/Pair copy per runtime; duplicate hooks are not installed. |
-| A09 | V1 | N | R0 | Partial native startup/capture; profile/persistence gaps | Actual session/model/effort/root/resource identities validated; registration is not misreported as remote auth success. |
+| A09 | V1 | N | R0 | Native startup, capture and idle persistence pass narrowly; full effective-profile/identity matrix remains | Actual session/model/effort/root/resource identities validated; registration is not misreported as remote auth success. |
 | A10 | V1 | N | R6 | Registration only; parser coverage not qualified | Coverage/error is surfaced; required capability failures block delegation, not hidden success. |
 | A11 | V1 | T | R7 | Pack dry-run only; clean installation pending | Runtime imports, extension entry and skills resolve without hoisted dev dependencies. |
 | A12 | V1 | T | R7 | Unqualified; required-layer evidence pending | Upstream Pi/Fabric/Fovea and original TUI remain usable; live owned work is handled explicitly. |
@@ -81,7 +81,7 @@ This ledger preserves every required-result row and test layer from the original
 | E09 | V1 | N | R3 | Baseline capture exists; native dirty-workspace proof pending | Changes preserved; no automatic reset/stash/stage/commit and no false attribution. |
 | E10 | V1 | U,N | R3 | Claim/observed distinction exists; full-layer tests pending | Status remains worker-reported, not verified-pass. |
 | E11 | V1 | U,N | R3 | U regression passes: a mutating configured check interrupts and publishes no checkpoint; native cases remain | Cannot certify the newer checkpoint without rerun/revalidation. |
-| E12 | V1 | N | R2 | Limitations documented; unsafe profiles not rejected | Explicit limitation/manual review; no claim local file hashes prove all effects. |
+| E12 | V1 | N | R2 | Read-only/auto-spill profiles reject; arbitrary external effects and admitted concurrency remain unqualified | Explicit limitation/manual review; no claim local file hashes prove all effects. |
 | F01 | V1 | N | R6 | Mock compaction only; native engine proof pending | Fabric engine metadata observed; same worker session/PID; task authority retained. |
 | F02 | V1 | N | R6 | Mock restoration only; native Main proof pending | Worker unaffected; current report/plan/constraints restored for next real review. |
 | F03 | V1 | U,N | R6 | Unqualified; required-layer evidence pending | Per-model native settings applied independently; no copied Main token limit. |
@@ -116,14 +116,14 @@ This ledger preserves every required-result row and test layer from the original
 | H01 | V1 | U,R | R4 | Durable outbox exists; crash-window qualification pending | Parent recovers report once and does not lose required review. |
 | H02 | V1 | U,R | R4 | Uncertain outcomes acknowledged; decision/send reconciliation pending | Reconcile worker grant before deciding to resend; no duplicated mutation. |
 | H03 | V1 | U | R4 | Offline corrupt-init test; disk-full/journal matrix pending | Explicit error/fail-closed authority; damaged data preserved for diagnosis. |
-| H04 | V1 | T | R7 | Baseline 27-file dry-run passed; actual archive recheck pending | No credentials, sessions, state, node_modules or upstream code copies accidentally included. |
+| H04 | V1 | T | R7 | Current 33-entry dry-run passes; actual tarball inspection/clean installation remains | No credentials, sessions, state, node_modules or upstream code copies accidentally included. |
 | H05 | V1 | T,N | R7 | No fully qualified supported/unsupported profile pair | Supported stack passes; unsupported profile fails with actionable compatibility detail. |
 | H06 | Opt-in evidence | L | Optional later | Not run; separate authorization required | End-to-end proof with exact versions and authorized spend; same conversations continue. |
 | H07 | Opt-in evidence | L | Optional later | Not run; separate authorization required | Quality and total billable work reported; no savings claim from cache ratio alone. |
 | H08 | VNext | N | Deferred VNext | Deferred; not a V1 feature | Reports route correctly; independent contexts; one Main review queue; bounded concurrency. |
 | H09 | VNext | N | Deferred VNext | Deferred; not a V1 feature | Other worker's session, Fovea view and authority unaffected. |
 | H10 | VNext | N | Deferred VNext | Deferred; not a V1 feature | Separate evidence/base/branch, no shared session file; combined tests after serialized integration. |
-| H11 | V1 | U,N | R2 | Name-gate unit test only; real provider route unqualified | Rejected under V1/V1.1 policy; no uncontrolled recursion. |
+| H11 | V1 | U,N | R2 | Name-gate and maxDepth readiness checks pass offline; real recursion/profile-widening routes unqualified | Rejected under V1/V1.1 policy; no uncontrolled recursion. |
 
 ## Supplemental regression ledger
 
@@ -145,7 +145,7 @@ These make the review findings explicit where an original acceptance row covers 
 
 ## Evidence portability
 
-The initial review's temporary artifacts were `/tmp/pair-review.3zLc5G/probes.mjs`, `offline-provider.js`, `native-probe.mjs`, and native result JSON files. They may disappear: R0 must promote portable reproductions into the project test suite and record fresh results. Release qualification must not depend on those absolute paths.
+The initial review's `/tmp` scripts were replaced by the committed `scripts/native-regressions.js` and `scripts/fixtures/native-offline-provider.js`; `npm run test:native` reproduces five narrow scenarios. Local native result files are still temporary, not durable release artifacts. R7 must retain sanitized, source/build-linked evidence for the full matrix. Release qualification must not depend on the initial review's absolute paths.
 
 ## Final release gate
 
