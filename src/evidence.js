@@ -41,6 +41,30 @@ export async function repositoryRoot(cwd) {
   try { return canonical((await git(cwd, ['rev-parse', '--show-toplevel'])).trim()); }
   catch { throw new Error(`Pair requires a Git working tree for immutable review evidence: ${cwd}`); }
 }
+async function workspaceEntry(root, name) {
+  assert(!path.isAbsolute(name), `Unsafe absolute Git path: ${name}`);
+  const absolute = path.resolve(root, name);
+  assert(inside(root, absolute) && absolute !== root, `Unsafe Git path: ${name}`);
+  const relative = path.relative(root, absolute);
+  const parts = relative.split(path.sep).filter(Boolean);
+  let cursor = root;
+  for (const part of parts.slice(0, -1)) {
+    cursor = path.join(cursor, part);
+    let ancestor;
+    try { ancestor = await fs.lstat(cursor); }
+    catch (error) { if (error.code === 'ENOENT') return { absolute, missing: true }; throw error; }
+    assert(ancestor.isDirectory() && !ancestor.isSymbolicLink(), `Unsafe symlink or non-directory ancestor in evidence path: ${name}`);
+  }
+  let stat;
+  try { stat = await fs.lstat(absolute); }
+  catch (error) { if (error.code === 'ENOENT') return { absolute, missing: true }; throw error; }
+  return { absolute, stat, missing: false };
+}
+function sameEntry(before, after) {
+  return before.dev === after.dev && before.ino === after.ino && before.mode === after.mode &&
+    before.size === after.size && before.mtimeMs === after.mtimeMs;
+}
+
 export class Evidence {
   constructor(baseDir, limits) { this.baseDir = baseDir; this.blobs = path.join(baseDir, 'blobs'); this.limits = limits; }
   async capture(root) {
@@ -51,28 +75,42 @@ export class Evidence {
     const head = headResult.code === 0 ? headResult.stdout.trim() : null;
     let total = 0; const entries = [];
     for (const name of names) {
-      assert(!path.isAbsolute(name) && inside(root, path.resolve(root, name)), 'Unsafe Git path');
-      const absolute = path.join(root, name);
-      let stat;
-      try { stat = await fs.lstat(absolute); } catch (e) { if (e.code === 'ENOENT') { entries.push({ path: name, kind: 'missing', sha: null, size: 0, executable: false }); continue; } throw e; }
+      const entry = await workspaceEntry(root, name);
+      if (entry.missing) { entries.push({ path: name, kind: 'missing', sha: null, size: 0, executable: false }); continue; }
+      const { absolute, stat } = entry;
       assert(!stat.isDirectory(), `Git submodule/directory ${name} requires its own Pair workspace; review evidence does not silently skip it`);
       assert(stat.isFile() || stat.isSymbolicLink(), `Unsupported file type: ${name}`);
-      total += stat.size; assert(total <= this.limits.maxTotalBytes, 'Workspace exceeds evidence.maxTotalBytes');
       if (stat.isSymbolicLink()) {
-        const bytes = Buffer.from(await fs.readlink(absolute)); const sha = digest(bytes.toString('utf8'));
+        const bytes = Buffer.from(await fs.readlink(absolute));
+        const stable = await workspaceEntry(root, name);
+        assert(!stable.missing && stable.stat.isSymbolicLink() && sameEntry(stat, stable.stat), `Symlink changed while capturing evidence: ${name}`);
+        total += bytes.length; assert(total <= this.limits.maxTotalBytes, 'Workspace exceeds evidence.maxTotalBytes');
+        const sha = digest(bytes.toString('utf8'));
         if (!await exists(path.join(this.blobs, sha))) await fs.writeFile(path.join(this.blobs, sha), bytes, { flag: 'wx', mode: 0o600 }).catch(e => { if (e.code !== 'EEXIST') throw e; });
         entries.push({ path: name, kind: 'symlink', sha, size: bytes.length, executable: false }); continue;
       }
+      const remaining = this.limits.maxTotalBytes - total;
+      assert(stat.size <= remaining, 'Workspace exceeds evidence.maxTotalBytes');
       const tmp = path.join(this.blobs, `.tmp-${randomUUID()}`);
       const handle = await fs.open(absolute, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
       try {
-        const before = await handle.stat(); const hash = createHash('sha256'); let actual = 0;
-        const transform = new Transform({ transform(chunk, _encoding, done) { actual += chunk.length; hash.update(chunk); done(null, chunk); } });
+        const before = await handle.stat();
+        assert(sameEntry(stat, before) && before.isFile(), `Evidence path changed before capture: ${name}`);
+        const hash = createHash('sha256'); let actual = 0;
+        const transform = new Transform({ transform(chunk, _encoding, done) {
+          actual += chunk.length;
+          if (actual > remaining) { done(new Error('Workspace exceeds evidence.maxTotalBytes while reading')); return; }
+          hash.update(chunk); done(null, chunk);
+        } });
         await pipeline(handle.createReadStream({ autoClose: false }), transform, createWriteStream(tmp, { flags: 'wx', mode: 0o600 }));
         const after = await handle.stat();
-        assert(before.ino === after.ino && before.size === after.size && before.mtimeMs === after.mtimeMs && actual === after.size, `File changed while capturing evidence: ${name}`);
+        const stable = await workspaceEntry(root, name);
+        assert(sameEntry(before, after) && !stable.missing && stable.stat.isFile() && sameEntry(after, stable.stat) && actual === after.size, `File or evidence path changed while capturing: ${name}`);
+        const resolved = await fs.realpath(absolute);
+        assert(inside(root, resolved), `Evidence path resolves outside the workspace: ${name}`);
         const sha = hash.digest('hex');
         if (await exists(path.join(this.blobs, sha))) await fs.unlink(tmp); else await fs.rename(tmp, path.join(this.blobs, sha));
+        total += actual;
         entries.push({ path: name, kind: 'file', sha, size: actual, executable: (after.mode & 0o111) !== 0 });
       } finally { await handle.close(); await fs.unlink(tmp).catch(() => {}); }
     }

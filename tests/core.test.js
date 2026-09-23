@@ -4,7 +4,7 @@ import { DEFAULTS, validateConfig } from '../src/config.js';
 import { validateDispatch, validateReport, validateDecision } from '../src/schema.js';
 import { merge, parseJSONC, safeId, cleanText } from '../src/util.js';
 import { addUsage, normalizedUsage, limitExceeded } from '../src/metrics.js';
-import { gateTool, checkReadiness, sourcePaths } from '../src/native.js';
+import { gateTool, checkReadiness, requestsDetachedEffect, sourcePaths } from '../src/native.js';
 import { indicator, symbol } from '../src/ui.js';
 import { assignment } from './helpers.js';
 
@@ -27,6 +27,7 @@ test('question must contain an actual question; approval must bind a hash', () =
   assert.throws(() => validateDecision({ workerId: 'w', taskId: 't', reportId: 'r', action: 'approve', feedback: 'fine' }), /checkpointHash/);
 });
 test('settings reject invalid limits, duplicate workers and unknown top-level options', () => {
+  assert.equal(DEFAULTS.enabled, false);
   assert.throws(() => validateConfig({ maxWorkers: 0 }), /maxWorkers/);
   assert.throws(() => validateConfig({ typo: true }), /Unknown/);
   assert.throws(() => validateConfig({ workers: [DEFAULTS.workers[0], DEFAULTS.workers[0]] }), /Duplicate/);
@@ -51,8 +52,14 @@ test('tool gate blocks all work without a lease and after a report', () => {
   }
 });
 test('read-only gate classifies replayed Fabric calls and refuses shell/delegation', () => {
-  for (const name of ['read', 'extensions.fovea_focus', 'tools.list', 'fabric_exec']) assert.equal(gateTool(name, { phase: 'running' }, false, true), undefined);
+  for (const name of ['read', 'extensions.fovea_sketch', 'extensions.fovea_focus', 'extensions.fovea_dwell', 'extensions.fovea_impact', 'tools.list', 'fabric_exec']) assert.equal(gateTool(name, { phase: 'running' }, false, true), undefined);
   for (const name of ['bash', 'write', 'agents.run', 'extensions.subagent', 'mcp.db.execute']) assert.equal(gateTool(name, { phase: 'running' }, false, true)?.block, true);
+});
+test('explicit detached shell requests are identified before execution', () => {
+  assert.equal(requestsDetachedEffect('bash', { background: true }), true);
+  assert.equal(requestsDetachedEffect('powershell', { background: true }), true);
+  assert.equal(requestsDetachedEffect('bash', { background: false }), false);
+  assert.equal(requestsDetachedEffect('write', { background: true }), false);
 });
 test('writers also cannot recursively delegate', () => {
   assert.equal(gateTool('agents.spawn', { phase: 'running' }, false, false)?.block, true);
@@ -71,11 +78,14 @@ test('extension source selection does not mistake skills/prompts for extensions'
   assert.deepEqual(paths, ['/a/tool.ts', '/b/index.js']);
 });
 test('readiness fails closed for missing extensions, ephemeral sessions and enabled Prewalk', () => {
-  const p = { protocol: 1, cwd: '/repo', sessionId: 's', capabilities: { fabric: true, fovea: true, pairReport: true }, native: { prewalkDisabled: true } };
+  const p = { protocol: 1, cwd: '/repo', sessionId: 's', capabilities: { fabric: true, fovea: true, pairReport: true }, native: { prewalkDisabled: true, fabricShellHangMs: 0, fabricAgentMaxDepth: 0 } };
   const state = { sessionId: 's', sessionFile: '/session.jsonl', model: { provider: 'p', id: 'm' }, autoCompactionEnabled: true };
   const spec = { provider: 'p', model: 'm' };
   assert.doesNotThrow(() => checkReadiness(p, state, DEFAULTS, spec, '/repo'));
   assert.throws(() => checkReadiness({ ...p, capabilities: { ...p.capabilities, fovea: false } }, state, DEFAULTS, spec, '/repo'), /Fovea/);
   assert.throws(() => checkReadiness(p, { ...state, sessionFile: undefined }, DEFAULTS, spec, '/repo'), /persistence/);
-  assert.throws(() => checkReadiness({ ...p, native: { prewalkDisabled: false } }, state, DEFAULTS, spec, '/repo'), /Prewalk/);
+  assert.throws(() => checkReadiness({ ...p, native: { ...p.native, prewalkDisabled: false } }, state, DEFAULTS, spec, '/repo'), /Prewalk/);
+  assert.throws(() => checkReadiness(p, state, DEFAULTS, { ...spec, readOnly: true }, '/repo'), /UNSUPPORTED_PROFILE/);
+  assert.throws(() => checkReadiness({ ...p, native: { ...p.native, fabricShellHangMs: 100 } }, state, DEFAULTS, spec, '/repo'), /shellHangMs/);
+  assert.throws(() => checkReadiness({ ...p, native: { ...p.native, fabricAgentMaxDepth: 1 } }, state, DEFAULTS, spec, '/repo'), /maxDepth/);
 });

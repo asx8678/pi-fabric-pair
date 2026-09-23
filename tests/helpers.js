@@ -15,8 +15,8 @@ export async function fixture(t, options = {}) {
   await fs.writeFile(path.join(cwd, 'README.md'), 'fixture repository\n');
   await runCommand('git', ['add', '.'], { cwd }); await runCommand('git', ['commit', '-qm', 'fixture'], { cwd });
   await atomicJSON(path.join(home, 'settings.json'), { compaction: { enabled: true }, cacheWarming: 'off' });
-  await atomicJSON(path.join(home, 'fabric.json'), { prewalk: { enabled: false } });
-  const config = validateConfig(merge(DEFAULTS, { autoStart: false, runtime: { command: process.execPath, commandArgs: [mockPi], startupTimeoutMs: 10000, requestTimeoutMs: 3000, shutdownTimeoutMs: 1000 }, workers: [{ id: 'worker', provider: 'fixture', model: 'worker-model', effort: 'medium', cwd: null, readOnly: false }], ...options.config }));
+  await atomicJSON(path.join(home, 'fabric.json'), { prewalk: { enabled: false }, executor: { shellHangMs: 0 }, agents: { maxDepth: 0 } });
+  const config = validateConfig(merge(DEFAULTS, { enabled: true, autoStart: false, runtime: { command: process.execPath, commandArgs: [mockPi], startupTimeoutMs: 10000, requestTimeoutMs: 3000, shutdownTimeoutMs: 1000 }, workers: [{ id: 'worker', provider: 'fixture', model: 'worker-model', effort: 'medium', cwd: null, readOnly: false }], ...options.config }));
   const notices = [], warnings = [], dialogs = [];
   let c;
   function makeController(owner = 'main-session') {

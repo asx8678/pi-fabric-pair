@@ -15,18 +15,11 @@ container/OS/tool permissions for security-sensitive work.
 
 ## Authorization
 
-The human configures models, workspaces, read-only mode, verification argv, and
-limits. Main authorizes bounded implementation steps; that is distinct from the
-human's permission for commands or external actions. Worker UI requests are
-forwarded to the human. Missing UI means cancel/deny, never implicit approval.
+The human configures models, workspaces, verification argv, and limits. Main authorizes bounded implementation steps; that is distinct from the human's permission for commands or external actions. Worker UI requests are forwarded to the human. Missing UI means cancel/deny, never implicit approval.
 
-Read-only workers deny shell and unknown capability names by default. Writers
-are prevented from recursively invoking known agent/actor delegation surfaces.
-Direct file edits are checked against workspace boundaries and symlink escapes.
-Raw shell commands and external tool servers still need independent permission
-controls; a workflow gate cannot determine every possible shell side effect.
-Main's read-only-during-task option covers recognized direct mutation tools, not
-arbitrary shell execution. It is an ergonomic safeguard, not complete isolation.
+Pair is disabled by default and requires deliberate enablement. V1 qualifies one writer. A read-only worker with generic Fabric is rejected before inference because generic provider actions do not expose Pi's pre-effect `tool_call` hook. The writer profile requires Fabric `agents.maxDepth:0`, `executor.shellHangMs:0`, and disabled Prewalk. A successful `pair_report` aborts the containing Fabric invocation so subsequent provider calls cannot execute. Explicit background shells are blocked.
+
+Direct file edits are checked against workspace boundaries and symlink escapes. Raw shell commands and external tool servers still need independent permission controls; a workflow gate cannot determine every possible shell side effect. Main's read-only-during-task option covers recognized direct mutation tools, not arbitrary shell execution. It is an ergonomic safeguard, not complete isolation.
 
 ## Report handling
 
@@ -84,8 +77,7 @@ credentials or unrelated session directories.
 An unknown RPC outcome does not cause an automatic retry. A missing session file
 does not cause a blank replacement. Interruptions need explicit reconciliation.
 Cancellation and shutdown are best effort and do not roll back writes already
-performed. Long-running detached external jobs may outlive a tool unless managed
-by their own runtime. Native warming/provider requests can have already incurred
+performed. The qualified Fabric profile sets `executor.shellHangMs: 0` and blocks explicit background shell requests. Pair rejects nonzero auto-spill before inference and rechecks it before shell calls. An arbitrary shell can still daemonize work outside the tool contract; apply OS/container controls when that matters. Native warming/provider requests can have already incurred
 cost when a local stop is issued.
 
 Soft cost counters exclude unknown price categories, Main inference, native

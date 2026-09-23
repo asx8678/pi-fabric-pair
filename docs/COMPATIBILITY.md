@@ -1,9 +1,8 @@
 # Compatibility and inspected upstream contracts
 
-Inspected on **2026-09-23** using the public GitHub connector. No upstream source
-checkout, dependency tree, credentials, or patched application is bundled here.
-The build environment had no installed `pi` executable; it therefore could not
-run a real Pi/Fabric/Fovea inference test.
+Originally inspected on **2026-09-23** from the supplied reference sources. The current implementation was also exercised against installed Pi 0.87.1, Fabric 0.93.0, and Fovea 0.29.2 with a deterministic local provider on Node 24/macOS. No credentials, network request, paid inference, upstream patch, or installed-file modification was used.
+
+That native run qualifies the narrow scenarios in `docs/INTEGRATION_PROBE.md`, not every provider, operating system, terminal path, or live model workflow.
 
 ## Source targets
 
@@ -73,15 +72,9 @@ local integration test. No mock test can certify an upstream schema-loader chang
 
 ## Environment
 
-Target: Node >=24, because the inspected Fabric manifest requires that version.
-Offline tests in the build environment ran on Linux using Node 22.16.0 and Git
-2.47.3. The standalone Pair code runs there, but this does **not** lower Fabric's
-Node requirement. No claim of full-stack operation on Node 22 is made.
+Target: Node >=24, because Fabric 0.93.0 requires it. The current working-tree checks passed on Darwin 27.2.0 arm64, Node 24.21.0, and Apple Git 2.54.0. The historical source artifact also ran its earlier 55-test suite on Linux/Node 22, but that does **not** qualify the upstream Fabric stack on Node 22.
 
-macOS/Windows, Bun-compiled Pi, specific provider aliases, custom extensions,
-terminal input/rendering, and provider cache warming need local verification.
-Windows shell shims may need an executable/CLI-path configuration because Pair
-uses `shell:false`.
+The currently qualified native profile is explicitly enabled and uses one writer with persisted sessions, `prewalk.enabled:false`, `executor.shellHangMs:0`, and `agents.maxDepth:0`. Explicit background shells and read-only workers with generic Fabric are rejected. Windows/Linux native operation, Bun-compiled Pi, specific live providers, custom extension combinations, terminal input/rendering, and provider cache warming still need profile-specific verification.
 
 ## Upgrade checklist
 

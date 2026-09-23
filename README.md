@@ -12,24 +12,15 @@ JavaScript Pi extension. No build step is required.
 
 ## Release status
 
-Version **0.1.0**, source release. The implementation and offline tests are included.
-The tests run actual child processes and the actual Pair worker bridge, but their
-Pi/Fabric/Fovea host is a **protocol fixture**, not the real upstream applications.
-No live provider calls or full-stack runtime certification were performed in the
-build environment. Validate the small live workflow described in
-[Testing](docs/TESTING.md) before using valuable repositories or unattended work.
+Version **0.1.0**, implementation in progress. The current suite has 59 offline tests plus five deterministic native scenarios against Pi **0.87.1**, Fabric **0.93.0**, and Fovea **0.29.2** on Node 24/macOS. The native provider is local and makes no network or paid model request.
 
-The source contracts inspected for this release are Pi **0.87.1**, Fabric
-**0.93.0**, and Fovea **0.29.2**. These are inspection targets, not a claim that
-every combination of those packages and providers has passed integration tests.
-See [Compatibility](docs/COMPATIBILITY.md).
+Those scenarios qualify only the narrow single-writer startup/report/background/idle-session gates documented in [the integration probe](docs/INTEGRATION_PROBE.md). They are not a full live-provider, TUI, compaction, permission, or release certification. Validate the remaining workflow in [Testing](docs/TESTING.md) before using valuable repositories or unattended work. See [Compatibility](docs/COMPATIBILITY.md).
 
 ## What is implemented
 
 - Persistent Pi RPC subprocesses. Ending a task does not stop the worker, replace
   its conversation, switch Main's model, or request compaction.
-- Automatic startup after a worker model has been configured; one live worker by
-  default, up to eight explicitly configured slots.
+- Disabled by default; after explicit enablement, automatic startup is available once a worker model has been configured. V1 permits one live worker and one unresolved assignment. Up to eight configured slot identities are preserved for sequential use/future qualification, but parallel activation fails closed.
 - Work orders, questions, blockers, checkpoints, final review, approve/revise,
   cancellation, pause, explicit recovery, and duplicate-decision protection.
 - Durable controller state outside model context; nonce/session/task/lease-bound
@@ -39,8 +30,9 @@ See [Compatibility](docs/COMPATIBILITY.md).
   verified evidence.
 - Separate `/pair` settings/status dialogs and an optional tiny `M● W◐` widget.
   `/model` still belongs to Pi. Fabric's own UI is unchanged.
-- Worker provider/model/effort, review policy, report detail, budgets, worker
-  workspaces, and read-only configuration.
+- Worker provider/model/effort, review policy, report detail, budgets, and worker
+  workspaces. Read-only configuration is preserved, but a read-only worker with
+  generic Fabric providers is rejected until that profile has a pre-effect gate.
 - Fabric/Fovea registration checks and native Pi/Fabric context-management reuse.
   Pair does not implement a second compactor or cache warmer.
 - Local usage observations, real-event activity states, human permission-dialog
@@ -93,14 +85,13 @@ The ZIP does not bundle or modify those projects.
 ### One-time setup
 
 1. Use native `/model` to choose Main. Pair never selects it for you.
-2. Disable native Prewalk for Pair work with `/fabric prewalk --disable`.
-   Pair checks this persisted configuration and refuses conflicting delegation;
-   it does not silently edit Fabric settings. Re-enable Prewalk yourself when
-   returning to that independent workflow.
-3. Open `/pair settings`. Select the worker provider/model and supported effort.
-   Choose `milestones` to begin; keep final review required.
-4. Apply. With autostart enabled, Pair starts the worker and checks its session,
-   model, Fabric/Fovea registrations, and native compaction switch.
+2. Configure the worker's effective `fabric.json` with native Prewalk disabled, no shell auto-spill, and no recursive agents:
+   ```json
+   { "prewalk": { "enabled": false }, "executor": { "shellHangMs": 0 }, "agents": { "maxDepth": 0 } }
+   ```
+   Pair checks these persisted fields and refuses conflicting profiles; it does not silently edit Fabric settings. Re-enable/change them yourself when returning to an independent workflow.
+3. Open `/pair settings`, deliberately turn **Enabled for new work** on, and select one writer provider/model and supported effort. Choose `milestones` to begin; keep final review required. A read-only Fabric worker is currently rejected as unsupported.
+4. Apply. With autostart enabled, Pair starts the worker and checks its Pi-written session, model, Fabric/Fovea registrations, native compaction, and Fabric safety profile.
 5. Use `/pair doctor`, then try a small, disposable task.
 
 After setup, start `pi` normally. The configured worker starts automatically
@@ -249,18 +240,18 @@ not label worker claims as verified or claim that an empty list means tests ran.
 
 ## Multiple workers
 
-Default maximum: one. Configure explicit worker IDs, models, roles, and workspaces
-before raising the live-worker limit.
+V1's live-worker and unresolved-assignment maximum is one. Additional explicit worker IDs, models, and workspaces are preserved as sequential/future slots; raising the legacy `maxWorkers` field does not enable parallel activation.
 
-Read-only workers may share a repository. An active writer must not overlap
-another active worker's repository, even when that other worker is awaiting
-review. Use separate Git worktrees for parallel implementation. Pair does not
-create branches, merge changes, commit, push, or deploy for you.
+Read-only workers with required generic Fabric and every form of parallel
+activation—including separate Git worktrees—are currently rejected as
+`UNSUPPORTED_PROFILE`. Pair does not create branches, merge changes, commit,
+push, or deploy for you.
 
-Each worker retains its own process and conversation; reports are tagged and
-reviewed by one Main session. Starting extra workers does not make Main generate
-concurrently in multiple hidden copies. More workers also means additional
-context, memory, and potential provider usage.
+When selected sequentially, a configured slot retains its own persisted
+conversation; reports remain tagged and reviewed by one Main session. A prior
+assignment must be resolved and its retained process stopped before another slot
+can start. Each activated slot still has separate context, memory, and potential
+provider usage.
 
 ## Context, warming and cost
 

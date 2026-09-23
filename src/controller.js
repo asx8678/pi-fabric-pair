@@ -8,7 +8,7 @@ import { checkReadiness } from './native.js';
 import { validateConfig } from './config.js';
 import { validateDecision, validateDispatch, validateReport } from './schema.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
-import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, delay, digest, exists, inside, mkdirPrivate, overlap, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
+import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, delay, digest, exists, inside, mkdirPrivate, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
 
 const TERMINAL = new Set(['completed', 'cancelled']);
 const ENTRY = fileURLToPath(new URL('./extension.js', import.meta.url));
@@ -71,7 +71,9 @@ export class PairController extends EventEmitter {
   start(id) { return this.serial.run(() => this.startUnlocked(id)); }
   async startUnlocked(id) {
     assert(!this.closing, 'Pair is closing');
+    assert(this.config.enabled, 'Pair is disabled');
     const spec = clone(this.workerSpec(id)); assert(spec.provider && spec.model, 'Choose the worker provider/model in /pair settings first');
+    assert(!(spec.readOnly && this.config.requirements.fabric), 'UNSUPPORTED_PROFILE: read-only Pair workers cannot safely expose generic Fabric providers without a pre-effect authorization seam. Use the qualified single-writer profile.');
     const existing = this.handles.get(id);
     if (existing && !existing.rpc.closed) {
       const r = this.record(id);
@@ -87,7 +89,8 @@ export class PairController extends EventEmitter {
       }
       return r;
     }
-    assert([...this.handles.values()].filter(h => !h.rpc.closed).length < this.config.maxWorkers, 'Maximum live workers reached. Stop one or increase maxWorkers in settings.');
+    const liveWorkers = [...this.handles.values()].filter(h => !h.rpc.closed);
+    assert(liveWorkers.length === 0, 'UNSUPPORTED_PROFILE: Fabric Pair V1 supports one live worker. Stop the retained worker before starting another configured slot.');
     const cwd = await canonical(spec.cwd ? path.resolve(this.cwd, spec.cwd) : this.cwd);
     const repoRoot = await repositoryRoot(cwd);
     assert(!inside(repoRoot, path.resolve(this.dir)), 'Pair state must be outside the implementation working tree. Use a PI_CODING_AGENT_DIR outside this repository.');
@@ -102,8 +105,15 @@ export class PairController extends EventEmitter {
     const dir = this.workerDir(id); await mkdirPrivate(path.join(dir, 'sessions')); await mkdirPrivate(path.join(dir, 'inbox')); await mkdirPrivate(path.join(dir, 'archive'));
     await this.writeAuthority(id, 'idle');
     const nonce = uid('instance');
-    const args = [...this.config.runtime.commandArgs, '--mode', 'rpc', '--provider', spec.provider, '--model', spec.model, '--session-dir', path.join(dir, 'sessions')];
-    if (r.sessionFile && await exists(r.sessionFile)) args.push('--session', r.sessionFile);
+    // Pi intentionally persists ordinary new sessions only after an assistant message.
+    // Give the public --session option a private empty file so Pi itself writes the
+    // header at startup; Pair never fabricates JSONL or requests inference.
+    let requestedSessionFile = r.sessionFile;
+    if (!requestedSessionFile) {
+      requestedSessionFile = path.join(dir, 'sessions', `${uid('pair-session')}.jsonl`);
+      await fs.writeFile(requestedSessionFile, '', { flag: 'wx', mode: 0o600 });
+    }
+    const args = [...this.config.runtime.commandArgs, '--mode', 'rpc', '--provider', spec.provider, '--model', spec.model, '--session-dir', path.join(dir, 'sessions'), '--session', requestedSessionFile];
     if (!this.config.runtime.inheritExtensions) args.push('--no-extensions');
     const extensions = [...new Set([...(this.config.runtime.inheritExtensions ? this.sources : []), ...this.config.runtime.extraExtensions, ENTRY])];
     for (const extension of extensions) args.push('-e', extension);
@@ -129,7 +139,10 @@ export class PairController extends EventEmitter {
       rpc.start();
       const initial = await rpc.send('get_state', {}, this.config.runtime.startupTimeoutMs);
       assert(initial?.sessionId, 'Pi did not return a session identity');
-      if (r.sessionFile && await exists(r.sessionFile)) assert(initial.sessionId === r.sessionId, 'Pi reopened a different worker session');
+      assert(initial.sessionFile === requestedSessionFile, 'Pi did not bind the requested worker session file');
+      const materialized = await fs.stat(requestedSessionFile);
+      assert(materialized.isFile() && materialized.size > 0, 'Pi did not materialize the worker session header');
+      if (r.sessionId) assert(initial.sessionId === r.sessionId, 'Pi reopened a different worker session');
       r.sessionId = initial.sessionId; r.sessionFile = initial.sessionFile;
       const levels = await rpc.send('get_available_thinking_levels');
       assert(levels?.levels?.includes(spec.effort), `Selected effort ${spec.effort} is unsupported; supported: ${levels?.levels?.join(', ')}`);
@@ -192,11 +205,11 @@ export class PairController extends EventEmitter {
     assert(this.config.enabled, 'Pair is disabled');
     const hash = digest(input), previous = this.state.requests[input.requestId];
     if (previous) { assert(previous.hash === hash, 'requestId was already used for a different assignment'); return { ...previous, duplicate: true }; }
+    for (const other of Object.values(this.state.workers)) {
+      if (other.id !== input.workerId && activeTask(other)) assert(false, 'UNSUPPORTED_PROFILE: Fabric Pair V1 allows one unresolved worker assignment at a time. Finish or cancel it before selecting another slot.');
+    }
     await this.startUnlocked(input.workerId);
     const r = this.record(input.workerId); assert(!activeTask(r), `Worker already has an unresolved task (${r.task?.status}); finish, resume, or cancel it first`);
-    for (const other of Object.values(this.state.workers)) {
-      if (other.id !== r.id && activeTask(other) && (!r.bound.readOnly || !other.bound.readOnly)) assert(!overlap(r.repoRoot, other.repoRoot), 'An active writer needs its own Git worktree/repository; overlapping worker workspaces are rejected unless both are read-only');
-    }
     if (r.task) {
       const oldFile = path.join(this.dir, 'tasks', r.task.id, 'task.json'); await atomicJSON(oldFile, r.task);
       r.history = [...r.history, { id: r.task.id, status: r.task.status, file: oldFile }].slice(-40);
@@ -336,12 +349,16 @@ export class PairController extends EventEmitter {
     h.verificationAbort = new AbortController();
     const verificationSignal = AbortSignal.any([this.operationAbort.signal, h.verificationAbort.signal]);
     let verification;
+    // Bind independently-run checks to one exact source identity. A check that formats,
+    // generates, or otherwise changes source must be followed by a fresh worker report.
+    const verificationSnapshot = await this.evidence.capture(r.repoRoot);
     try {
       verification = ['checkpoint', 'final_review'].includes(incoming.payload.kind) ? await verifyConfigured(t.verification, r.repoRoot, checksDir, verificationSignal) : [];
       assert(!verificationSignal.aborted, 'Verification was cancelled; no checkpoint was published');
     } finally { h.verificationAbort = null; }
     // Verification commands are preconfigured by the human, never supplied by the worker.
     const snapshot = await this.evidence.capture(r.repoRoot);
+    assert(snapshot.hash === verificationSnapshot.hash, 'Verification changed the workspace; no checkpoint was published. Review the changes and resubmit.');
     const checkpoint = await this.evidence.checkpoint(t.id, incoming.reportId, await readJSON(t.baseSnapshotRef, undefined, 64 * 1024 * 1024), snapshot, verification);
     const again = await this.evidence.capture(r.repoRoot);
     assert(again.hash === snapshot.hash, 'Workspace changed while freezing checkpoint. Pause external writers and resubmit.');

@@ -5,35 +5,51 @@ import path from 'node:path';
 import { fixture, assignment, awaitReport, approve, until } from './helpers.js';
 import { runCommand } from '../src/evidence.js';
 import { validateConfig } from '../src/config.js';
-import { atomicJSON, clone, safeId } from '../src/util.js';
+import { atomicJSON, clone, digest, safeId } from '../src/util.js';
 
 const worker = (id, readOnly = false, cwd = null) => ({ id, provider: 'fixture', model: 'worker-model', effort: 'medium', cwd, readOnly });
 
-test('parallel read-only workers retain independent processes and conversations in one repository', async t => {
+test('disabled Pair and read-only Fabric profiles reject before inference or effects', async t => {
+  const disabled = await fixture(t, { config: { enabled: false } });
+  await assert.rejects(() => disabled.c.start('worker'), /Pair is disabled/);
+  await assert.rejects(() => disabled.c.dispatch(assignment('disabled')), /Pair is disabled/);
+  assert.equal(disabled.c.handles.size, 0); assert.deepEqual(disabled.c.state.workers, {});
   const { c } = await fixture(t, { config: { maxWorkers: 2, workers: [worker('a', true), worker('b', true)] } });
-  await Promise.all([c.dispatch(assignment('parallel-a', 'a', 1)), c.dispatch(assignment('parallel-b', 'b', 1))]);
-  await Promise.all([awaitReport(c, 'a'), awaitReport(c, 'b')]);
-  assert.notEqual(c.record('a').sessionId, c.record('b').sessionId);
-  assert.notEqual(c.handles.get('a').rpc.pid, c.handles.get('b').rpc.pid);
-  await approve(c, 'a'); await approve(c, 'b');
+  await assert.rejects(() => c.dispatch(assignment('parallel-a', 'a', 1)), /UNSUPPORTED_PROFILE/);
+  await assert.rejects(() => c.dispatch(assignment('parallel-b', 'b', 1)), /UNSUPPORTED_PROFILE/);
+  assert.equal(c.handles.size, 0);
+  assert.equal(c.state.workers.a, undefined); assert.equal(c.state.workers.b, undefined);
 });
 
 test('overlapping writers are rejected, even when the first writer is awaiting review', async t => {
   const { c } = await fixture(t, { config: { maxWorkers: 2, workers: [worker('a'), worker('b')] } });
+  await c.start('a');
+  await assert.rejects(() => c.start('b'), /one live worker/); assert.equal(c.state.workers.b, undefined);
   await c.dispatch(assignment('writer-a', 'a', 1)); await awaitReport(c, 'a');
-  await assert.rejects(() => c.dispatch(assignment('writer-b', 'b', 1)), /own Git worktree/);
+  await assert.rejects(() => c.dispatch(assignment('writer-b', 'b', 1)), /one unresolved worker assignment/);
   await approve(c, 'a');
 });
 
-test('two independent Git worktrees allow parallel writers without sharing session state', async t => {
+test('an independent worktree does not enable deferred parallel-writer activation', async t => {
   const { c, cwd, tmp } = await fixture(t, { config: { maxWorkers: 2, workers: [worker('a'), worker('b')] } });
   const worktree = path.join(tmp, 'worktree-b');
   const result = await runCommand('git', ['worktree', 'add', '-q', '-b', 'pair-b', worktree], { cwd });
   assert.equal(result.code, 0, result.stderr);
   const config = clone(c.config); config.workers[1].cwd = worktree; c.updateConfig(config);
-  await c.dispatch(assignment('worktree-a', 'a', 1)); await c.dispatch(assignment('worktree-b', 'b', 1));
-  await awaitReport(c, 'a'); await awaitReport(c, 'b'); await approve(c, 'a'); await approve(c, 'b');
-  assert.notEqual(c.record('a').repoRoot, c.record('b').repoRoot);
+  await c.dispatch(assignment('worktree-a', 'a', 1)); await awaitReport(c, 'a');
+  await c.stop('a'); assert.equal(c.handles.size, 0);
+  await assert.rejects(() => c.dispatch(assignment('worktree-b', 'b', 1)), /one unresolved worker assignment/);
+  assert.equal(c.handles.size, 0); assert.equal(c.state.workers.b, undefined);
+});
+
+test('an idle worker session is materialized and reopens without model inference', async t => {
+  const { c } = await fixture(t);
+  await c.start('worker');
+  const initial = c.record('worker'), id = initial.sessionId, file = initial.sessionFile;
+  assert.ok((await fs.stat(file)).size > 0); assert.equal(initial.usage, null);
+  await c.stop('worker'); await c.start('worker');
+  assert.equal(c.record('worker').sessionId, id); assert.equal(c.record('worker').sessionFile, file);
+  assert.equal(c.record('worker').usage, null);
 });
 
 test('missing native compaction blocks worker startup; conversation is not silently re-created', async t => {
@@ -45,7 +61,7 @@ test('missing native compaction blocks worker startup; conversation is not silen
 
 test('Prewalk re-enabled after startup blocks the next dispatch before inference', async t => {
   const { c, home } = await fixture(t); await c.start('worker');
-  await atomicJSON(path.join(home, 'fabric.json'), { prewalk: { enabled: true } });
+  await atomicJSON(path.join(home, 'fabric.json'), { prewalk: { enabled: true }, executor: { shellHangMs: 0 }, agents: { maxDepth: 0 } });
   await assert.rejects(() => c.dispatch(assignment('native-conflict')), /Disable native Prewalk/);
   assert.equal(c.record('worker').task.status, 'interrupted'); assert.equal(c.record('worker').usage, null);
 });
@@ -94,6 +110,33 @@ test('config rejects unknown nested keys and prototype-inherited IDs', () => {
   assert.throws(() => validateConfig({ runtime: { warmCache: true } }), /Unknown runtime/);
   assert.throws(() => validateConfig({ verification: { timeoutMs: -1 } }), /timeoutMs/);
   for (const id of ['constructor', 'prototype', 'toString', '__proto__']) assert.throws(() => safeId(id));
+});
+
+test('evidence rejects a tracked file reached through a symlinked directory ancestor', { skip: process.platform === 'win32' }, async t => {
+  const { c, cwd, tmp } = await fixture(t);
+  const nested = path.join(cwd, 'nested');
+  await fs.mkdir(nested);
+  await fs.writeFile(path.join(nested, 'sentinel.txt'), 'inside fixture\n');
+  for (const args of [['add', 'nested/sentinel.txt'], ['commit', '-qm', 'track nested evidence']]) {
+    const result = await runCommand('git', args, { cwd }); assert.equal(result.code, 0, result.stderr);
+  }
+  await c.evidence.capture(cwd);
+  await fs.rm(nested, { recursive: true });
+  const outside = path.join(tmp, 'outside'); const sentinel = 'OUTSIDE-SENTINEL-MUST-NOT-BE-CAPTURED\n';
+  await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'sentinel.txt'), sentinel);
+  await fs.symlink(outside, nested, 'dir');
+  await assert.rejects(() => c.evidence.capture(cwd), /symlink or non-directory ancestor/);
+  await assert.rejects(fs.access(path.join(c.evidence.blobs, digest(sentinel))));
+});
+
+test('configured verification cannot certify source that it changes', async t => {
+  const mutate = `require('node:fs').writeFileSync('verification-output.txt', 'changed by verification\\n')`;
+  const { c, cwd } = await fixture(t, { config: { verification: { commands: [{ name: 'mutating check', command: process.execPath, args: ['-e', mutate] }], timeoutMs: 5000 } } });
+  await c.dispatch(assignment('mutating-verification', 'worker', 1));
+  await until(() => c.record('worker').task.status === 'interrupted');
+  assert.match(c.record('worker').error, /Verification changed the workspace/);
+  assert.equal(c.record('worker').task.report, null);
+  assert.equal(await fs.readFile(path.join(cwd, 'verification-output.txt'), 'utf8'), 'changed by verification\n');
 });
 
 test('cancel interrupts controller verification without waiting for its full timeout', async t => {

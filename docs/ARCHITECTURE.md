@@ -134,19 +134,21 @@ publication. Nested Fabric tool events are gated too. Current in-flight effects
 cannot be rolled back by a future hook, so the controller also waits for settled
 execution and verifies immutable evidence before review.
 
-## Parallelism
+## V1 worker scope
 
-The registry is keyed by explicit worker IDs, not a singleton. More than one
-worker can infer independently, while Main reviews one conversation queue. The
-controller serializes state transitions; long verification commands can delay
-other transitions. Cancel/pause/stop can abort a controller-owned verification
-without waiting for its full configured timeout.
+The registry remains keyed by explicit worker IDs so existing slot identities and
+history are not discarded. The qualified V1 runtime nevertheless permits only one
+live worker and one unresolved assignment across all slots. Auto-start selects the
+first configured slot; attempts to activate another slot fail with an explicit
+`UNSUPPORTED_PROFILE` error, even when it uses an independent Git worktree. The
+controller checks unresolved work before starting a second process.
 
-An active writer cannot overlap another active workspace. Read-only workers may
-share a repository; parallel writers need separate Git worktrees/repositories.
-External services, ports, databases and user shell sessions are not isolated by
-Git worktrees. Branch integration, merge review and combined tests remain explicit
-human/Main workflows. No automated merge machinery is provided.
+Parallel inference, read-only Fabric workers, parallel writer worktrees, branch
+integration and automated merge machinery are deferred until independently
+qualified. Git worktrees would not isolate external services, ports, databases or
+user shell sessions in any case. The controller still serializes state transitions;
+cancel/pause/stop can abort controller-owned verification without waiting for its
+full configured timeout.
 
 ## UI and metrics
 

@@ -2,34 +2,50 @@
   "package": "pi-fabric-pair",
   "version": "0.1.0",
   "validated_on": "2026-09-23",
+  "source_revision": "054952d plus uncommitted implementation slice",
   "checks": {
-    "production_and_script_js_syntax": "passed",
+    "production_and_script_js_syntax": "passed; 16 JavaScript files",
     "extension_manifest_and_factory": "passed",
     "bundled_skill": "passed",
     "example_configuration": "passed",
-    "npm_pack_dry_run": "passed",
-    "fresh_zip_extraction_with_spaces_in_path": "passed; the same 55 tests passed after extraction"
+    "npm_pack_dry_run": "passed; 33 entries; no bundled dependencies",
+    "fresh_install_and_removal": "not run"
   },
   "offline_tests": {
-    "passed": 55,
+    "passed": 59,
     "failed": 0,
     "skipped": 0,
     "source": "Node built-in test runner; actual child processes, private files and Git working trees; actual Pair worker bridge with a mock Pi/Fabric/Fovea host"
   },
-  "environment": {
-    "os": "Linux",
-    "architecture": "x86_64",
-    "node": "v22.16.0",
-    "git": "git version 2.47.3"
+  "deterministic_native_tests": {
+    "passed": 5,
+    "failed": 0,
+    "scenarios": [
+      "read-only generic-Fabric profile rejection",
+      "post-report generic-provider fencing",
+      "explicit background shell rejection",
+      "nonzero shellHangMs profile rejection",
+      "no-inference idle-session restart"
+    ],
+    "pi": "0.87.1",
+    "fabric": "0.93.0",
+    "fovea": "0.29.2",
+    "provider": "local deterministic fixture; zero cost; no network"
   },
-  "live_upstream_stack_tested": false,
+  "environment": {
+    "os": "Darwin 27.2.0",
+    "architecture": "arm64",
+    "node": "v24.21.0",
+    "git": "git version 2.54.0 (Apple Git-157)"
+  },
+  "native_upstream_stack_tested": true,
   "live_provider_calls_tested": false,
   "provider_credentials_used": false,
   "cache_savings_benchmarked": false,
   "limitations": [
-    "No pi executable installed in the build environment.",
-    "Upstream extension/RPC contracts were inspected through GitHub, not integration-certified.",
-    "Synthetic test usage is not a provider cache/cost measurement.",
-    "Real Node 24+/Pi/Fabric/Fovea, model permissions, native compaction, tool schema capture and terminal behavior require the supplied local acceptance checks."
+    "The native matrix covers five narrow safety/retention scenarios, not the full V1 acceptance ledger.",
+    "No paid/live model workflow, terminal UI, real compaction threshold, permission matrix, or cache benchmark was run.",
+    "Read-only workers with generic Fabric, nonzero shell auto-spill, and recursive Fabric agents are deliberately unsupported.",
+    "Fresh tarball installation/removal and non-macOS native profiles remain unqualified."
   ]
 }

@@ -3,7 +3,7 @@ import { agentDir, assert, atomicJSON, clone, merge, plain, readJSON, safeId } f
 
 export const DEFAULTS = Object.freeze({
   version: 1,
-  enabled: true,
+  enabled: false,
   autoStart: true,
   indicator: 'minimal',
   maxWorkers: 1,

@@ -2,16 +2,9 @@
 
 ## What was actually tested
 
-The release build ran **55 offline tests** on Linux, Node 22.16.0, Git 2.47.3.
-The machine-readable result is `TEST-RESULTS.json` in the source ZIP. The test
-harness uses real child processes, real JSONL streams, real files and Git worktrees,
-and the production Pair worker bridge. It does not use live model credentials.
+The current working tree passes **59 offline tests** on Darwin 27.2.0 arm64, Node 24.21.0, and Apple Git 2.54.0. The harness uses real child processes, JSONL streams, files and Git worktrees, plus the production Pair worker bridge. Its ordinary Pi/Fabric/Fovea host is a protocol fixture.
 
-The Pi host and Fabric/Fovea registrations/events inside those children are test
-fixtures. Their synthetic token/cost fields exercise arithmetic only; they are
-not evidence of real cache savings or provider retention. The full installed
-Pi/Fabric/Fovea stack and native terminal were **not run** in the build environment.
-There was no installed `pi` executable.
+A separate deterministic native matrix also passes five scenarios against installed Pi 0.87.1, Fabric 0.93.0 and Fovea 0.29.2: read-only profile rejection, post-report provider fencing, explicit-background rejection, nonzero-shellHangMs rejection, and no-inference idle-session restart. It uses a local zero-cost provider and no credentials/network. This is not evidence of live model quality, cache savings, native terminal behavior, or the remaining acceptance rows. See `TEST-RESULTS.json` and `INTEGRATION_PROBE.md`.
 
 ## Reproduce offline checks
 
@@ -36,7 +29,7 @@ Tests cover:
 - Independent configured checks and rejection of failed verification.
 - Mock native compaction hooks and task-state restoration in Main and Worker.
 - Fovea-like continuation attempts blocked after a report.
-- Multiple read-only workers; overlapping writer rejection; independent worktrees.
+- Fail-closed rejection of unqualified read-only Fabric workers and of second live/unresolved worker activation, including independent worktrees.
 - Cancellation, interruption, revision/soft budget limits and no silent replay.
 - Human permission forwarding, invalid-report quarantine, and ownership locks.
 - Native prerequisite failures and a missing retained session file.
@@ -56,10 +49,18 @@ export PI_CODING_AGENT_DIR="$HOME/.pi-pair-dev"
 Install/configure your known-good Pi/Fabric/Fovea resources and native provider
 access in that profile. Do not blindly copy your entire live profile or upload
 credentials. Load the local Pair package and use a disposable Git repository.
-Disable native Prewalk for this workflow. Keep normal tool permissions enabled.
+Disable native Prewalk for this workflow. Set Fabric `executor.shellHangMs` and `agents.maxDepth` to `0`; Pair refuses a worker profile that can auto-spill shells or recurse into agents. Keep normal human tool permissions enabled.
 
 Pair targets Node >=24 with the inspected Fabric source. Running Pair's isolated
 tests on Node 22 does not mean the real stack supports that environment.
+
+## Deterministic native safety gates
+
+```bash
+npm run test:native
+```
+
+The command creates isolated agent/state/repository directories and resolves installed Fabric/Fovea resources from the selected source agent directory. It exits nonzero if any gate is open. It does not use production credentials or request network inference. Use `--keep` only when you intend to inspect and later remove private temporary state. See [INTEGRATION_PROBE.md](INTEGRATION_PROBE.md) for scenarios and overrides.
 
 ## Startup probe using your actual installation
 

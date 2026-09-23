@@ -30,11 +30,10 @@ export function registerMain(pi) {
   }
   async function startConfigured() {
     if (!controller || !config.enabled || !config.autoStart) return;
-    for (const spec of config.workers.slice(0, config.maxWorkers)) {
-      if (!spec.provider || !spec.model) continue;
-      try { await controller.start(spec.id); }
-      catch (error) { ctxRef?.ui.notify(`Pair worker ${spec.id}: ${briefError(error)}`, 'error'); }
-    }
+    const spec = config.workers.slice(0, config.maxWorkers).find(candidate => candidate.provider && candidate.model);
+    if (!spec) return;
+    try { await controller.start(spec.id); }
+    catch (error) { ctxRef?.ui.notify(`Pair worker ${spec.id}: ${briefError(error)}`, 'error'); }
   }
   async function bind(ctx) {
     ctxRef = ctx; stopped = false;

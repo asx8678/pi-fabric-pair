@@ -92,7 +92,7 @@ export async function settingsUI(ctx, original, initialScope, onApply) {
       `Worker model: ${w.provider}/${w.model || '(choose)'}`, `Worker effort: ${w.effort}`, `Read-only worker: ${w.readOnly}`, `Workspace: ${w.cwd || '(Main workspace)'}`,
       `Review policy: ${draft.supervision.mode}`, `Revision limit: ${draft.supervision.maxRevisions}`, `Summary detail: ${draft.supervision.summaryDetail}`,
       `Turn limit per step: ${draft.limits.maxTurnsPerStep}`, `Task timeout (minutes): ${draft.limits.taskTimeoutMs / 60000}`, `Reported inference budget (USD): ${draft.limits.maxReportedCostUsd ?? 'none'}`,
-      `Indicator: ${draft.indicator}`, `Maximum live workers: ${draft.maxWorkers}`, 'Add worker',
+      `Indicator: ${draft.indicator}`, `Preserved slot limit (V1 live limit: 1): ${draft.maxWorkers}`, 'Add worker',
       `Verification commands: ${draft.verification.commands.length} (human-owned)`, `Save scope: ${scope}`, 'Apply', 'Cancel'
     ];
     const choice = await ctx.ui.select('Fabric Pair settings · changes apply at safe boundaries', rows);
@@ -117,10 +117,10 @@ export async function settingsUI(ctx, original, initialScope, onApply) {
       else if (index === 12) draft.limits.taskTimeoutMs = 60000 * await numberInput(ctx, 'Task timeout in minutes', draft.limits.taskTimeoutMs / 60000, { integer: false });
       else if (index === 13) draft.limits.maxReportedCostUsd = await numberInput(ctx, 'Inference-only reported USD budget (none disables; excludes native warming/unknown prices)', draft.limits.maxReportedCostUsd, { optional: true, integer: false });
       else if (index === 14) draft.indicator = await ctx.ui.select('Indicator (rendering only)', ['minimal', 'off']) || draft.indicator;
-      else if (index === 15) draft.maxWorkers = await numberInput(ctx, 'Maximum live workers (1–8)', draft.maxWorkers);
+      else if (index === 15) draft.maxWorkers = await numberInput(ctx, 'Preserved slot limit (1–8; V1 activates one)', draft.maxWorkers);
       else if (index === 16) {
         const id = await ctx.ui.input('New worker ID (letters, digits, hyphens, underscores)');
-        if (id) { draft.workers.push({ id, provider: '', model: '', effort: 'medium', cwd: null, readOnly: true }); selected = id; }
+        if (id) { draft.workers.push({ id, provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }); selected = id; }
       }
       else if (index === 17) {
         const edited = await ctx.ui.editor('Trusted verification argv, run locally at checkpoints. Example: [{"name":"tests","command":"npm","args":["test"]}]', JSON.stringify(draft.verification.commands, null, 2));

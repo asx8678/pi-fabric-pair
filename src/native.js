@@ -26,6 +26,8 @@ export async function nativeSettings(cwd, trusted, env = process.env) {
     piCompaction: settings.compaction || {},
     cacheWarming: (await readJSONC(path.join(home, 'settings.json'))).cacheWarming ?? 'streaming',
     fabricCompaction: fabric.compaction || {},
+    fabricShellHangMs: fabric.executor?.shellHangMs ?? null,
+    fabricAgentMaxDepth: fabric.agents?.maxDepth ?? null,
     prewalkDisabled: fabric.prewalk?.enabled === false,
     prewalkConfigured: !!fabric.prewalk,
     note: 'File-level native configuration; session-only overrides may differ. RPC autoCompactionEnabled is authoritative for that switch.'
@@ -64,6 +66,11 @@ export function checkReadiness(probe, rpcState, config, worker, cwd) {
   if (config.requirements.fabric) assert(probe.capabilities.fabric, 'Worker has no fabric_exec. Install/load pi-fabric or specify runtime.extraExtensions.');
   if (config.requirements.fovea) assert(probe.capabilities.fovea, 'Worker has no registered Fovea tools/command. Install/load pi-fovea or specify runtime.extraExtensions.');
   assert(probe.capabilities.pairReport, 'Worker reporting bridge did not load');
+  assert(!(worker.readOnly && probe.capabilities.fabric), 'UNSUPPORTED_PROFILE: read-only Pair workers cannot safely expose generic Fabric providers without a pre-effect authorization seam. Use the qualified single-writer profile.');
+  if (probe.capabilities.fabric) {
+    assert(probe.native.fabricShellHangMs === 0, 'UNSUPPORTED_PROFILE: Fabric executor.shellHangMs must be explicitly set to 0 so shell calls cannot spill into untracked background jobs.');
+    assert(probe.native.fabricAgentMaxDepth === 0, 'UNSUPPORTED_PROFILE: Fabric agents.maxDepth must be explicitly set to 0; Pair workers cannot delegate or spawn recursive agents.');
+  }
   if (config.requirements.prewalkDisabled && probe.capabilities.fabric) assert(probe.native.prewalkDisabled, 'Disable native Prewalk with /fabric prewalk --disable before using Pair. Pair never edits Fabric configuration itself.');
   if (config.requirements.autoCompaction) assert(rpcState.autoCompactionEnabled, 'Worker automatic compaction is disabled in native Pi settings. Enable it before using Pair.');
 }
@@ -73,7 +80,11 @@ export function isDirectMutation(name) {
 }
 export function isReadCapability(name) {
   const n = toolName(name);
-  return /^(read|grep|find|ls|pair_report)$/.test(n) || /^fovea_(focus|impact|overview|status|search|explain|coverage|map)$/.test(n) || /^(tools\.(list|describe|search)|schema\.(status|list|get)|compact\.status|state\.get)$/.test(n) || /^(fs|files|file)\.(read|stat|list|exists|glob|search)/.test(n);
+  return /^(read|grep|find|ls|pair_report)$/.test(n) || /^fovea_(sketch|focus|dwell|impact)$/.test(n) || /^(tools\.(list|describe|search)|schema\.(status|list|get)|compact\.status|state\.get)$/.test(n) || /^(fs|files|file)\.(read|stat|list|exists|glob|search)/.test(n);
+}
+export function requestsDetachedEffect(name, input) {
+  const n = toolName(name);
+  return /^(bash|powershell)$/.test(n) && input?.background === true;
 }
 export function gateTool(name, authority, latched, readOnly = false) {
   const n = toolName(name);
