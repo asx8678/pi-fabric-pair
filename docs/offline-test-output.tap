@@ -1,0 +1,340 @@
+TAP version 13
+# Subtest: parallel read-only workers retain independent processes and conversations in one repository
+ok 1 - parallel read-only workers retain independent processes and conversations in one repository
+  ---
+  duration_ms: 697.575789
+  type: 'test'
+  ...
+# Subtest: overlapping writers are rejected, even when the first writer is awaiting review
+ok 2 - overlapping writers are rejected, even when the first writer is awaiting review
+  ---
+  duration_ms: 447.857201
+  type: 'test'
+  ...
+# Subtest: two independent Git worktrees allow parallel writers without sharing session state
+ok 3 - two independent Git worktrees allow parallel writers without sharing session state
+  ---
+  duration_ms: 496.412608
+  type: 'test'
+  ...
+# Subtest: missing native compaction blocks worker startup; conversation is not silently re-created
+ok 4 - missing native compaction blocks worker startup; conversation is not silently re-created
+  ---
+  duration_ms: 153.682329
+  type: 'test'
+  ...
+# Subtest: Prewalk re-enabled after startup blocks the next dispatch before inference
+ok 5 - Prewalk re-enabled after startup blocks the next dispatch before inference
+  ---
+  duration_ms: 208.262704
+  type: 'test'
+  ...
+# Subtest: failed state initialization releases its ownership lock
+ok 6 - failed state initialization releases its ownership lock
+  ---
+  duration_ms: 71.396136
+  type: 'test'
+  ...
+# Subtest: same Main session cannot be attached to two concurrent controllers
+ok 7 - same Main session cannot be attached to two concurrent controllers
+  ---
+  duration_ms: 39.36181
+  type: 'test'
+  ...
+# Subtest: malformed worker report is quarantined and interrupts, not endlessly re-read
+ok 8 - malformed worker report is quarantined and interrupts, not endlessly re-read
+  ---
+  duration_ms: 247.435062
+  type: 'test'
+  ...
+# Subtest: changed worker settings wait for task completion and keep its session afterward
+ok 9 - changed worker settings wait for task completion and keep its session afterward
+  ---
+  duration_ms: 320.022492
+  type: 'test'
+  ...
+# Subtest: soft output budget stops further worker inference without resetting its session
+ok 10 - soft output budget stops further worker inference without resetting its session
+  ---
+  duration_ms: 237.371769
+  type: 'test'
+  ...
+# Subtest: config rejects unknown nested keys and prototype-inherited IDs
+ok 11 - config rejects unknown nested keys and prototype-inherited IDs
+  ---
+  duration_ms: 1.015184
+  type: 'test'
+  ...
+# Subtest: cancel interrupts controller verification without waiting for its full timeout
+ok 12 - cancel interrupts controller verification without waiting for its full timeout
+  ---
+  duration_ms: 287.131693
+  type: 'test'
+  ...
+# Subtest: a missing completed worker session is never replaced by a blank conversation
+ok 13 - a missing completed worker session is never replaced by a blank conversation
+  ---
+  duration_ms: 276.946742
+  type: 'test'
+  ...
+# Subtest: final-only supervision executes one whole-plan assignment and requires final acceptance
+ok 14 - final-only supervision executes one whole-plan assignment and requires final acceptance
+  ---
+  duration_ms: 253.429415
+  type: 'test'
+  ...
+# Subtest: two-step handoff retains one PID/session; completion does not stop the worker
+ok 15 - two-step handoff retains one PID/session; completion does not stop the worker
+  ---
+  duration_ms: 911.09743
+  type: 'test'
+  ...
+# Subtest: question yields; answer resumes the same conversation automatically
+ok 16 - question yields; answer resumes the same conversation automatically
+  ---
+  duration_ms: 382.648575
+  type: 'test'
+  ...
+# Subtest: idempotent dispatch and decisions do not create another run
+ok 17 - idempotent dispatch and decisions do not create another run
+  ---
+  duration_ms: 270.033667
+  type: 'test'
+  ...
+# Subtest: approvals require evidence inspection and reject a changed workspace
+ok 18 - approvals require evidence inspection and reject a changed workspace
+  ---
+  duration_ms: 284.403382
+  type: 'test'
+  ...
+# Subtest: native compaction command preserves worker identity and task-state restoration
+ok 19 - native compaction command preserves worker identity and task-state restoration
+  ---
+  duration_ms: 621.256805
+  type: 'test'
+  ...
+# Subtest: Fovea-like continuation after a report cannot write
+ok 20 - Fovea-like continuation after a report cannot write
+  ---
+  duration_ms: 297.169276
+  type: 'test'
+  ...
+# Subtest: failed configured checks block approval
+ok 21 - failed configured checks block approval
+  ---
+  duration_ms: 360.915989
+  type: 'test'
+  ...
+# Subtest: revision limit stops repeated rework without resetting a session
+ok 22 - revision limit stops repeated rework without resetting a session
+  ---
+  duration_ms: 349.974751
+  type: 'test'
+  ...
+# Subtest: worker permission dialogs are forwarded and explicitly answered
+ok 23 - worker permission dialogs are forwarded and explicitly answered
+  ---
+  duration_ms: 259.44129
+  type: 'test'
+  ...
+# Subtest: prose-only completion becomes attention-needed rather than an automatic replay
+ok 24 - prose-only completion becomes attention-needed rather than an automatic replay
+  ---
+  duration_ms: 172.379207
+  type: 'test'
+  ...
+# Subtest: cancel retains the process and closes authorization
+ok 25 - cancel retains the process and closes authorization
+  ---
+  duration_ms: 171.634466
+  type: 'test'
+  ...
+# Subtest: controller restart reopens stored conversation but does not replay work
+ok 26 - controller restart reopens stored conversation but does not replay work
+  ---
+  duration_ms: 556.927721
+  type: 'test'
+  ...
+# Subtest: stale reports from a superseded lease are archived without corrupting a new task
+ok 27 - stale reports from a superseded lease are archived without corrupting a new task
+  ---
+  duration_ms: 561.147689
+  type: 'test'
+  ...
+# Subtest: native JSONC inspection preserves URLs/escaped strings and handles trailing commas
+ok 28 - native JSONC inspection preserves URLs/escaped strings and handles trailing commas
+  ---
+  duration_ms: 2.168834
+  type: 'test'
+  ...
+# Subtest: prototype pollution keys and traversal IDs are rejected
+ok 29 - prototype pollution keys and traversal IDs are rejected
+  ---
+  duration_ms: 0.670528
+  type: 'test'
+  ...
+# Subtest: schema validates work orders and enforces unique steps and bounded payloads
+ok 30 - schema validates work orders and enforces unique steps and bounded payloads
+  ---
+  duration_ms: 1.382333
+  type: 'test'
+  ...
+# Subtest: question must contain an actual question; approval must bind a hash
+ok 31 - question must contain an actual question; approval must bind a hash
+  ---
+  duration_ms: 0.807705
+  type: 'test'
+  ...
+# Subtest: settings reject invalid limits, duplicate workers and unknown top-level options
+ok 32 - settings reject invalid limits, duplicate workers and unknown top-level options
+  ---
+  duration_ms: 1.25313
+  type: 'test'
+  ...
+# Subtest: Pi usage normalization sums uncached input, cache reads, and cache writes
+ok 33 - Pi usage normalization sums uncached input, cache reads, and cache writes
+  ---
+  duration_ms: 0.383159
+  type: 'test'
+  ...
+# Subtest: invalid usage does not fabricate negative token counts or known prices
+ok 34 - invalid usage does not fabricate negative token counts or known prices
+  ---
+  duration_ms: 0.125825
+  type: 'test'
+  ...
+# Subtest: tool gate blocks all work without a lease and after a report
+ok 35 - tool gate blocks all work without a lease and after a report
+  ---
+  duration_ms: 0.507655
+  type: 'test'
+  ...
+# Subtest: read-only gate classifies replayed Fabric calls and refuses shell/delegation
+ok 36 - read-only gate classifies replayed Fabric calls and refuses shell/delegation
+  ---
+  duration_ms: 1.22985
+  type: 'test'
+  ...
+# Subtest: writers also cannot recursively delegate
+ok 37 - writers also cannot recursively delegate
+  ---
+  duration_ms: 0.450677
+  type: 'test'
+  ...
+# Subtest: indicators show readiness, not guaranteed cache warmth
+ok 38 - indicators show readiness, not guaranteed cache warmth
+  ---
+  duration_ms: 0.22932
+  type: 'test'
+  ...
+# Subtest: terminal control sequences are removed from worker UI text
+ok 39 - terminal control sequences are removed from worker UI text
+  ---
+  duration_ms: 0.258147
+  type: 'test'
+  ...
+# Subtest: extension source selection does not mistake skills/prompts for extensions
+ok 40 - extension source selection does not mistake skills/prompts for extensions
+  ---
+  duration_ms: 0.250729
+  type: 'test'
+  ...
+# Subtest: readiness fails closed for missing extensions, ephemeral sessions and enabled Prewalk
+ok 41 - readiness fails closed for missing extensions, ephemeral sessions and enabled Prewalk
+  ---
+  duration_ms: 0.239648
+  type: 'test'
+  ...
+# Subtest: extension factory registers resources synchronously without spawning a process
+ok 42 - extension factory registers resources synchronously without spawning a process
+  ---
+  duration_ms: 1.374883
+  type: 'test'
+  ...
+# Subtest: Main registers separate Pair controls without replacing native UI or /model
+ok 43 - Main registers separate Pair controls without replacing native UI or /model
+  ---
+  duration_ms: 86.076681
+  type: 'test'
+  ...
+# Subtest: indicator off/minimal is rendering only, including while a worker is running
+ok 44 - indicator off/minimal is rendering only, including while a worker is running
+  ---
+  duration_ms: 276.56534
+  type: 'test'
+  ...
+# Subtest: Main receives reports in its existing session as follow-ups, not a model switch
+ok 45 - Main receives reports in its existing session as follow-ups, not a model switch
+  ---
+  duration_ms: 574.434061
+  type: 'test'
+  ...
+# Subtest: Main native compaction restores only coordination state without starting a turn
+ok 46 - Main native compaction restores only coordination state without starting a turn
+  ---
+  duration_ms: 276.711064
+  type: 'test'
+  ...
+# Subtest: Main missing required Fovea refuses dispatch before creating a worker
+ok 47 - Main missing required Fovea refuses dispatch before creating a worker
+  ---
+  duration_ms: 46.523862
+  type: 'test'
+  ...
+# Subtest: Main direct edit gate applies only while a Pair task is active
+ok 48 - Main direct edit gate applies only while a Pair task is active
+  ---
+  duration_ms: 296.40235
+  type: 'test'
+  ...
+# Subtest: hiding the indicator does not change repository evidence or stale an approval
+ok 49 - hiding the indicator does not change repository evidence or stale an approval
+  ---
+  duration_ms: 350.85525
+  type: 'test'
+  ...
+# Subtest: JSONL transport preserves UTF-8 split across individual bytes
+ok 50 - JSONL transport preserves UTF-8 split across individual bytes
+  ---
+  duration_ms: 193.794914
+  type: 'test'
+  ...
+# Subtest: RPC rejects unknown commands without restarting the session
+ok 51 - RPC rejects unknown commands without restarting the session
+  ---
+  duration_ms: 187.829944
+  type: 'test'
+  ...
+# Subtest: acknowledgement timeout is explicitly uncertain and clears pending requests
+ok 52 - acknowledgement timeout is explicitly uncertain and clears pending requests
+  ---
+  duration_ms: 241.595828
+  type: 'test'
+  ...
+# Subtest: malformed stdout faults the transport rather than interpreting it as a report
+ok 53 - malformed stdout faults the transport rather than interpreting it as a report
+  ---
+  duration_ms: 173.106672
+  type: 'test'
+  ...
+# Subtest: unexpected process exit rejects pending commands
+ok 54 - unexpected process exit rejects pending commands
+  ---
+  duration_ms: 161.47367
+  type: 'test'
+  ...
+# Subtest: stop closes owned child process cleanly and is idempotent
+ok 55 - stop closes owned child process cleanly and is idempotent
+  ---
+  duration_ms: 183.882442
+  type: 'test'
+  ...
+1..55
+# tests 55
+# suites 0
+# pass 55
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5297.29403

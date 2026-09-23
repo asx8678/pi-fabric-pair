@@ -1,0 +1,284 @@
+{
+  "version": 1,
+  "note": "Generated from production source schemas. Fabric normally captures these under extensions.*.",
+  "tools": {
+    "pair_dispatch": {
+      "type": "object",
+      "properties": {
+        "workerId": {
+          "type": "string",
+          "description": "Configured worker ID",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "requestId": {
+          "type": "string",
+          "description": "Idempotency key; reuse only to retry the identical assignment",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "objective": {
+          "type": "string",
+          "description": "Task goal",
+          "minLength": 1,
+          "maxLength": 6000
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Mandatory constraint",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "maxItems": 64
+        },
+        "context": {
+          "type": "string",
+          "description": "Relevant facts, decisions and repository references; not the whole Main transcript",
+          "minLength": 1,
+          "maxLength": 24000
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Stable step ID",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "title": {
+                "type": "string",
+                "description": "Step title",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "instructions": {
+                "type": "string",
+                "description": "Bounded implementation instructions",
+                "minLength": 1,
+                "maxLength": 24000
+              },
+              "acceptance": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "description": "Acceptance criterion",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "maxItems": 64
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "instructions"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 32,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "workerId",
+        "requestId",
+        "objective",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "pair_report": {
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "description": "Current task ID",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "stepId": {
+          "type": "string",
+          "description": "Current step ID",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "question",
+            "checkpoint",
+            "blocked",
+            "final_review"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "description": "What changed, why, or what is blocking progress",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "question": {
+          "type": "string",
+          "description": "Question that Main must answer",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Important decision",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "maxItems": 24
+        },
+        "changedFiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Changed path",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "maxItems": 200
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Check name",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "result": {
+                "type": "string",
+                "enum": [
+                  "pass",
+                  "fail",
+                  "not_run"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "description": "Evidence; explicitly worker-reported",
+                "minLength": 1,
+                "maxLength": 2000
+              }
+            },
+            "required": [
+              "name",
+              "result"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 32
+        },
+        "stepComplete": {
+          "type": "boolean",
+          "description": "False for an intermediate checkpoint; final_review always completes the task."
+        }
+      },
+      "required": [
+        "taskId",
+        "stepId",
+        "kind",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "pair_decide": {
+      "type": "object",
+      "properties": {
+        "workerId": {
+          "type": "string",
+          "description": "Configured worker ID",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "taskId": {
+          "type": "string",
+          "description": "Task ID",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "reportId": {
+          "type": "string",
+          "description": "The exact report being answered/reviewed",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "answer",
+            "approve",
+            "revise",
+            "cancel"
+          ]
+        },
+        "feedback": {
+          "type": "string",
+          "description": "Answer, concrete changes required, or review rationale",
+          "minLength": 1,
+          "maxLength": 12000
+        },
+        "checkpointHash": {
+          "type": "string",
+          "description": "Exact current checkpoint hash, required for approval",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "workerId",
+        "taskId",
+        "reportId",
+        "action",
+        "feedback"
+      ],
+      "additionalProperties": false
+    },
+    "pair_inspect": {
+      "type": "object",
+      "properties": {
+        "workerId": {
+          "type": "string",
+          "description": "Worker ID",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "reportId": {
+          "type": "string",
+          "description": "Report ID; omit for latest",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "file": {
+          "type": "string",
+          "description": "Optional changed path to read from immutable evidence",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "workerId"
+      ],
+      "additionalProperties": false
+    },
+    "pair_status": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+}

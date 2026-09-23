@@ -1,0 +1,35 @@
+{
+  "package": "pi-fabric-pair",
+  "version": "0.1.0",
+  "validated_on": "2026-09-23",
+  "checks": {
+    "production_and_script_js_syntax": "passed",
+    "extension_manifest_and_factory": "passed",
+    "bundled_skill": "passed",
+    "example_configuration": "passed",
+    "npm_pack_dry_run": "passed",
+    "fresh_zip_extraction_with_spaces_in_path": "passed; the same 55 tests passed after extraction"
+  },
+  "offline_tests": {
+    "passed": 55,
+    "failed": 0,
+    "skipped": 0,
+    "source": "Node built-in test runner; actual child processes, private files and Git working trees; actual Pair worker bridge with a mock Pi/Fabric/Fovea host"
+  },
+  "environment": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "node": "v22.16.0",
+    "git": "git version 2.47.3"
+  },
+  "live_upstream_stack_tested": false,
+  "live_provider_calls_tested": false,
+  "provider_credentials_used": false,
+  "cache_savings_benchmarked": false,
+  "limitations": [
+    "No pi executable installed in the build environment.",
+    "Upstream extension/RPC contracts were inspected through GitHub, not integration-certified.",
+    "Synthetic test usage is not a provider cache/cost measurement.",
+    "Real Node 24+/Pi/Fabric/Fovea, model permissions, native compaction, tool schema capture and terminal behavior require the supplied local acceptance checks."
+  ]
+}

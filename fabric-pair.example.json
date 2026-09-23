@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "enabled": true,
+  "autoStart": true,
+  "indicator": "minimal",
+  "maxWorkers": 1,
+  "workers": [
+    {
+      "id": "worker",
+      "provider": "YOUR_PROVIDER_FROM_PI",
+      "model": "YOUR_WORKER_MODEL_ID",
+      "effort": "medium",
+      "cwd": null,
+      "readOnly": false
+    }
+  ],
+  "supervision": {
+    "mode": "milestones",
+    "finalReview": true,
+    "maxRevisions": 3,
+    "summaryDetail": "normal"
+  },
+  "runtime": {
+    "command": "pi",
+    "commandArgs": [],
+    "extraExtensions": [],
+    "extraSkills": [],
+    "inheritExtensions": true,
+    "startupTimeoutMs": 120000,
+    "requestTimeoutMs": 30000,
+    "shutdownTimeoutMs": 5000
+  },
+  "requirements": {
+    "fabric": true,
+    "fovea": true,
+    "prewalkDisabled": true,
+    "autoCompaction": true
+  },
+  "limits": {
+    "maxTurnsPerStep": 40,
+    "taskTimeoutMs": 1800000,
+    "maxReportedCostUsd": null,
+    "maxOutputTokens": null
+  },
+  "verification": {
+    "commands": [],
+    "requirePassing": true,
+    "timeoutMs": 120000
+  },
+  "evidence": {
+    "maxFiles": 25000,
+    "maxTotalBytes": 536870912,
+    "maxArtifactBytes": 67108864
+  },
+  "mainReadOnlyDuringTasks": true
+}
