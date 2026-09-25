@@ -12,9 +12,9 @@ JavaScript Pi extension. The supervised MVP package contains only the 15-file pu
 
 ## Release status
 
-Version **0.1.0: experimental supervised MVP**. Start with the [short quickstart](docs/QUICKSTART.md): one Main, one writer, manual startup and every-step review in a disposable Git workspace. Actual Pi/Fabric/Fovea qualification passed question/answer, report/inspection/revision/approval, duplicate/stale-decision rejection, retained-session continuation, active cancellation and confirmed stop. The run used a deterministic loopback model, not a paid provider or an interactive Main TUI. This is not production, unattended, cross-controller or crash-recovery certification. No retained automated regression suite exists; historical pass counts are not current evidence.
+Version **0.1.0: experimental supervised MVP**. Start with the [short quickstart](docs/QUICKSTART.md): one Main, one writer, manual startup and every-step review in a disposable Git workspace. Actual Pi/Fabric/Fovea qualification passed question/answer, report/inspection/revision/approval, duplicate/stale-decision rejection, retained-session continuation, active cancellation and confirmed stop. The run used a deterministic loopback model, not a paid provider or an interactive Main TUI. This is not production, unattended, cross-controller or crash-recovery certification. A bounded automated suite now covers the live runtime (`npm test`; see the [testing policy](docs/TESTING.md)); historical pass counts from the removed suites remain non-reproducible.
 
-There is no retained automated acceptance or regression suite. Do not use this version for valuable repositories or unattended work on the basis of earlier test claims. See the current [testing policy](docs/TESTING.md) and [compatibility notes](docs/COMPATIBILITY.md).
+The retained suite is regression coverage, not release or unattended certification. Do not use this version for valuable repositories or unattended work on the basis of earlier test claims. See the current [testing policy](docs/TESTING.md) and [compatibility notes](docs/COMPATIBILITY.md).
 
 **Architecture cut:** the ActorHost/ActorStore redesign, native Store, new actor model and archive rotation are parked in the source checkout and excluded from the MVP package. They are not prerequisites for this public workflow. The live path remains `extension -> main -> PairController -> PiRuntime/PiRpc -> worker`; `actor-runtime.js` is part of that live path.
 
@@ -31,8 +31,9 @@ An uncertain prior worker exit blocks launches/reset pending offline reconciliat
 - Immutable Git-worktree evidence, hash-bound approvals, and human-configured
   verification commands. A worker saying “tests passed” is not independently
   verified evidence.
-- Separate `/pair` settings/status dialogs and an optional tiny `M● W◐` widget.
-  `/model` still belongs to Pi. Fabric's own UI is unchanged.
+- Separate `/pair` settings/status dialogs and a status widget: colored Main/Worker
+  activity dots, flow arrows, plan step list, approval progress bar, and a liveness
+  heartbeat with stale detection. `/model` still belongs to Pi. Fabric's own UI is unchanged.
 - Worker provider/model/effort, review policy, report detail, budgets, and worker
   workspaces. Read-only configuration is preserved, but a read-only worker with
   generic Fabric providers is rejected until that profile has a pre-effect gate.
@@ -317,7 +318,7 @@ use `/pair inbox` after recovery. Duplicate decisions cannot repeat a step.
 
 ## Development checks
 
-The repository intentionally contains no automated tests or executable test/probe runners. Do not add or regenerate them.
+The repository retains a bounded automated suite for the live runtime (`npm test`, 34 tests; see [docs/TESTING.md](docs/TESTING.md) for scope and limits). Removed historical suites are not reproducible and are not current evidence.
 
 The remaining commands are static/package checks, not behavioral tests:
 

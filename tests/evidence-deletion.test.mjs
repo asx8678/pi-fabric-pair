@@ -10,8 +10,8 @@ const LIMITS = { maxFiles: 1000, maxTotalBytes: 16 * 1024 * 1024, maxArtifactByt
 
 async function fixture() {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-evidence-test-'));
+  await fs.mkdir(path.join(base, 'repo'), { recursive: true });
   const repo = await fs.realpath(path.join(base, 'repo'));
-  await fs.mkdir(repo, { recursive: true });
   execFileSync('git', ['init', '-q'], { cwd: repo });
   execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: repo });
   execFileSync('git', ['config', 'user.name', 'Pair Test'], { cwd: repo });
