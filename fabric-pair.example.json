@@ -1,7 +1,7 @@
 {
   "version": 2,
   "enabled": false,
-  "autoStart": true,
+  "autoStart": false,
   "indicator": "minimal",
   "maxWorkers": 1,
   "workers": [
@@ -15,7 +15,7 @@
     }
   ],
   "supervision": {
-    "mode": "milestones",
+    "mode": "every-step",
     "finalReview": true,
     "maxRevisions": 3,
     "maxRevisionsPerStep": 3,

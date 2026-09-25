@@ -8,13 +8,17 @@ review the actual evidence, and approve or revise the next step.
 
 This package does **not** modify Pi, Fabric, Fovea, the Fabric TUI, or either native
 Prewalk mode. It has **no runtime npm dependencies** and loads directly as a
-JavaScript Pi extension. No build step is required.
+JavaScript Pi extension. The supervised MVP package contains only the 15-file public runtime; no native Store build or ActorHost migration is required.
 
 ## Release status
 
-Version **0.1.0**, implementation in progress. At the owner's direction, all automated tests, test fixtures, test runners, native/live probes, and generated test-result artifacts have been removed. Do not treat earlier 86-offline/5-native pass counts as current or reproducible evidence. The all-production strict typecheck still has 620 Pair-source diagnostics, and broader migration, safety, and release work remains open.
+Version **0.1.0: experimental supervised MVP**. Start with the [short quickstart](docs/QUICKSTART.md): one Main, one writer, manual startup and every-step review in a disposable Git workspace. Actual Pi/Fabric/Fovea qualification passed question/answer, report/inspection/revision/approval, duplicate/stale-decision rejection, retained-session continuation, active cancellation and confirmed stop. The run used a deterministic loopback model, not a paid provider or an interactive Main TUI. This is not production, unattended, cross-controller or crash-recovery certification. No retained automated regression suite exists; historical pass counts are not current evidence.
 
 There is no retained automated acceptance or regression suite. Do not use this version for valuable repositories or unattended work on the basis of earlier test claims. See the current [testing policy](docs/TESTING.md) and [compatibility notes](docs/COMPATIBILITY.md).
+
+**Architecture cut:** the ActorHost/ActorStore redesign, native Store, new actor model and archive rotation are parked in the source checkout and excluded from the MVP package. They are not prerequisites for this public workflow. The live path remains `extension -> main -> PairController -> PiRuntime/PiRpc -> worker`; `actor-runtime.js` is part of that live path.
+
+An uncertain prior worker exit blocks launches/reset pending offline reconciliation; missing or corrupt retained history is never replaced automatically. Worker editor dialogs are denied because Pi exposes no cancellable editor API. Crash recovery and interactive permission/dialog behavior remain unqualified.
 
 ## What is implemented
 
@@ -51,7 +55,7 @@ configuration directory, ordinarily `~/.pi/agent`.
 
 ## Install
 
-Extract the ZIP into its own folder, for example:
+Use the source checkout or extract the small npm tarball into its own folder, for example:
 
 ```text
 ~/src/
@@ -79,7 +83,7 @@ only one loading method is easier to diagnose.
 
 No `npm install` or TypeScript compilation is necessary for this package.
 Upstream Fabric/Fovea must already be installed and usable in your Pi profile.
-The ZIP does not bundle or modify those projects.
+The package does not bundle or modify those projects.
 
 ### One-time setup
 
@@ -89,13 +93,13 @@ The ZIP does not bundle or modify those projects.
    { "prewalk": { "enabled": false }, "executor": { "shellHangMs": 0 }, "agents": { "maxDepth": 0 } }
    ```
    Pair checks these persisted fields and refuses conflicting profiles; it does not silently edit Fabric settings. Re-enable/change them yourself when returning to an independent workflow.
-3. Open `/pair settings`, deliberately turn **Enabled for new work** on, and select one writer provider/model and supported effort. Choose `milestones` to begin; keep final review required. A read-only Fabric worker is currently rejected as unsupported.
-4. Apply. With autostart enabled, Pair starts the worker and checks its Pi-written session, model, Fabric/Fovea registrations, native compaction, and Fabric safety profile.
-5. Use `/pair doctor`, then try a small, disposable task.
+3. Open `/pair settings`, deliberately turn **Enabled for new work** on, select one writer provider/model and supported effort, set **Autostart off**, and choose **every-step** review. Keep final review required. A read-only Fabric worker is rejected as unsupported.
+4. Apply, then run `/pair start worker`. Pair checks its Pi-written session, exact model, Fabric/Fovea registrations, native compaction, and Fabric safety profile without requesting a model turn.
+5. Use `/pair doctor`, then try one small task in a disposable Git workspace. Do not run another Main/Pair or another writer against that workspace.
 
-After setup, start `pi` normally. The configured worker starts automatically
-without a model prompt solely to announce readiness. Ask Main to plan and delegate
-an implementation. Main receives the collaboration instructions and tools.
+After setup, load Pair normally and start the worker explicitly. Ask Main to plan
+and delegate one bounded implementation step, inspect its report, and ask you
+before approving. Main receives the collaboration instructions and tools.
 Actual delegation remains an LLM tool-use decision: the extension does not
 silently intercept every natural-language request or replace Prewalk.
 
@@ -323,7 +327,7 @@ npm run typecheck
 npm run pack:check
 ```
 
-`typecheck` is still an open gate and currently fails on Pair source diagnostics. `pack:check` only performs an npm package dry run; it does not qualify runtime behavior.
+From the source checkout, the pinned strict `typecheck` passes. `pack:check` performs an npm package dry run, not behavioral qualification. The optional `build:host`/`check:host` commands concern parked source only and are not MVP installation or packaging prerequisites.
 
 ## Deliberate boundaries
 

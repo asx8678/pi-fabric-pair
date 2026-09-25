@@ -1,10 +1,35 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { atomicJSON, assert, briefError, digest, inside, mkdirPrivate, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
+import { atomicJSON, assert, digest, inside, mkdirPrivate, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
 import { reportSchema, validateReport } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
 import { gateTool, isDirectMutation, nativeSettings, probeNative, requestsDetachedEffect, toolName } from './native.js';
 import { normalizedUsage } from './metrics.js';
+
+/** @typedef {import('@earendil-works/pi-coding-agent').ExtensionAPI} ExtensionAPI */
+/** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} ExtensionContext */
+/** @typedef {import('./contracts.js').Authority} Authority */
+/** @typedef {import('./contracts.js').ReportEnvelope} ReportEnvelope */
+/** @typedef {import('@earendil-works/pi-coding-agent').AgentToolResult<{pairReportId: string}>} ReportToolResult */
+
+/** @param {unknown} error @param {string} code @returns {boolean} */
+function hasErrorCode(error, code) { return error !== null && typeof error === 'object' && 'code' in error && error.code === code; }
+
+// The durable usage record is a plain data object, not an SDK interface with
+// an assumed string index signature. Preserve all supplied own usage fields.
+/** @param {ExtensionContext} ctx @returns {import('./contracts.js').StoredContextUsage | undefined} */
+function contextUsage(ctx) { const usage = ctx.getContextUsage?.(); return usage ? { ...usage } : undefined; }
+
+// Serial owns ordering/error propagation. Capture this operation's result rather
+// than relying on the unannotated queue's inferred Promise result type.
+/** @template T @param {Serial} serial @param {() => Promise<T>} operation @returns {Promise<T>} */
+async function runSerial(serial, operation) {
+  /** @type {{completed?: {value: T}}} */
+  const result = {};
+  await serial.run(async () => { result.completed = { value: await operation() }; });
+  assert(result.completed, 'Serialized Pair operation did not complete');
+  return result.completed.value;
+}
 
 export const WORKER_GUIDE = `You are a persistent implementation worker in Fabric Pair.
 The Main model is your supervisor. A controller grants one bounded implementation lease at a time.
@@ -15,6 +40,7 @@ Call pair_report by itself, not in parallel with other work. After reporting, st
 Report concise changes and reasons, affected paths, and honestly labeled test evidence. Your claim that tests pass is not independently verified evidence.
 Do not deploy, push, commit, remove history, access unrelated secrets, or run destructive operations without the human's normal permission. Do not mutate Pair's coordination files. This is workflow control, not a sandbox.`;
 
+/** @param {Authority | null} authority @param {ReportEnvelope | null} report @returns {string} */
 function statePacket(authority, report) {
   if (!authority?.task) return 'No implementation lease is active. Remain idle until the Pair controller assigns work.';
   const t = authority.task;
@@ -27,44 +53,118 @@ function statePacket(authority, report) {
     instruction: authority.phase === 'running' && !report ? 'Execute only the authorized scope.' : 'Wait; do not execute additional work.' });
 }
 
-/** Worker role: public Pi hooks + a private local outbox; it never starts children. */
+/** Worker role: public Pi hooks + a private local outbox; it never starts children.
+ * @param {ExtensionAPI} pi @param {NodeJS.ProcessEnv} [env] */
 export function registerWorker(pi, env = process.env) {
   const workerId = safeId(env.PI_FABRIC_PAIR_WORKER_ID, 'worker ID');
   const ownerSession = String(env.PI_FABRIC_PAIR_OWNER || '');
   const ownerEpoch = Number(env.PI_FABRIC_PAIR_OWNER_EPOCH), workerGeneration = Number(env.PI_FABRIC_PAIR_WORKER_GENERATION);
   const nonce = String(env.PI_FABRIC_PAIR_NONCE || '');
-  const dir = env.PI_FABRIC_PAIR_WORKER_DIR;
-  assert(path.isAbsolute(dir || '') && ownerSession && nonce && Number.isSafeInteger(ownerEpoch) && ownerEpoch > 0 && Number.isSafeInteger(workerGeneration) && workerGeneration > 0, 'Invalid Pair worker environment');
+  const candidateDir = env.PI_FABRIC_PAIR_WORKER_DIR;
+  assert(typeof candidateDir === 'string' && path.isAbsolute(candidateDir) && ownerSession && nonce && Number.isSafeInteger(ownerEpoch) && ownerEpoch > 0 && Number.isSafeInteger(workerGeneration) && workerGeneration > 0, 'Invalid Pair worker environment');
+  const dir = candidateDir; // Keep the validated string type inside hoisted async helpers.
   const gateFile = path.join(dir, 'authority.json');
   const latchFile = path.join(dir, 'latch.json');
   const reportSerial = new Serial(), telemetrySerial = new Serial();
-  let ctxRef, authority = null, report = null, currentTool = null, lastUsage = null, compacting = false, detachedEffect = null, parentTimer, stopped = false;
+  /** @type {ExtensionContext | undefined} */
+  let ctxRef;
+  /** @type {Authority | null} */
+  let authority = null;
+  /** @type {ReportEnvelope | null} */
+  let report = null;
+  /** @type {string | null} */
+  let currentTool = null;
+  /** @type {import('./observations.js').UsageObservation | null} */
+  let lastUsage = null;
+  /** @type {ReturnType<typeof setInterval> | undefined} */
+  let parentTimer;
+  let compacting = false, stopped = false;
+  const hadIpc = process.connected !== undefined;
+  let parentDead = false;
+  const parentGone = () => {
+    if (parentDead) return;
+    parentDead = true; stopped = true; ctxRef?.abort(); ctxRef?.shutdown();
+  };
+  if (process.connected === false) parentGone();
+  if (process.channel) {
+    process.channel.unref?.();
+    process.once('disconnect', parentGone);
+  }
+  /** @type {import('./contracts.js').StoredDetachedEffectV1 | null} */
+  let detachedEffect = null;
 
+  /** @returns {Promise<Authority>} */
   async function load() {
     const next = validateAuthority(await readJSON(gateFile, null), { ownerSession, ownerEpoch, workerId, workerGeneration });
     authority = next;
+    /** @type {unknown} */
     const rawLatch = await readJSON(latchFile, null);
     const latch = rawLatch === null ? null : validateLatch(rawLatch);
-    const currentLatch = latch?.ownerEpoch === ownerEpoch && latch?.workerGeneration === workerGeneration && latch?.leaseId === next.leaseId && latch?.attemptId === next.attemptId;
-    if (currentLatch) { validateReport(latch.report.payload); assert(latch.report.payloadHash === digest(latch.report.payload), 'Latched report payload hash mismatch'); }
+    const currentLatch = latch !== null && latch.ownerEpoch === ownerEpoch && latch.workerGeneration === workerGeneration && latch.leaseId === next.leaseId && latch.attemptId === next.attemptId;
+    if (currentLatch) {
+      validateReport(latch.report.payload); assert(latch.report.payloadHash === digest(latch.report.payload), 'Latched report payload hash mismatch');
+      assert(latch.report.ownerSession === ownerSession && latch.report.workerId === workerId && latch.report.nonce === nonce, 'Latched report producer mismatch');
+    }
     report = currentLatch ? latch.report : null;
     return next;
   }
+  /** Check fresh authority without replacing the retained report. @param {import('./contracts.js').ReportEnvelope} retained @returns {Promise<void>} */
+  async function assertReportAuthority(retained) {
+    /** @type {import('./contracts.js').Authority} */
+    const current = validateAuthority(await readJSON(gateFile, null), { ownerSession, ownerEpoch, workerId, workerGeneration });
+    assert(current.phase === 'running', 'PAIR_WAIT: this step is not authorized');
+    assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job outlived its Fabric call; this worker must stop and reconcile before reporting.');
+    assert(retained.ownerSession === ownerSession && retained.ownerEpoch === ownerEpoch && retained.workerId === workerId && retained.workerGeneration === workerGeneration && retained.nonce === nonce, 'Report producer mismatch');
+    assert(current.task && retained.leaseId === current.leaseId && retained.attemptId === current.attemptId && retained.attemptNumber === current.task.attemptNumber && retained.planRevision === current.task.planRevision && retained.payload.taskId === current.task.id && retained.payload.stepId === current.task.steps[current.task.stepIndex].id, 'PAIR_WAIT: report authority was superseded');
+  }
+  /** Publish only complete retained bytes, never replacing an occupied inbox name. @param {import('./contracts.js').ReportEnvelope} retained @returns {Promise<void>} */
+  async function publishReport(retained) {
+    validateReportEnvelope(retained);
+    /** @type {string} */
+    const inboxFile = path.join(path.dirname(latchFile), 'inbox', `${retained.reportId}.json`);
+    /** @type {string} */
+    const staged = `${inboxFile}.${uid('publication')}.tmp`;
+    await mkdirPrivate(path.dirname(inboxFile));
+    try {
+      await atomicJSON(staged, retained);
+      await assertReportAuthority(retained);
+      try { await fs.link(staged, inboxFile); }
+      catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+        /** @type {import('./contracts.js').ReportEnvelope} */
+        const existing = validateReportEnvelope(await readJSON(inboxFile, undefined));
+        // Compare every envelope field, including original-order V1 payload bytes;
+        // JSON whitespace / envelope key ordering do not change record identity.
+        assert(Object.entries(retained).every(([key, value]) => JSON.stringify(Reflect.get(existing, key)) === JSON.stringify(value)), `Conflicting immutable report at ${inboxFile}; retained report remains in ${latchFile}`);
+      }
+    } finally { await fs.unlink(staged).catch(() => {}); }
+  }
+  /** @param {ExtensionContext | undefined} [ctx] @returns {Promise<void>} */
   async function telemetry(ctx = ctxRef) {
     if (!ctx || stopped) return;
-    return telemetrySerial.run(async () => atomicJSON(path.join(dir, 'telemetry.json'), {
-      version: PROTOCOL, nonce, ownerSession, ownerEpoch, workerId, workerGeneration, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
-      context: ctx.getContextUsage?.() || null, currentTool, lastUsage, compacting, detachedEffect,
-      phase: report ? 'waiting' : authority?.phase || 'idle', model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
-      at: Date.now()
-    }));
+    await telemetrySerial.run(async () => {
+      /** @type {import('./contracts.js').StoredTelemetryV1} */
+      const packet = {
+        version: PROTOCOL, nonce, ownerSession, ownerEpoch, workerId, workerGeneration, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
+        context: contextUsage(ctx) || null, currentTool, lastUsage, compacting, detachedEffect,
+        phase: report ? 'waiting' : authority?.phase || 'idle', model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
+        at: Date.now()
+      };
+      await atomicJSON(path.join(dir, 'telemetry.json'), packet);
+    });
   }
+  /** @param {ExtensionContext} ctx @returns {Promise<void>} */
   async function probe(ctx) {
     ctxRef = ctx; await load();
-    const status = await probeNative(pi, ctx);
+    const status = await probeNative(pi, {
+      cwd: ctx.cwd, model: ctx.model, sessionManager: ctx.sessionManager,
+      isProjectTrusted: () => ctx.isProjectTrusted?.() === true,
+      getContextUsage: () => contextUsage(ctx)
+    });
     await atomicJSON(path.join(dir, 'probe.json'), { ...status, nonce, workerId, ownerSession, ownerEpoch, workerGeneration });
     await telemetry(ctx);
   }
+  /** @param {ExtensionContext} ctx @returns {boolean} */
   function expectedModel(ctx) {
     if (!authority?.model || !ctx.model) return true;
     return ctx.model.provider === authority.model.provider && ctx.model.id === authority.model.id;
@@ -76,18 +176,26 @@ export function registerWorker(pi, env = process.env) {
     description: 'Submit a question, immutable-review checkpoint, blocker, or final review to Main. This yields the implementation lease. Call alone and stop after it succeeds.',
     promptSnippet: 'Report to Main and yield the current Pair step.',
     parameters: reportSchema,
-    async execute(_callId, params, _signal, _update, ctx) {
-      return reportSerial.run(async () => {
-        validateReport(params); await load();
-        assert(authority.phase === 'running', 'PAIR_WAIT: this step is not authorized');
+    /** @returns {Promise<ReportToolResult>} */
+    async execute(_callId, input, _signal, _update, ctx) {
+      return runSerial(reportSerial, /** @returns {Promise<ReportToolResult>} */ async () => {
+        const params = validateReport(input); await load();
+        assert(authority && authority.phase === 'running', 'PAIR_WAIT: this step is not authorized');
         assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job outlived its Fabric call; this worker must stop and reconcile before reporting.');
         const task = authority.task;
-        const reportLimit = { minimal: 4000, normal: 12000, detailed: 32000 }[task?.policy.summaryDetail] || 12000;
+        const reportLimit = { minimal: 4000, normal: 12000, detailed: 32000 }[task?.policy.summaryDetail || 'normal'] || 12000;
         assert(JSON.stringify(params).length <= reportLimit, `Report is too large for the selected summary policy (${reportLimit} characters); use concise references.`);
         assert(task && params.taskId === task.id && params.stepId === task.steps[task.stepIndex].id, 'Report task/step does not match the current lease');
         if (report) {
-          assert(report.payloadHash === digest(params), 'A different report already closed this lease');
-          return { content: [{ type: 'text', text: `Report ${report.reportId} already submitted. Stop and wait.` }], details: { pairReportId: report.reportId }, terminate: true };
+          /** @type {import('./contracts.js').ReportEnvelope} */
+          const retained = report;
+          assert(retained.payloadHash === digest(params), 'A different report already closed this lease');
+          await publishReport(retained);
+          await telemetry(ctx);
+          // Publication is not a controller acknowledgement; this only wakes Main.
+          ctx.ui.notify(`fabric-pair:report:${retained.reportId}`, 'info');
+          ctx.abort();
+          return { content: [{ type: 'text', text: `Report ${retained.reportId} already submitted. Stop and wait.` }], details: { pairReportId: retained.reportId }, terminate: true };
         }
         if (task.policy.mode === 'final-only') assert(params.kind !== 'checkpoint', 'Final-only policy requires final_review after the whole plan, or a question/blocker.');
         if (params.kind === 'final_review') assert(task.policy.mode === 'final-only' || task.stepIndex === task.steps.length - 1, 'Not authorized to finish later steps');
@@ -97,8 +205,7 @@ export function registerWorker(pi, env = process.env) {
         // Latch before exposing the report, so sibling/nested tool hooks see the stop immediately.
         report = result;
         await atomicJSON(latchFile, validateLatch({ ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: task.attemptId, report: result }));
-        await mkdirPrivate(path.join(dir, 'inbox'));
-        await atomicJSON(path.join(dir, 'inbox', `${result.reportId}.json`), result);
+        await publishReport(result);
         await telemetry(ctx);
         // This is a notification wakeup, not a model message or an acknowledgement channel.
         ctx.ui.notify(`fabric-pair:report:${result.reportId}`, 'info');
@@ -109,6 +216,8 @@ export function registerWorker(pi, env = process.env) {
       });
     }
   });
+  // AR-02: probe/load are extension commands only. Neither may request a model turn.
+  // V1 telemetry below remains diagnostic; PiRuntime's RPC tool-ID map owns lifecycle/idle eligibility.
   pi.registerCommand('pair-bridge', {
     description: 'Internal Pair worker control (not a model instruction).',
     async handler(args, ctx) {
@@ -118,19 +227,21 @@ export function registerWorker(pi, env = process.env) {
     }
   });
   pi.on('session_start', async (_event, ctx) => {
-    ctxRef = ctx; stopped = false;
+    ctxRef = ctx; stopped = parentDead;
+    if (parentDead) { ctx.abort(); ctx.shutdown(); return; }
     await mkdirPrivate(dir); await load(); await probe(ctx);
+    clearInterval(parentTimer);
     const parentPid = Number(env.PI_FABRIC_PAIR_PARENT_PID);
-    if (Number.isInteger(parentPid) && parentPid > 1) {
-      clearInterval(parentTimer);
+    if (!hadIpc && Number.isInteger(parentPid) && parentPid > 1) {
       parentTimer = setInterval(() => {
-        try { process.kill(parentPid, 0); } catch (e) { if (e.code === 'ESRCH') { stopped = true; ctxRef?.abort(); ctxRef?.shutdown(); } }
+        try { process.kill(parentPid, 0); } catch (e) { if (hasErrorCode(e, 'ESRCH')) parentGone(); }
       }, 2000); parentTimer.unref?.();
     }
   });
   pi.on('before_agent_start', async (event, ctx) => {
     ctxRef = ctx; await load();
-    assert(!waiting(), 'PAIR_WAIT: the worker is retained but has no active implementation lease');
+    if (stopped) ctx.abort();
+    assert(!waiting() && authority && authority.task, 'PAIR_WAIT: the worker is retained but has no active implementation lease');
     assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
     return { systemPrompt: `${event.systemPrompt}\n\n${WORKER_GUIDE}`, message: {
       customType: 'fabric-pair.task-state', content: statePacket(authority, report), display: false,
@@ -139,11 +250,13 @@ export function registerWorker(pi, env = process.env) {
   });
   pi.on('turn_start', async (_event, ctx) => {
     ctxRef = ctx; await load();
-    if (waiting() || !expectedModel(ctx)) ctx.abort(); // catches automatic/Fovea continuations too
+    if (stopped || waiting() || !expectedModel(ctx)) ctx.abort(); // catches automatic/Fovea continuations too
     await telemetry(ctx);
   });
   pi.on('tool_call', async (event, ctx) => {
     ctxRef = ctx; await load();
+    assert(authority, 'PAIR_WAIT: no implementation lease is active');
+    if (stopped) { ctx.abort(); return { block: true, reason: 'PAIR_WAIT: parent controller is gone; retained worker is stopping' }; }
     const blocked = gateTool(event.toolName, authority, !!report, !!authority.readOnly);
     if (blocked) { if (waiting()) ctx.abort(); return blocked; }
     if (!expectedModel(ctx)) { ctx.abort(); return { block: true, reason: 'Pair worker model changed unexpectedly' }; }
@@ -154,22 +267,27 @@ export function registerWorker(pi, env = process.env) {
     }
     if (requestsDetachedEffect(n, event.input)) return { block: true, reason: 'Pair does not permit detached/background shell work. Run a bounded foreground command and wait for its result before reporting.' };
     if (isDirectMutation(n)) {
-      const target = event.input?.path || event.input?.file_path;
+      const input = event.input;
+      const target = input !== null && typeof input === 'object'
+        ? ('path' in input ? input.path : undefined) || ('file_path' in input ? input.file_path : undefined)
+        : undefined;
       if (typeof target === 'string') {
         const absolute = path.resolve(ctx.cwd, target);
         if (!inside(authority.repoRoot || ctx.cwd, absolute)) return { block: true, reason: 'Direct write is outside this Pair workspace' };
         let existing = absolute;
         for (;;) {
           try { const real = await fs.realpath(existing); if (!inside(authority.repoRoot || ctx.cwd, real)) return { block: true, reason: 'Direct write follows a symlink outside this Pair workspace' }; break; }
-          catch (e) { if (e.code !== 'ENOENT') throw e; const parent = path.dirname(existing); if (parent === existing) break; existing = parent; }
+          catch (e) { if (!hasErrorCode(e, 'ENOENT')) throw e; const parent = path.dirname(existing); if (parent === existing) break; existing = parent; }
         }
       }
     }
     return undefined;
   });
   pi.on('tool_result', async (event, ctx) => {
-    if (!/^(bash|powershell)$/.test(toolName(event.toolName)) || event.isError || event.details?.running !== true) return undefined;
-    detachedEffect = { toolCallId: event.toolCallId, toolName: event.toolName, pid: Number.isInteger(event.details.pid) ? event.details.pid : null, detectedAt: Date.now() };
+    const details = event.details;
+    if (!/^(bash|powershell)$/.test(toolName(event.toolName)) || event.isError || details === null || typeof details !== 'object' || !('running' in details) || details.running !== true) return undefined;
+    const pid = 'pid' in details && typeof details.pid === 'number' && Number.isInteger(details.pid) ? details.pid : null;
+    detachedEffect = { toolCallId: event.toolCallId, toolName: event.toolName, pid, detectedAt: Date.now() };
     await telemetry(ctx); ctx.abort();
     // This is a last-resort fail-closed path if policy changed during a run. It
     // prevents a checkpoint but does not claim the spilled OS process was killed.

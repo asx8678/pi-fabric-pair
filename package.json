@@ -4,19 +4,75 @@
   "description": "Persistent, review-gated Pi RPC workers alongside an unchanged Pi + Fabric + Fovea main session.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=24" },
-  "keywords": ["pi-package", "pi-extension", "fabric", "fovea", "persistent-workers"],
-  "pi": { "extensions": ["./src/extension.js"], "skills": ["./skills"] },
-  "files": ["src", "skills", "docs", "README.md", "LICENSE", "CHANGELOG.md", "fabric-pair.example.json"],
+  "engines": {
+    "node": ">=24"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "fabric",
+    "fovea",
+    "persistent-workers"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/extension.js"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "files": [
+    "src/extension.js",
+    "src/main.js",
+    "src/worker.js",
+    "src/controller.js",
+    "src/actor-runtime.js",
+    "src/rpc.js",
+    "src/config.js",
+    "src/schema.js",
+    "src/contracts.js",
+    "src/evidence.js",
+    "src/native.js",
+    "src/util.js",
+    "src/metrics.js",
+    "src/observations.js",
+    "src/ui.js",
+    "skills",
+    "docs/QUICKSTART.md",
+    "docs/COMPATIBILITY.md",
+    "docs/SECURITY.md",
+    "docs/TESTING.md",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "fabric-pair.example.json"
+  ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test tests/*.test.mjs",
+    "test:ui": "node --test tests/ui-model-selector.test.mjs",
+    "build:host": "npm run typecheck && node scripts/build-host.mjs",
+    "check:host": "node scripts/build-host.mjs --check",
+    "prepack": "npm run typecheck",
     "pack:check": "npm pack --dry-run --ignore-scripts"
   },
-  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
-  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true } },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.87.1",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@earendil-works/pi-tui": "0.87.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "24.13.6",
     "typescript": "5.9.3"
   }

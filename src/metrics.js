@@ -1,21 +1,44 @@
+/** @typedef {import('./observations.js').UsageObservation} UsageObservation */
+/** @typedef {import('./observations.js').UsageTotals} UsageTotals */
+/** @typedef {'input' | 'cacheRead' | 'cacheWrite' | 'output'} UsageToken */
+
+/** @param {unknown} value @returns {value is number} */
+const finiteNumber = value => Number.isFinite(value);
+
+/**
+ * @param {(Partial<Record<UsageToken, unknown>> & {cost?: {total?: unknown} | null}) | null | undefined} usage
+ * @returns {UsageObservation | null}
+ */
 export function normalizedUsage(usage) {
   if (!usage || typeof usage !== 'object') return null;
-  const finite = key => Number.isFinite(usage[key]) && usage[key] >= 0 ? usage[key] : 0;
+  /** @param {UsageToken} key */
+  const finite = key => finiteNumber(usage[key]) && usage[key] >= 0 ? usage[key] : 0;
   const input = finite('input'), cacheRead = finite('cacheRead'), cacheWrite = finite('cacheWrite'), output = finite('output');
   const totalInput = input + cacheRead + cacheWrite;
-  const cost = usage.cost && Number.isFinite(usage.cost.total) && usage.cost.total >= 0 ? usage.cost.total : null;
+  const cost = usage.cost && finiteNumber(usage.cost.total) && usage.cost.total >= 0 ? usage.cost.total : null;
   return { input, cacheRead, cacheWrite, totalInput, output, cacheRatio: totalInput ? cacheRead / totalInput : null, cost, observedAt: Date.now() };
 }
+/** @param {Partial<UsageTotals> | null | undefined} total @param {UsageObservation} usage @returns {UsageTotals} */
 export function addUsage(total = {}, usage) {
   total ||= {};
-  const out = { ...total };
-  for (const key of ['input', 'cacheRead', 'cacheWrite', 'totalInput', 'output']) out[key] = (total[key] || 0) + usage[key];
-  out.reportedCost = (total.reportedCost || 0) + (usage.cost || 0);
-  out.unknownCostRequests = (total.unknownCostRequests || 0) + (usage.cost === null ? 1 : 0);
-  out.requests = (total.requests || 0) + 1;
+  /** @type {UsageTotals} */
+  const out = { ...total,
+    input: (total.input || 0) + usage.input,
+    cacheRead: (total.cacheRead || 0) + usage.cacheRead,
+    cacheWrite: (total.cacheWrite || 0) + usage.cacheWrite,
+    totalInput: (total.totalInput || 0) + usage.totalInput,
+    output: (total.output || 0) + usage.output,
+    reportedCost: (total.reportedCost || 0) + (usage.cost || 0),
+    unknownCostRequests: (total.unknownCostRequests || 0) + (usage.cost === null ? 1 : 0),
+    requests: (total.requests || 0) + 1,
+    cacheRatio: null
+  };
   out.cacheRatio = out.totalInput ? out.cacheRead / out.totalInput : null;
   return out;
 }
+/** @param {{turns: number, startedAt: number, usage?: Partial<UsageTotals> | null}} task
+ * @param {import('./contracts.js').BaseTaskLimits} limits @returns {string | null}
+ */
 export function limitExceeded(task, limits) {
   if (task.turns >= limits.maxTurnsPerStep) return 'Per-step model turn limit reached';
   if (limits.maxReportedCostUsd !== null && (task.usage?.reportedCost || 0) >= limits.maxReportedCostUsd) return 'Reported inference-cost budget reached';

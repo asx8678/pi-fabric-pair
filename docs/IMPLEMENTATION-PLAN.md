@@ -2,13 +2,15 @@
 
 > **Owner directive:** all automated tests, fixtures, test/probe runners, and generated test evidence were removed. Do not add or regenerate tests. **Execute only the current sequence in [§13](#13-active-implementation-plan-after-test-removal).** Earlier work packages retain useful implementation requirements, but their test-writing instructions and test-backed pass counts are historical, not active deliverables or current certification. Current allowed commands are in §10.
 
-**Status:** implementation in progress; first safety slice committed as `7583104`. No R0–R7 package is yet certified complete.
+**Status:** implementation in progress; first safety slice committed as `7583104`. AR-01 records, NEXT-02 model and AR-02 retained runtime are source-delivered. Corrected AR-03/Q01/D5 foundation paths have bounded checks; T09 was attempted without independent source acceptance and T10 is prepared but not frozen. The registered pinned typecheck and package dry-run now pass. [Completion execution](COMPLETION-EXECUTION-PLAN.md) retains ownership/checkpoint history; no R0–R7 package or runtime/release gate is certified complete.
 
 **Scope:** [SCOPE-OF-WORK.md](SCOPE-OF-WORK.md).
 
+**Current next-step correction:** [NEXT-IMPLEMENTATION-PLAN.md §8](NEXT-IMPLEMENTATION-PLAN.md#8-seven-part-completion-plan) is the consolidated seven-part delivery plan, with source witnesses, files/owners, dependency gates, acceptance criteria and a native scenario matrix. Order: F1/T09/T10 → H1-0/H1-L decisions → Store plus held loader → durable effects → canonical legacy/mailbox/archive cutover → Supervisor/two-runtime workflow → optional sleep and full configuration/observability → integration review/static/package checks → separately authorized native qualification. No acceptance requirement is waived; Kiro is not a product dependency.
+
 **Acceptance:** [ACCEPTANCE-LEDGER.md](ACCEPTANCE-LEDGER.md), mapped to the original handoff.
 
-**Principle:** retain the working architecture; prove safety-critical integration before expanding features.
+**Principle:** retain the working Pair/Pi-RPC architecture; integrate safety-critical ownership and workflow in ordered batches before expanding features. The actor-owned RPC roadmap is a bounded in-repo refinement of this plan over the existing retained transport, not a replacement for original requirements.
 
 R0–R7 below are **remediation work packages**, not assertions that the original handoff's P0–P7 were completed.
 
@@ -16,19 +18,22 @@ R0–R7 below are **remediation work packages**, not assertions that the origina
 
 Source inspection after test removal confirms package `0.1.0`, configuration schema V2, persisted state V1 and Pair wire V1. Product V1 remains incomplete; VNext is deferred and no product V2/V3 roadmap is approved. Preserve the existing opt-in, single-worker restrictions, retained sessions, evidence guards, configuration migration and immediate activation-failure containment.
 
-NEXT-01/02 are in progress: concrete leaf/public payload validators and a bounded pure coordination/transition kernel are implemented and source-reviewed, without runtime consumers. Complete aggregate state/legacy records, the remaining transition families, model freeze, durable runtime integration and production typing remain blockers. The latest full compiler exits 2 with **538 Pair-source and zero dependency diagnostics** (620-source baseline); contracts, schema and both new model modules have zero diagnostics. No CI workflow or active version change is introduced. Tests, fixtures, runners and result artifacts remain removed, so the old 86/5 counts are historical only. See [the exact implementation boundary](NEXT-01-02-PLAN.md#9-current-implementation-checkpoint).
+AR-01 completed the concrete stored-record/usage/classification portion of NEXT-01; the bounded coordination/transition kernel remains non-authorizing with no runtime consumers. The NEXT-02 follow-up now models 27 event kinds with reviewed retention, delivery, budget and reconciliation semantics; see the runbook §10 checkpoint. AR-02 now routes the legacy worker through PiRuntime with bounded transport/lifecycle/UI, verified initialization and cancellation-safe Controller integration; see the [source checkpoint](ACTOR-RPC-IMPLEMENTATION-PLAN.md#11-ar-02-source-checkpoint). Remaining blockers include AR-03 full actor/storage/wire freeze, AR-04–08 runtime/product integration and pinned-toolchain qualification. Pinned dependencies are unavailable; the [latest stopped-source supplemental TypeScript 6.0.3 check](C6-KA-TYPES-INTEGRATION-CHECKPOINT.md) covers all 24 roots with zero diagnostics using actual SDK/Node22/MCP/TUI declarations. Earlier 350/554 supplemental and 538 pinned counts are historical and not like-for-like across changed declaration resolution. Bounded accounting/validation checks do not establish full workflow or runtime correctness. No CI workflow or active version change. Historical 86/5 counts remain historical only. See [the AR-01 boundary](STORED-RECORDS-PLAN.md#9-ar-01-source-checkpoint).
 
 The current source witnesses and scope boundary are in [SCOPE-OF-WORK.md §10](SCOPE-OF-WORK.md#10-current-scope-after-test-removal). The [current implementation ledger](ACCEPTANCE-LEDGER.md#current-no-tests-implementation-ledger) separates planned work, source review and static checks from original behavioral acceptance.
 
-### Next bounded slices
+### Reconciled bounded slices
 
-1. **NEXT-01 + NEXT-02:** co-design concrete records and pure transition rules (B4/B5), then freeze the state/wire compatibility decision.
-2. **NEXT-03 + NEXT-04:** integrate held legacy migration, current-state consumers and durable grant/report/import storage (B4/B6). Merge shared controller/worker changes sequentially; do not activate an incomplete format or journal.
-3. **NEXT-05:** finish strict annotations across every production module (B7), building on the concrete types rather than hiding diagnostics.
-4. **NEXT-06:** add static-only CI, inspect packaging and reconcile documentation (implementation portion of B8). This is not the original test-dependent foundation or release gate.
-5. **Later V1:** lifecycle/policy continuity, admitted-effect settlement, branch/delivery recovery and evidence revalidation before report/budget consumers, queues or automatic repair/recovery. Then complete native UI, context, permissions and accounting.
+1. **Base model slice (NEXT-02/AR-03 model portion): source delivered.** [Runbook §10](NEXT-01-02-PLAN.md#10-next-02-transition-model-source-checkpoint) records the 27-kind internal model and compatibility decisions. Classification/reducer stay unwired; full actor/storage/wire reader-writer freeze remains AR-03, not an already-activated format.
+2. **AR-02: source delivered.** One retained PiRuntime now owns protocol/lifecycle/dialogs; Controller preserves durable intent with fenced outside-serial waits. Single live legacy worker and public tools preserved; automatic sleep remains disabled. Runtime/native qualification is still open.
+3. **AR-03: implementation underway, not merely planned.** T01–07 were accepted at the stable baseline; Task 8 still needs complete shared accounting, lifecycle/budgets, mailbox, archive and public-path closure. [The completion ledger](COMPLETION-EXECUTION-PLAN.md) assigns current corrections, followed by T09 independent review and T10 exact format/reader-writer/crash re-freeze. Preserve [D1–D6](AR3-01-DECISIONS.md), unchanged original requirements and inactive Config V3/State V2/actor-wire V2 until coherent consumers are ready.
+4. **AR-04 (refits NEXT-03/04):** integrate one canonical ActorHost, held legacy migration with original-byte backup, durable publication/recovery and one implementer; no dual worker/actor registries.
+5. **NEXT-05 + NEXT-06:** strict typing and static/package/docs after a stable compiler baseline, without suppressions or tests.
+6. **AR-05–08:** restricted supervisor, two-runtime supervised workflow (one writer), optional idle policy, configuration/observability.
 
-Only public-source/API review of R0 feasibility may proceed alongside this checkpoint; do not recreate native probes or harnesses. Unsupported effect surfaces remain rejected. Existing production verification features remain intact, but this planning work neither configures nor runs them. Parallel workers, new runtimes/platforms, a TypeScript-source rewrite and paid inference are outside the next checkpoint.
+AR-A01–35 acceptance relations refine original requirement coverage; they neither erase the original 106/FND rows nor elevate static evidence to behavioral qualification.
+
+Only public-source/API review of R0 feasibility may proceed alongside this checkpoint; do not recreate native probes or harnesses. Unsupported effect surfaces remain rejected. Existing production verification features remain intact, but this planning work neither configures nor runs them. Parallel implementation writers, new runtimes/platforms, a TypeScript-source rewrite and paid inference remain outside the checkpoint; the separately approved in-repo actor-owned RPC roadmap is the bounded exception to earlier one-worker wording, with actor mode disabled until AR-06 gates pass.
 
 ## 1. Dependency order and working method
 
@@ -450,9 +455,13 @@ Then implement IMP-12 native context/permissions/UI/accounting and IMP-13 comple
 
 ## 13. Active implementation plan after test removal
 
+**Current execution handoff:** use [the seven-part plan](NEXT-IMPLEMENTATION-PLAN.md#8-seven-part-completion-plan) and its P1 read-only review assignment before opening new production writers. The older five-area and NEXT-01–06 checkpoints below retain history and implementation detail; they do not override the corrected dependency order, the now-passing pinned compiler, or the separate P7 native gate.
+
+**Current five-area execution:** [FIVE-AREA-DELIVERY-PLAN.md](FIVE-AREA-DELIVERY-PLAN.md) makes the user's renewed scope/plan/implementation request concrete. E1 submission/authority evidence is approved under an explicit strict-support boundary for the pure V2 aggregate; old omitted evidence remains parseable but cannot qualify full aggregate replay. Active V1 runtime/data are unchanged. The E1 writer stopped after partial delivery; Main recovered and checked the actual evidence path and corrected released mailbox occupancy (M1-C). See [the bounded checkpoint](C6-PREIMAGE-CHECKPOINT.md). The next [mailbox/archive slice](MAILBOX-ARCHIVE-CHECKPOINT.md) now implements full-envelope admission, replayed service history and quiescent archive state carryover, with reviewed corrections. [Execution order](NEXT-DELIVERY-EXECUTION.md) retains M1-B, structural replanning, full-path/foundation review and AR-04–08 as open.
+
 ### 13.1 Objective, version boundary and method
 
-Deliver a source-reviewed, strictly checked foundation for the existing **single-worker product V1**. Keep package `0.1.0` during this work unless a release/version change is separately approved. Keep executable ESM JavaScript with JSDoc/checkJs; asking about TypeScript was not authorization for a language/build migration.
+Deliver a source-reviewed, strictly checked foundation for the retained-Pi-RPC product with **one implementation writer and one unresolved workflow**. Keep existing single-worker admission until the actor roadmap's explicit AR-06 gate; a restricted supervisor is not a second implementation writer. Keep package `0.1.0` during this work unless a release/version change is separately approved. Keep executable ESM JavaScript with JSDoc/checkJs; asking about TypeScript was not authorization for a language/build migration.
 
 - Configuration stays V2. Persisted state is V1 today; target canonical state V2 only when its migration and every consuming path are ready.
 - Pair wire is V1 today. If durable grant identity adds incompatible required authority/handshake fields, version that wire contract explicitly and update Controller and Worker together. Old wire records may be preserved as history, never silently treated as current authorization. Pi's JSONL transport is unchanged.
@@ -460,14 +469,17 @@ Deliver a source-reviewed, strictly checked foundation for the existing **single
 - No tests, fixtures, test/probe runners, fault simulators or test artifacts may be written or restored. Review source and use only §10's static commands. Original behavioral acceptance remains unverified.
 - Preserve existing changes and deleted test files in the working tree; no resets, commits or pushes. Do not edit reference/installed upstream sources, user credentials or live session data.
 
-Use NEXT-01–06 below as the current task list. These IDs subdivide the existing B4–B8 work, not new product phases. All paths are package-relative; new files are proposals until implemented. [Scope §10](SCOPE-OF-WORK.md#10-current-scope-after-test-removal) contains the inspected code witnesses; the [current ledger](ACCEPTANCE-LEDGER.md#current-no-tests-implementation-ledger) records status.
+Use NEXT-01–06 below as retained work-package mappings within the reconciled AR-01–08 execution order. They subdivide B4–B8, not new product phases; original requirement/FND rows are preserved. All paths are package-relative; new files are proposals until implemented. [Scope §10](SCOPE-OF-WORK.md#10-current-scope-after-test-removal) contains the inspected code witnesses; the [current ledger](ACCEPTANCE-LEDGER.md#current-no-tests-implementation-ledger) records status.
 
 ```text
-NEXT-01 records + NEXT-02 transitions (co-design and freeze)
-    -> NEXT-03 held migration / consumers
-    -> NEXT-04 durable publication / retention / rollback
-    -> NEXT-05 complete production typing
-    -> NEXT-06 static integration checkpoint (not release certification)
+AR-01 records + NEXT-02 internal model slice (source delivered)
+    -> AR-02 retained PiRuntime extraction / protocol correction (source delivered)
+    -> AR-03 full actor / Config V3 / State V2 / control-wire V2 freeze
+    -> AR-04 canonical host: NEXT-03 migration + NEXT-04 durable publication
+    -> NEXT-05 strict typing + NEXT-06 static integration
+    -> AR-05 restricted supervisor -> AR-06 gated two-runtime workflow
+    -> AR-07 optional idle policy -> AR-08 configuration / observability
+All runtime/native/release qualification remains separate and unverified.
 ```
 
 Develop annotations with each batch, not only at NEXT-05. Integrate NEXT-03/04 sequentially as one coherent state-format rollout; do not ship a new version constant with old consumers or an unimplemented commit protocol. Public effect-seam source review may run independently, but no automated probes are reintroduced.
@@ -476,7 +488,7 @@ Develop annotations with each batch, not only at NEXT-05. Integrate NEXT-03/04 s
 
 **Joint execution runbook:** [NEXT-01 + NEXT-02 plan](NEXT-01-02-PLAN.md). Follow its J01–J06 slices for both batches. It defines the record inventory, compatibility fences, pure event/result model and static handoff; it does not activate state V2 or runtime grant enforcement.
 
-**Immediate implementation plan:** [Stored-record contracts and legacy classification](STORED-RECORDS-PLAN.md). SR-01–06 specify nested/aggregate types, source-backed historical profiles, the context-free classifier, writer/validator corrections (`diagnosticFile` and non-approval checkpoint metadata), independently profiled old diagnostics, disjoint agent ownership and the no-tests static ledger. This narrower plan is ready; its implementation has not started.
+**Immediate implementation plan:** [Stored-record contracts and legacy classification](STORED-RECORDS-PLAN.md). SR-01–06 specify nested/aggregate types, source-backed historical profiles, the context-free classifier, writer/validator corrections (`diagnosticFile` and non-approval checkpoint metadata), independently profiled old diagnostics, disjoint agent ownership and the no-tests static ledger. Its AR-01 source implementation is delivered; the intended-toolchain gate and runtime migration remain open.
 
 **Files:** `src/contracts.js`, `src/schema.js`, `src/config.js`, `src/metrics.js`, architecture documentation. **Depends on:** current source inventory; co-design with NEXT-02.
 
@@ -489,7 +501,7 @@ Develop annotations with each batch, not only at NEXT-05. Integrate NEXT-03/04 s
 
 ### 13.3 NEXT-02 — Pure transition rules (B5)
 
-**Files:** `src/coordination.js`, `src/transitions.js`, `src/contracts.js`, architecture documentation. A bounded internal kernel now exists; [runbook §9](NEXT-01-02-PLAN.md#9-current-implementation-checkpoint) lists implemented and unsupported families. **Depends on:** NEXT-01 draft types; freeze both before NEXT-03/04.
+**Files:** `src/coordination.js`, `src/transitions.js`, `src/contracts.js`, architecture documentation. The 27-kind pure journal kernel is source-implemented; [runbook §10](NEXT-01-02-PLAN.md#10-next-02-transition-model-source-checkpoint) lists event/issuer semantics, evidence and unsupported forms. **Depends on:** NEXT-01 draft types; freeze both before NEXT-03/04.
 
 1. Separate task status, worker runtime, grant lifecycle and durable hold reasons. Pure helpers return a decision/new state without RPC, filesystem or model calls.
 2. Define stop/off/on/start/pause/resume/cancel/reset, ownership replacement, report/decision arrival, storage failure and uncertain-delivery transitions. A closed lease never reopens. `on` clears only disabled hold; `start` may clear deliberate stop but grants no task execution.

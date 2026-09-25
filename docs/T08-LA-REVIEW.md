@@ -1,0 +1,32 @@
+# T08-LA independent bounded source review — BLOCKED
+
+Reviewer `062ad00ed61e4e1c828507a3e1a7db4c` stopped after read/grep/find review of the stable actor/core/contracts slice. No edits or execution. **Not T09, not a combined-tree review while typing writers ran, and not completion certification.** Main collected the complete handoff; this records its actionable source findings. Line numbers identify the reviewed LA candidate after Main's captured-accounting correction.
+
+## Required corrections
+
+| Priority | Finding and exact source witnesses | Required boundary |
+|---|---|---|
+| P1 | Input accounting can be falsely complete with no usage observation, or permanently incomplete once one exists. actor-model.js:2360–2383 invents input gaps only from retained usage; coordination.js:43–46,515,797–813,851–858,1145–1172 has no input dimension. | Extend the existing kernel Metric/METRICS/Ledger/zeroLedger/ledger, command/crash gaps, usage lower bounds and accounting finding/reconcile path with inputTokens. Absence of historical coverage must remain unknown. Derive aggregate gaps from that reconciliable dimension, not an unconditional synthetic gap. |
+| P1 | Distinct original implementer observations sharing usageId are rejected by coordination.js:1145–1158. Actor dedup at 1694–1705 only fixes repeated original observations with changed caller IDs. | Derived usage index keyed by original observationId, retaining usageId as provenance; complete producer/scope/value/time retry comparison. Align standalone retry handling before generic receipt conflicts where needed, without replacement IDs or extra charges. |
+| P1 | Postdispatch structural replanning absent: actor-model.js:1891–1901,1968; coordination.js:333–343,698–709,864–873. Predispatch revision, step advancement and revise-feedback rework are not structural plan replacement. | Precise same-reducer contract required. Reviewer proposes optional closed planChange on supervisor decide/revise, candidate+commit validation, preserved prior steps/IDs/ledgers/consumption and actual settled plan-control correlation. Exact current-step replacement/disposition needs Main's explicit decision. Do not smuggle steps into human budget amendments. |
+| P1 | Logical obligations do not gate disposal/slot release: actor-model.js:1218–1231,1317,1720–1730,2162–2170; kernel notice resolution 1096–1101. | Gate disposal on logical dispositions as well as physical reservations, and add current-Main-bound terminal disposition evidence for denied consequences. Preserve original held commitments. A gate without disposition would create an unrecoverable deadlock. |
+| P2 | Null supervisor metric cannot be reconciled: actor-model.js:1771–1779,2107–2116,2366–2374. Changed original values conflict; additional known observations leave the old null entry; reconciliation requires every entry known. | Explicit producer/metric-scoped unknown resolutions backed by named evidence; preserve original provenance and avoid double-charging replacements. Not 'some observation is known'. |
+| P2 | Late facts rejected: actor-model.js:1962–1963,1975–1987. Aborted/transport-closed sets settled and prevents later native settlement; output receipt time is treated as production time. | Retain independent settlement observations; derive native completion separately and bind containment to complete retained coverage. Output needs original observation/time and late retention/hold, without granting consequence authority. |
+
+### Witnessed disposal sequence
+
+Retain approval candidate → pause producing supervisor → observe storage commitment (kernel applies; actor records held commitment) → resolve notice against raw kernel decision → escalate/dispose after physical reservations drain → resume lifecycle/submit another workflow. The prior held commitment/report still appears in unresolvedObligations while the unresolved-workflow slot is released. Main's own source read confirms workflow-closed checks physical reservations/notices but not workflowObligations; this is not a request to delete the old facts.
+
+## Existing C3/C4 blocker, not a new LA regression
+
+**Second inspection chain exceeds the public operation reference ceiling.** actor-model.js:860–910,983–993,2478–2497,2577–2610; actor-contract-common.js:26,321–325. One minimal chain consumes eight references per fold. Rebuilding base and candidate pays 8+8 on an ordinary append; the first new source for another review pays 8+9=17 against maxReferences 16.
+
+Required: genuine same-operation reuse of privately checked immutable actor-prefix results. No higher ceilings, context reset, caller flags or equality credit for separately supplied copies. Single-chain byte/node/work fit is still unmeasured. Remaining unmetered actor traversals include identityProducer/commandProducer (1446–1456) and nested issuance uniqueness scans (1921–1922).
+
+## What the source now supports
+
+Submission binds immutable assignment/config/participants/workspace and gates lifecycle, one unresolved workflow and lifetime budget. Planning activation checks actual producer/control/generation/command/root proof and per-actor reservation. Settled plan retention precedes dispatch; accounting reconciliation precedes fresh admission. Kernel grant/publication/prompt/report/native/effect facts stay independent. Inspection retention does not require future producing settlement; decision application does, with exact all-scope/current-checkpoint evidence. Candidate and commitment use the same kernel machinery, and actor mirrors cannot reauthorize held commits.
+
+Question/answer has a source path but requires answer and review/action-answer controls from the same supervisor activation; an answer control alone is insufficient. Cancellation/escalation remain source-reachable and terminal state absorbing, subject to the disposal defect. Supervisor dedup, attributed aggregate lower bounds, pure accounting derivation, C3 cache/capture/publication and C4 private kernel context reuse are visible. No null-deadline bypass was found: assignment deadline is finite and bound to assignedAt+taskTimeoutMs.
+
+These are **source observations, not an executed full workflow**. M6/M7 remain known separate work. Runtime provenance remains the Host's responsibility. All reviewer compiler/tests/probes/runtime checks were NOT RUN. Main's compiler evidence is in [the stopped candidate checkpoint](T08-LA-TYPES-CW-CHECKPOINT.md).

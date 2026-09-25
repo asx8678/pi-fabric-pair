@@ -1,0 +1,12 @@
+{
+  "executor": {
+    "shellHangMs": 0
+  },
+  "agents": {
+    "maxDepth": 0
+  },
+  "prewalk": {
+    "enabled": false
+  },
+  "configVersion": 4
+}

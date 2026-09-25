@@ -1,6 +1,6 @@
 # Stored-record contracts and legacy classification — implementation plan
 
-**Status:** planned, not implemented. This is the next bounded slice of NEXT-01 / J02–J03, with a compatibility handoff to J05. It does not complete NEXT-02 or activate NEXT-03/04. Parent prepared this plan from two zro DeepSeek V4.1 Flash source maps, two Astra xhigh design reviews and an independent Astra xhigh final-plan review. Findings were reconciled against current code and committed historical producers; the final review's diagnostic-era and decision-domain corrections are incorporated below.
+**Status:** AR-01 source slice implemented and reviewed; intended-toolchain compiler gate remains blocked. See [§9](#9-ar-01-source-checkpoint) for exact evidence and limitations. This is the bounded NEXT-01 / J02–J03 slice with a compatibility handoff to J05; it does not complete NEXT-01/02 or activate NEXT-03/04. The original plan below came from zro DeepSeek V4.1 Flash source maps, Astra xhigh design reviews and committed historical producers.
 
 **Parent runbook:** [NEXT-01-02-PLAN.md](NEXT-01-02-PLAN.md). **Tracker:** [ACCEPTANCE-LEDGER.md](ACCEPTANCE-LEDGER.md#current-no-tests-implementation-ledger).
 
@@ -172,7 +172,7 @@ If source-backed safe validation requires an incompatible field or a real lifecy
 
 ## 7. Acceptance ledger and verification
 
-All rows below are **planned** implementation checks, not completed by writing this document. The SR rows supplement J03; they do not replace/add product requirements to the original 106-row ledger.
+The rows below are implementation acceptance criteria, with current evidence recorded in §9. They are not behavioral passes. The SR rows supplement J03; they do not replace/add product requirements to the original 106-row ledger.
 
 | Check | Source/static evidence required |
 |---|---|
@@ -196,3 +196,43 @@ This batch may finish when SR-A01–08 have source/static evidence and the suppo
 NEXT-03/04 must separately retain exact original bytes **before** decoding/replacement (including rejected input), preserve referenced history/reports/evidence, replace identity-fabricating migration, retain unresolved obligations during startup, add truthful held-state consumers and integrate durable publication/settlement. `classifyStoredState(value)` cannot recover bytes already discarded by `readJSON`; neither its borrowed `original` nor an `atomicJSON` reserialization is an original-byte backup.
 
 No claim of runtime enforcement, complete accounting, settled effects, installed/native safety or a passed original acceptance gate follows from this plan or from compiler success.
+
+## 9. AR-01 source checkpoint
+
+**Revision/scope:** working diff against `078820d2c94057dfa9a808054a2890559e494f96`. Production changes are limited to `src/contracts.js`, new `src/observations.js`, and compatible caller updates in `src/controller.js` / `src/metrics.js`. Astra xhigh handled disjoint source work, independent read-only review and caller integration; zro DeepSeek V4.1 Flash audited historical producers. Parent reconciled the delivered code and static results. No commit was created.
+
+### Delivered field and profile closure
+
+| Record surface | Implemented domain / boundary |
+|---|---|
+| Usage observation | All token fields and `totalInput` are required finite nonnegative numbers, including fractional values. `cacheRatio` and `cost` are explicitly nullable; timestamps are checked. Validate stored arithmetic/ratio relationships without reconstructing values. |
+| Usage totals | Required finite token/subtotal fields; safe request counters with unknown-price requests bounded by total requests. Null totals remain null, and reported cost never becomes complete spending. |
+| Root / worker | Concrete current and pre-identity types; closed own-field shapes, IDs, binding strings, worker spec, statuses and nested records. Current root epoch and worker generation allow zero. `diagnosticFile` is optional retained metadata. |
+| Task / report / decision | Concrete policies/limits, steps and index, counters/timestamps, usage, nullable pending/finalized reports, decision maps and optional lifecycle metadata. Validate original payload hashes and attached task/step/attempt/lease/plan relationships without rewriting the producer tuple. Non-approval checkpoint strings retain the public schema domain; approval still requires its checkpoint hash. |
+| Requests / history / notices | Validate consumed receipt/history fields and notice delivery metadata/status. Check map keys, duplicate identities and ownership contradictions among retained records. Receipts may outlive reset or bounded history; absence alone does not fabricate a target or prove delivery. |
+| Telemetry / exchange / probe | Check consumed context/model/tool/usage/native fields. `detachedEffect` is a nullable record, not a boolean; its PID is producer-retained integer metadata, not OS-liveness evidence. Pi probe thinking accepts `max`; omitted `sessionFile` follows the upstream serialization contract. Unconsumed external extension/native slots stay `unknown`, not trusted capabilities. |
+| Input purity | Reject proxies, accessors, non-JSON values, cycles and sparse arrays before reading/hashing. Helpers return original checked objects and do not add fields, defaults, identities or timestamps. |
+
+Root identity layout is either `identity-bearing` or the exact proven `pre-identity` omissions. Per-task policy layout is independently `current-policy` or `pre-deferred-policy`; `final`/`strict` aliases are reported, not normalized. Historical diagnostics can survive under a migrated identity-bearing root. Partial identity/policy groups and contradictions are corrupt; valid but unproven versions/shapes and adaptive policy are unsupported. There is no permissive fallback after a failed current-profile validation.
+
+`classifyStoredState(value)` returns `recognized` or `rejected`, always `nonAuthorizing: true` and the borrowed `original`. Recognition includes `identityLayout`, task/diagnostic layouts, stored binding, `bindingStatus: 'unchecked'`, and reconciliation reasons. Rejection exposes typed category/code/path/message; unexpected programming failures escape. Classification has **no active consumers** and adds no tools, commands or configuration.
+
+### Review corrections and caller compatibility
+
+- Accept `running`, `awaiting_settle` and `interrupted` as stored worker observations: `startUnlocked` already copies nonterminal task status into the worker. This corrects a writer/guard mismatch, not lifecycle design.
+- A stale `previousStatus` cannot attach an old retained report to a resumed attempt. Suspended reports bind as current only with matching attempt evidence (historical lease/plan fence); otherwise unresolved evidence remains ambiguous. Producer tuples are not rebased to current root/worker identities.
+- Controller updates add truthful task-presence/handle/notice/decision types, equivalent optional-field conditions, and early failures for absent tasks/reports. They do not reorder authority or durable effects.
+- Metrics uses explicit typed accumulation instead of the dynamic-key loop. Zero-fill, reported-cost/unknown-price counters and ratio calculations retain their existing semantics; validation itself never aggregates or repairs usage.
+
+### Evidence and remaining gates
+
+| Check | Current evidence / limitation |
+|---|---|
+| SR-A01–03 | Concrete consumed records and source-backed current/historical profiles implemented and independently reviewed; compatibility corrections above integrated. This is not an exhaustive behavioral profile check. |
+| SR-A04–06 | Public exports/import direction mechanically located. Narrow no-file direct calls recognized an empty production startup shape as non-authorizing, rejected missing input, preserved references/serialization, and accepted nullable/producer-generated usage with fractional counts, zero cost and unknown-price accounting. No classifier runtime registration exists. |
+| SR-A07 | Changed JS passes `node --check`. `npm run typecheck -- --pretty false` cannot run the pinned compiler: project dependencies are absent (`tsc: command not found`). No install or tsconfig edit was made. Supplemental full-source evidence below is not a replacement for this gate. |
+| SR-A08 | `git diff --check` passes; source/static scope inspected. No tests, fixtures, runners, negative compiler cases or generated test evidence added. No Pair workers, configured verification or application-provider runs; session data, upstream files and package/config/version entries were untouched. |
+
+Supplemental check used available **TypeScript 6.0.3 / `@types/node` 26.6.2**, all **16** current production roots and the existing strict/checkJs options, with in-memory external package/type resolution only. It exits **2**: **554 Pair-source / 0 dependency diagnostics**, versus **599** for HEAD under the same supplemental resolution. `contracts.js` and `observations.js` have **zero** diagnostics; compatible caller integration introduces no new attributable diagnostics. Remaining module counts: config 69, controller 104, evidence 48, extension 1, main 126, metrics 2, native 29, rpc 23, ui 33, util 30, worker 89. These are **not comparable** to the older pinned-toolchain 538 count and do not make the overall source gate pass.
+
+AST-body comparison against HEAD confirmed `migrateStoredState`, Controller `init` / `persist` / `writeAuthority`, and `limitExceeded` unchanged. Consequently existing identity-fabricating migration and pending-report clearing remain unfixed. Package/config/state/wire stay `0.1.0`/V2/V1/V1; decoded-object preservation is not an original-byte backup. Next: resolve the pinned static gate, then AR-02 event compatibility, followed by the separately planned actor ownership and coherent recovery/obligation integration. No runtime, migration, native or release qualification is claimed.

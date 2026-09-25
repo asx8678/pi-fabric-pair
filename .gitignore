@@ -4,3 +4,4 @@ coverage/
 .DS_Store
 *.log
 .pi/fabric/
+src/native-store/build/
