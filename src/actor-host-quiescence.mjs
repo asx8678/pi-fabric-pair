@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 import { assert } from './util.js';
 import { archiveHash } from './actor-archive.mjs';
 import { validateActorStateV2 } from './actor-model.js';

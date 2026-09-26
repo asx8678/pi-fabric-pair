@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 /**
  * Private AR-03 Config V3 leaf adapter. Pure, non-authorizing and acyclic.
  *

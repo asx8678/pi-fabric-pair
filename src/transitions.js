@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 import { CoordinationValidationError, validateCoordinationModel, validateTransitionEvent, validateCoordinationModelInContext, validateTransitionEventInContext, appendCoordinationModelInContext } from './coordination.js';
 import { requireValidationContext } from './actor-contract-common.js';
 

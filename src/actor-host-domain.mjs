@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 import path from 'node:path';
 import * as Store from './actor-store.js';
 import { readBounded, readBudget, withDirectory } from './actor-store-io.js';

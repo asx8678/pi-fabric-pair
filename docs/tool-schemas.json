@@ -236,6 +236,51 @@
           "description": "Exact current checkpoint hash, required for approval",
           "minLength": 1,
           "maxLength": 64
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Stable step ID",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "title": {
+                "type": "string",
+                "description": "Step title",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "instructions": {
+                "type": "string",
+                "description": "Bounded implementation instructions",
+                "minLength": 1,
+                "maxLength": 24000
+              },
+              "acceptance": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "description": "Acceptance criterion",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "maxItems": 64
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "instructions"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "description": "revise only: the complete replacement plan. Completed steps must be kept unchanged as its prefix; this starts a new plan revision."
         }
       },
       "required": [

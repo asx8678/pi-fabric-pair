@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 import { types } from 'node:util';
 import { createHash } from 'node:crypto';
 import { COMMON_BOUNDS, decodePairJSON, encodePairJSON, pairDigest, validateId } from './actor-contract-common.js';

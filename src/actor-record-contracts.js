@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 /**
  * AR-03 T03 - pure actor, workflow and activation record leaves.
  *
@@ -969,10 +970,3 @@ export function validateActivationRecordV2InContext(value, context) {
   const captured = captureValidationWork(value, 'activationRecord', context);
   return activationRecord(captured, 'activationRecord', context);
 }
-
-
-
-
-
-
-

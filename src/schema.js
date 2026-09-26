@@ -3,7 +3,7 @@ import { validateReportPayload } from './contracts.js';
 /** @typedef {import('./contracts.js').Step} Step */
 /** @typedef {import('./contracts.js').ReportPayload} ReportPayload */
 /** @typedef {{workerId: string, requestId: string, objective: string, constraints?: string[], context?: string, steps: Step[]}} DispatchPayload */
-/** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel', feedback: string, checkpointHash?: string}} DecisionShape */
+/** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel', feedback: string, checkpointHash?: string, steps?: Step[]}} DecisionShape */
 /** @typedef {DecisionShape & ({action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'cancel'})} DecisionPayload */
 
 // The JSON Schema subset understood by validate; these types add no schema fields.
@@ -44,7 +44,8 @@ export const decisionSchema = object({
   workerId: string('Configured worker ID', 80), taskId: string('Task ID', 80), reportId: string('The exact report being answered/reviewed', 80),
   action: enumOf(['answer', 'approve', 'revise', 'cancel']),
   feedback: string('Answer, concrete changes required, or review rationale', 12000),
-  checkpointHash: string('Exact current checkpoint hash, required for approval', 64)
+  checkpointHash: string('Exact current checkpoint hash, required for approval', 64),
+  steps: { ...array(stepSchema, 32), minItems: 1, description: 'revise only: the complete replacement plan. Completed steps must be kept unchanged as its prefix; this starts a new plan revision.' }
 }, ['workerId', 'taskId', 'reportId', 'action', 'feedback']);
 export const inspectSchema = object({ workerId: string('Worker ID', 80), reportId: string('Report ID; omit for latest', 80), file: string('Optional changed path to read from immutable evidence', 1024) }, ['workerId']);
 export const statusSchema = object({}, []);
@@ -93,6 +94,11 @@ function assertDecisionShape(input) { validate(decisionSchema, input); }
 function assertDecisionPayload(input) {
   assertDecisionShape(input); safeId(input.workerId, 'workerId'); safeId(input.taskId, 'taskId'); safeId(input.reportId, 'reportId');
   if (input.action === 'approve') assert(/^[a-f0-9]{64}$/.test(input.checkpointHash || ''), 'Approval requires the exact checkpointHash');
+  if (input.steps !== undefined) {
+    assert(input.action === 'revise', 'Only revise may replace the plan steps');
+    /** @type {Set<string>} */
+    const ids = new Set(); for (const step of input.steps) { safeId(step.id, 'step.id'); assert(!ids.has(step.id), 'Step IDs must be unique'); ids.add(step.id); }
+  }
 }
 
 /** @param {unknown} input @returns {DispatchPayload} */
@@ -104,5 +110,13 @@ export function validateDispatch(input) {
 }
 /** @param {unknown} input @returns {ReportPayload} */
 export function validateReport(input) { return validateReportPayload(input); }
+/** UTF-8 byte ceiling for one report payload, checked by both the worker and the controller.
+ * @param {string | undefined} summaryDetail */
+export function reportByteLimit(summaryDetail) { return { minimal: 4000, normal: 12000, detailed: 32000 }[summaryDetail || 'normal'] || 12000; }
+/** @param {unknown} payload @param {string | undefined} summaryDetail */
+export function assertReportSize(payload, summaryDetail) {
+  const limit = reportByteLimit(summaryDetail);
+  assert(Buffer.byteLength(JSON.stringify(payload), 'utf8') <= limit, `Report is too large for the selected summary policy (${limit} UTF-8 bytes); use concise references.`);
+}
 /** @param {unknown} input @returns {DecisionPayload} */
 export function validateDecision(input) { assertDecisionPayload(input); return input; }

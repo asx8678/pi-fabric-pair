@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `pair_decide` `revise` accepts optional `steps` to replace the plan. Completed steps must stay unchanged as its prefix; the task's `planRevision` advances (counted once against the revision limit), old-revision reports are rejected, and `work-order.json` is rewritten so post-compaction scope restoration keeps working. The worker receives the revised plan in the decision message.
+- Report size limits are now UTF-8 bytes (same 4000/12000/32000 values), checked by the worker and again by the controller. Non-ASCII reports are effectively limited more tightly than before.
+- A worker can resubmit its identical locked-in report: the tool gate now lets `pair_report` through after the report latch, so the DUR-01 republish path is reachable. Other tools stay blocked.
+- Main's decision feedback now reaches the worker as a JSON field in a `MAIN DECISION` block instead of free prompt text.
+- The controller's backstop file scan runs every 2 s instead of 350 ms (`scanIntervalMs`); runtime events still trigger scans immediately.
+- A stopped worker's `before_agent_start` now returns nothing after aborting. Every staged actor/coordination module (all except the live `actor-runtime.js`) is labelled as not live; the generated `.mjs` host modules were regenerated from their labelled `.mts` sources.
+- The human-resume RECOVERY instruction is sent as a JSON block, like decisions.
+- `controller.js`: a `fenced(work, pending)` helper replaces the repeated `await …; this.requireWork(work)` activation checks. No behaviour change.
+
 - Removed the bundled offline test suite: every file under `tests/` (including `tests/helpers/`), the `test` and `test:ui` npm scripts, and `docs/TESTING.md`. The retained static checks are unchanged: `npm run typecheck`, `npm run pack:check`, and `npm run check:host` for the parked native source (macOS/arm64). The repository no longer bundles automated tests; verify changes by manual review. Earlier entries below that describe test additions or point at `docs/TESTING.md` are records of the suite as it existed at the time, not current instructions.
 
 - Reworked the Pair TUI. `/pair` now builds its menu from the current state: waiting reports come first (review, diff, deliver to Main), and each worker only offers the lifecycle actions that apply (no Start while running, Resume only when held, Cancel asks for a reason). Added read-only `/pair report` (a report card separating Pair-captured files and checks from the worker's claims) and `/pair diff` (colored checkpoint diff with real file names and added-file contents); neither marks a report inspected, so Main must still `pair_inspect` before approving. `/pair inbox` and `/pair yield` show readable lists instead of JSON. The scroll view sizes to the terminal, honours keybindings, wraps wide characters correctly and adds `g`/`G`, `/` search with `n`/`N`, and `[`/`]` file jumps. The widget names what a waiting worker waits on (`← W◐ question`), shows the plan of the active worker (labelled when there are several), and the waiting line is shorter.

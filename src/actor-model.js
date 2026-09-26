@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 /**
  * AR3-T08 canonical actor/workflow composition (pure, non-authorizing).
  *

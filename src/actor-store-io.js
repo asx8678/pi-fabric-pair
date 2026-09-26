@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync } from 'node:child_process';
@@ -267,4 +268,3 @@ export async function qualifyProfile(agentDir, attestation) {
   if (attestation !== undefined) qualifications.set(agentDir, qualified.identity);
   return qualified.profile;
 }
-

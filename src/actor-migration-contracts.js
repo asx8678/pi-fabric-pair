@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 /**
  * Private AR-03/T05 leaves, ar3-common-abi/2 + inspectLegacySource.
  * No runtime integration, migration effects, provenance, or replay admission.

@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 /**
  * AR-03 T04, ar3-common-abi/2. Pure, non-authorizing wire/mailbox leaves.
  *

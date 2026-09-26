@@ -2,12 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
+import { isDeepStrictEqual } from 'node:util';
 import { PiRpc, isRpcRecord } from './rpc.js';
 import { PiRuntime } from './actor-runtime.js';
 import { Evidence, repositoryRoot, verifyConfigured } from './evidence.js';
 import { validateConfig } from './config.js';
 import { meshRootFor, preflightNativeProfile } from './native.js';
-import { validateDecision, validateDispatch, validateReport } from './schema.js';
+import { assertReportSize, validateDecision, validateDispatch, validateReport } from './schema.js';
 import { incrementCounter, migrateStoredState, STATE_VERSION, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateStoredState } from './contracts.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
 import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, digest, inside, mkdirPrivate, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
@@ -46,8 +47,8 @@ const activeTask = record => !!(record?.task && !TERMINAL.has(record.task.status
 
 /** Controller state is separate from conversation context and survives compaction. */
 export class PairController extends EventEmitter {
-  /** @param {{config: Parameters<typeof validateConfig>[0], cwd: string, ownerSession: string, sourcePaths?: string[], storageDir?: string, callbacks?: ControllerCallbacks, rpcFactory?: (options: import('./rpc.js').RpcOptions) => PiRpc}} options */
-  constructor({ config, cwd, ownerSession, sourcePaths = [], storageDir, callbacks = {}, rpcFactory = opts => new PiRpc(opts) }) {
+  /** @param {{config: Parameters<typeof validateConfig>[0], cwd: string, ownerSession: string, sourcePaths?: string[], storageDir?: string, scanIntervalMs?: number, callbacks?: ControllerCallbacks, rpcFactory?: (options: import('./rpc.js').RpcOptions) => PiRpc}} options */
+  constructor({ config, cwd, ownerSession, sourcePaths = [], storageDir, scanIntervalMs = 2000, callbacks = {}, rpcFactory = opts => new PiRpc(opts) }) {
     super();
     /** @type {PairConfig} */ this.config = validateConfig(config);
     /** Persisted requested runtime settings; live authority keeps its original profile until explicit idle reconciliation. @type {PairConfig | null} */
@@ -56,6 +57,9 @@ export class PairController extends EventEmitter {
     /** @type {Evidence | null} */ this._evidence = null;
     this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory;
     this.storageDir = storageDir; this.dir = storageDir || '';
+    // Runtime wakes (every RPC event, including the worker's report notify) drive scans;
+    // this interval is only a backstop for file changes that arrive without an event.
+    this.scanIntervalMs = Number.isFinite(scanIntervalMs) && scanIntervalMs > 0 ? scanIntervalMs : 2000;
     /** @type {Map<string, PiRuntime>} */ this.handles = new Map();
     /** Worker-only replacements share one operation; stop/close can still revoke it. @type {Map<string, Promise<WorkerRecord>>} */ this.restarts = new Map();
     /** @type {WeakMap<PiRuntime, RuntimeData>} */ this.runtimeData = new WeakMap();
@@ -98,7 +102,7 @@ export class PairController extends EventEmitter {
     for (const id of Object.keys(this.state.workers)) { await mkdirPrivate(this.workerDir(id)); await this.writeAuthority(id, 'stopped'); }
     this._evidence = new Evidence(path.join(this.dir, 'evidence'), this.config.evidence);
     await this.persist();
-    this.timer = setInterval(() => this.scheduleScan(), 350); this.timer.unref?.();
+    this.timer = setInterval(() => this.scheduleScan(), this.scanIntervalMs); this.timer.unref?.();
     return this;
     } catch (error) { await this.releaseLock?.(); this.releaseLock = null; throw error; }
   }
@@ -449,8 +453,8 @@ export class PairController extends EventEmitter {
     const work = reserved.work;
     assert(work, 'Missing dispatch reservation');
     try {
-      await this.startReserved(work); this.requireWork(work);
-      await this.prepareBase(work); this.requireWork(work);
+      await this.fenced(work, this.startReserved(work));
+      await this.fenced(work, this.prepareBase(work));
       await this.activate(work, this.workMessage(work.task, true));
     } catch (error) { await this.activationFailed(work, error); throw error; }
     return { taskId: work.task.id, workerId: work.id, sessionId: work.record.sessionId, status: work.task.status, message: 'Assigned asynchronously. Do not wait or poll; the report waits in Pair\'s inbox until you call pair_yield.' };
@@ -459,8 +463,8 @@ export class PairController extends EventEmitter {
   async prepareBase(work) {
     this.requireWork(work);
     if (work.task.baseSnapshotRef !== path.join(this.dir, 'tasks', work.task.id, 'base-pending.json')) return;
-    const base = await this.evidence.capture(work.record.repoRoot); this.requireWork(work);
-    const baseSnapshotRef = await this.evidence.saveSnapshot(base); this.requireWork(work);
+    const base = await this.fenced(work, this.evidence.capture(work.record.repoRoot));
+    const baseSnapshotRef = await this.fenced(work, this.evidence.saveSnapshot(base));
     await this.transaction(async () => { this.requireWork(work); work.task.baseSnapshotRef = baseSnapshotRef; await this.persist(); });
     this.requireWork(work);
   }
@@ -470,6 +474,12 @@ export class PairController extends EventEmitter {
       authorizedStep: task.steps[task.stepIndex], ...(first || task.policy.mode === 'final-only' ? { plan: task.steps, context: task.context } : {}),
       supervision: task.policy.mode, summaryDetail: task.policy.summaryDetail, finalStep: task.policy.mode === 'final-only' || task.stepIndex === task.steps.length - 1,
       lastDecision: task.lastDecision || null })}\nUse Fabric/Fovea and finish by calling pair_report. ${task.policy.mode === 'final-only' ? 'All listed steps are authorized; request review after the complete plan, and ask questions whenever needed.' : `Only the current step is authorized. Report a checkpoint before advancing.`}`;
+  }
+  /** Main's feedback travels as a JSON string field, never as free prompt text.
+   * @param {TaskRecord} task @param {{reportId: string, action: string, feedback: string, steps?: unknown[]}} input */
+  decisionMessage(task, input) {
+    const revised = input.steps ? { revisedPlan: task.steps, planRevision: task.planRevision } : {};
+    return `${this.workMessage(task)}\nMAIN DECISION\n${JSON.stringify({ reportId: input.reportId, action: input.action, feedback: input.feedback, ...revised })}\nThe feedback field is Main's instruction for the authorized step only; it grants nothing beyond authorizedStep.`;
   }
   /** @param {TaskRecord} task */
   rotateAttempt(task) { task.attemptNumber = incrementCounter(task.attemptNumber, 'task.attemptNumber'); task.attemptId = uid('attempt'); }
@@ -485,6 +495,9 @@ export class PairController extends EventEmitter {
   workCurrent(work) {
     return this.launchCurrent(work) && work.record.task === work.task && work.task.attemptId === work.attemptId && work.task.leaseId === work.leaseId && ['interrupted', 'running'].includes(work.task.status);
   }
+  /** Await one step of an activation, then re-check that the activation is still current.
+   * @template T @param {Work} work @param {Promise<T>} pending @returns {Promise<T>} */
+  async fenced(work, pending) { const value = await pending; this.requireWork(work); return value; }
   /** @param {Work} work */
   requireWork(work) { assert(this.workCurrent(work) && work.runtime.activationCurrent(work.activation), 'Activation was revoked, yielded, or superseded'); }
   /** @param {Work} work @param {unknown} error */
@@ -511,8 +524,8 @@ export class PairController extends EventEmitter {
     const stale = () => new Error('BRANCH_STALE: the conversation branch changed during activation; renewed running authority is held and no work was sent. Reconcile on the current branch before renewing.');
     try {
       this.requireWork(work);
-      const ready = await work.runtime.prepareActivation(work.activation); this.requireWork(work);
-      if (guard) { await guard(); this.requireWork(work); }
+      const ready = await this.fenced(work, work.runtime.prepareActivation(work.activation));
+      if (guard) await this.fenced(work, guard());
       const granted = await this.transaction(async () => {
         this.requireWork(work);
         if (!branchCurrent()) throw stale();
@@ -527,9 +540,9 @@ export class PairController extends EventEmitter {
         }
         // Intent is persisted before the authorizing file. No inference until both succeed.
         t.status = 'running'; t.updatedAt = Date.now(); t.dispatchSettleSequence = work.runtime.settledSequence; r.status = 'working';
-        await this.persist(); this.requireWork(work);
+        await this.fenced(work, this.persist());
         if (!branchCurrent()) throw stale();
-        await this.writeAuthority(work.id, 'running'); this.requireWork(work);
+        await this.fenced(work, this.writeAuthority(work.id, 'running'));
         return true;
       });
       if (!granted) return false;
@@ -781,7 +794,7 @@ export class PairController extends EventEmitter {
     assert(!t?.pendingReport && !(t?.report && t.report.attemptId === t.attemptId && t.report.leaseId === t.leaseId), 'A different immutable report already closed this lease');
     if (this.runtimeData.get(h)?.activationIntent !== control.intent || t?.status !== 'running') { stale('No current running implementation intent; retained report was not adopted'); return { control, disposition: 'stale' }; }
     assert(incoming.leaseId === t.leaseId && incoming.planRevision === t.planRevision, 'Report is stale or no step is running');
-    validateReport(incoming.payload);
+    validateReport(incoming.payload); assertReportSize(incoming.payload, t.policy.summaryDetail);
     if (t.policy.mode === 'final-only') assert(incoming.payload.kind !== 'checkpoint', 'Final-only policy requires final_review for the complete plan, or a question/blocker.');
     assert(incoming.payload.taskId === t.id && incoming.payload.stepId === t.steps[t.stepIndex].id, 'Report task/step mismatch');
     assert(incoming.payloadHash === digest(incoming.payload), 'Report payload hash mismatch');
@@ -1137,6 +1150,12 @@ export class PairController extends EventEmitter {
       }
       if (input.action === 'answer') assert(report.payload.kind === 'question', 'Only question reports accept answer');
       if (input.action === 'revise') assert(t.revisions < t.policy.maxRevisions, 'Revision limit reached');
+      const newSteps = input.action === 'revise' ? input.steps : undefined;
+      if (newSteps) {
+        // Completed steps are history: they stay as an unchanged prefix. The current and later steps may change.
+        assert(newSteps.length > t.stepIndex, 'The revised plan must still contain the current step position');
+        assert(t.steps.slice(0, t.stepIndex).every((step, index) => isDeepStrictEqual(step, newSteps[index])), 'Completed steps must be kept unchanged as the prefix of the revised plan');
+      }
       const finished = input.action === 'approve' && (report.payload.kind === 'final_review' || (report.payload.stepComplete !== false && t.stepIndex === t.steps.length - 1));
       const launch = finished ? null : await this.reserveStart(r.id, true);
       if (launch) assert(this.launchCurrent(launch) && r.task === t && t.attemptId === reservation.attemptId && this.intent(r.id) === control.intent, 'Continuation was superseded');
@@ -1148,6 +1167,13 @@ export class PairController extends EventEmitter {
       // A decision is explicit Main activity: later reports wait for a fresh yield.
       if (this.state.mainPhase) this.setPhase('open');
       if (input.action === 'revise') t.revisions++;
+      if (newSteps) {
+        // One revision counts once; the new planRevision stales every report from the old plan.
+        t.steps = clone(newSteps); t.planRevision = incrementCounter(t.planRevision, 'task.planRevision');
+        // Keep the retained scope identity-bound to the new revision, or post-compaction restoration omits it.
+        await atomicJSON(path.join(this.workerDir(r.id), 'work-order.json'),
+          { version: 1, taskId: t.id, planRevision: t.planRevision, objective: t.objective, context: bounded(t.context, 24000), constraints: t.constraints, writtenAt: Date.now() });
+      }
       if (input.action === 'approve') {
         t.baseSnapshotRef = report.snapshotRef;
         if (finished) {
@@ -1167,12 +1193,12 @@ export class PairController extends EventEmitter {
     if (next.work) {
       const work = next.work;
       try {
-        await this.startReserved(work); this.requireWork(work);
+        await this.fenced(work, this.startReserved(work));
         // The guard revalidates source AND branch AFTER activation's final readiness
         // wait (prepareActivation), immediately before renewed running authority is
         // written or any prompt is sent. No atomic exclusion of external writers is
         // claimed — this is a fresh capture compared against the decision evidence.
-        const sent = await this.activate(work, `${this.workMessage(t)}\nMain decision for report ${input.reportId}: ${input.action}\n${input.feedback}`, {
+        const sent = await this.activate(work, this.decisionMessage(t, input), {
           branch: reservation.branch,
           guard: async () => {
             const renewed = await this.evidence.capture(work.record.repoRoot);
@@ -1352,7 +1378,7 @@ export class PairController extends EventEmitter {
     });
     if (outcome.waitingRestored) return outcome.waitingRestored;
     const work = outcome.work;
-    try { await this.startReserved(work); this.requireWork(work); await this.prepareBase(work); this.requireWork(work); await this.activate(work, `${this.workMessage(work.task)}\nRECOVERY: the human explicitly resumed this task. Inspect existing changes and tool outcomes BEFORE doing more work. Do not replay previous mutations blindly. Resume the authorized step or ask a question.`); }
+    try { await this.fenced(work, this.startReserved(work)); await this.fenced(work, this.prepareBase(work)); await this.activate(work, `${this.workMessage(work.task)}\nRECOVERY\n${JSON.stringify({ resumedBy: 'human', instruction: 'Inspect existing changes and tool outcomes BEFORE doing more work. Do not replay previous mutations blindly. Resume the authorized step or ask a question.' })}`); }
     catch (error) { await this.activationFailed(work, error); throw error; }
     return { taskId: work.task.id, status: work.task.status };
   }

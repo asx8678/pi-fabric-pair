@@ -154,6 +154,16 @@ user shell sessions in any case. The controller still serializes state transitio
 cancel/pause/stop can abort controller-owned verification without waiting for its
 full configured timeout.
 
+## Staged, not live
+
+The live path is `extension.js` → `main.js` / `worker.js` → `controller.js` →
+`actor-runtime.js` → `rpc.js`. The actor and coordination modules
+(`actor-*.js` and `actor-*.mjs` except `actor-runtime.js`, plus
+`coordination.js` and `transitions.js`) are a staged
+pure model for the AR-03 freeze and H1 ActorHost integration. Nothing on the live
+path imports them, and they grant no authority. See
+[ACTOR-RPC-IMPLEMENTATION-PLAN.md](ACTOR-RPC-IMPLEMENTATION-PLAN.md).
+
 ## UI and metrics
 
 UI callbacks render controller state. They do not drive the state machine and do

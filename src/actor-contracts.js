@@ -1,3 +1,4 @@
+// Staged pure model (AR-03/H1). Not imported by the live Main/Worker path; see docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md.
 /**
  * Pure AR-03 leaf-contract facade; no runtime registration or activation.
  * These validators establish intrinsic shape/hash consistency, not readiness,

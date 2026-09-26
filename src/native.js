@@ -175,7 +175,9 @@ export function requestsDetachedEffect(name, input) {
  */
 export function gateTool(name, authority, latched, readOnly = false) {
   const n = toolName(name);
-  if (!authority || authority.phase !== 'running' || latched) return { block: true, reason: 'PAIR_WAIT: no implementation lease is active. Wait for Main; do not continue or start another agent.' };
+  // A latched lease still admits pair_report so an identical retained report can be
+  // republished (DUR-01); its execute rejects any different payload.
+  if (!authority || authority.phase !== 'running' || (latched && n !== 'pair_report')) return { block: true, reason: 'PAIR_WAIT: no implementation lease is active. Wait for Main; do not continue or start another agent.' };
   if (/^(agents|actors|crew|swarm)\./.test(n) || /^(subagent|delegate|spawn_agent|pair_dispatch)$/.test(n)) return { block: true, reason: 'Pair workers cannot delegate or create other workers.' };
   // fabric_exec is an outer envelope. Fabric replays nested tool_call hooks;
   // each nested call is classified separately. This is workflow gating, not a sandbox.

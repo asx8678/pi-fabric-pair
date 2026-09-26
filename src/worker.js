@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicJSON, assert, bounded, digest, inside, mkdirPrivate, plain, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
-import { reportSchema, validateReport } from './schema.js';
+import { assertReportSize, reportSchema, validateReport } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
 import { gateTool, isDirectMutation, nativeSettings, probeNative, requestsDetachedEffect, toolName } from './native.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
@@ -261,8 +261,7 @@ export function registerWorker(pi, env = process.env) {
         assert(authority && authority.phase === 'running', 'PAIR_WAIT: this step is not authorized');
         assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job outlived its Fabric call; this worker must stop and reconcile before reporting.');
         const task = authority.task;
-        const reportLimit = { minimal: 4000, normal: 12000, detailed: 32000 }[task?.policy.summaryDetail || 'normal'] || 12000;
-        assert(JSON.stringify(params).length <= reportLimit, `Report is too large for the selected summary policy (${reportLimit} characters); use concise references.`);
+        assertReportSize(params, task?.policy.summaryDetail);
         assert(task && params.taskId === task.id && params.stepId === task.steps[task.stepIndex].id, 'Report task/step does not match the current lease');
         if (report) {
           /** @type {import('./contracts.js').ReportEnvelope} */
@@ -323,7 +322,7 @@ export function registerWorker(pi, env = process.env) {
     ctxRef = ctx;
     try {
       await load();
-      if (stopped) ctx.abort();
+      if (stopped) { ctx.abort(); return undefined; }
       assert(!waiting() && authority && authority.task, 'PAIR_WAIT: the worker is retained but has no active implementation lease');
       assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
     } catch (error) { ctx.abort(); throw error; }

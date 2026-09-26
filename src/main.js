@@ -215,7 +215,7 @@ export function registerMain(pi) {
     if (config.requirements.prewalkDisabled && probe.capabilities.fabric) assert(probe.native.prewalkDisabled, 'Disable native Prewalk using /fabric prewalk --disable before Pair delegation.');
     return c.dispatch(validateDispatch(p));
   });
-  tool('pair_decide', 'Answer, approve, revise or cancel an exact worker report. Approval requires the current checkpoint hash and inspected evidence.', decisionSchema, (c, p) => c.decide(validateDecision(p)));
+  tool('pair_decide', 'Answer, approve, revise or cancel an exact worker report. Approval requires the current checkpoint hash and inspected evidence. revise may pass steps to replace the plan (completed steps unchanged as its prefix).', decisionSchema, (c, p) => c.decide(validateDecision(p)));
   tool('pair_inspect', 'Read immutable checkpoint evidence or one changed file. Use before approval; ordinary live workspace reads can change underneath a review.', inspectSchema, (c, p) => { assertInspectInput(p); return c.inspect(p.workerId, p.reportId, p.file); });
   tool('pair_status', 'Read Pair readiness, active task, context and observed cache usage. Do not poll; finalized reports wait in the durable inbox — retrieve them explicitly with pair_yield (no automatic idle wakeup).', statusSchema, c => ({ ...c.summary(), configuration: configObservation() }));
   tool('pair_cancel', 'Cancel the current assigned worker task without resetting its conversation. Does not roll back files.', cancelSchema, (c, p) => { assertCancelInput(p); return c.cancel(p.workerId, p.reason); });
