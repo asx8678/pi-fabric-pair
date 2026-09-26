@@ -114,7 +114,7 @@ export function merge(a, b) {
 }
 // JSON-with-comments reader, without eval. Used only to inspect native settings.
 /** @param {string} text @returns {unknown} */
-export function parseJSONC(text) {
+function parseJSONC(text) {
   let out = '', quoted = false, escaped = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];

@@ -12,6 +12,7 @@
 - A stopped worker's `before_agent_start` now returns nothing after aborting. Every staged actor/coordination module (all except the live `actor-runtime.js`) is labelled as not live; the generated `.mjs` host modules were regenerated from their labelled `.mts` sources.
 - The human-resume RECOVERY instruction is sent as a JSON block, like decisions.
 - `controller.js`: a `fenced(work, pending)` helper replaces the repeated `await …; this.requireWork(work)` activation checks. No behaviour change.
+- Removed dead code: `budgetBadges` and `minutesLabel` in `ui.js` (no callers since the widget and `/pair status` stopped showing elapsed time and turns) and an unused `clone` import in `main.js`. Ten exports that only their own module used are now module-private: `runCommand`, `MAIN_GUIDE`, `isReadCapability`, `RpcCancelledError`, `statusColor`, `flowArrow`, `observedSpeed`, `workerLabel`, `parseJSONC` and `WORKER_GUIDE`. No behavior change.
 
 - Removed the bundled offline test suite: every file under `tests/` (including `tests/helpers/`), the `test` and `test:ui` npm scripts, and `docs/TESTING.md`. The retained static checks are unchanged: `npm run typecheck`, `npm run pack:check`, and `npm run check:host` for the parked native source (macOS/arm64). The repository no longer bundles automated tests; verify changes by manual review. Earlier entries below that describe test additions or point at `docs/TESTING.md` are records of the suite as it existed at the time, not current instructions.
 

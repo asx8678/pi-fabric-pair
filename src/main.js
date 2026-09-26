@@ -4,10 +4,10 @@ import { decisionSchema, dispatchSchema, inspectSchema, statusSchema, yieldSchem
 import { isDirectMutation, nativeSettings, probeNative, sourcePaths } from './native.js';
 import { selectLastMeasuredUsage } from './metrics.js';
 import { ScopedCacheWarming } from './warming.js';
-import { assert, briefError, cleanText, clone, digest, Serial } from './util.js';
+import { assert, briefError, cleanText, digest, Serial } from './util.js';
 import { ageLabel, dashboardHeader, dashboardItems, diffLineColor, humanPatch, indicatorWidget, kindLabel, reportCardLines, reportLineColor, settingsUI, staleWorkers, statusText, textView } from './ui.js';
 
-export const MAIN_GUIDE = `Fabric Pair provides persistent supervised implementation workers without switching this Main model.
+const MAIN_GUIDE = `Fabric Pair provides persistent supervised implementation workers without switching this Main model.
 You own planning, questions, reviews and final acceptance. For implementation requests, check pair_status, make a bounded plan, and delegate with pair_dispatch to a configured worker when Pair is enabled. The dispatch returns an acknowledgement, not completion. Continue talking with the user normally; do not poll, repeatedly call status, or wait inside a tool for the worker.
 With Fabric, discover the captured extensions.pair_* capabilities and invoke them through tools.call({ref,args}) using the actual schema. If Fabric uses a Python kernel, use the equivalent Python tools.call dictionary form. Do not use agents.handoff or enable Prewalk for a Pair task.
 Provide constraints and user decisions explicitly: the worker does not inherit your private conversation. Use Fovea and actual code/evidence for planning and review. For strict supervision, use small individual steps; for milestones, use coherent milestones.

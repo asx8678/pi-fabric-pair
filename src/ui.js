@@ -34,7 +34,7 @@ export function symbol(status) {
 
 /** Theme companion of symbol(): one semantic color per activity status.
  * @param {string} status @returns {IndicatorColor} */
-export function statusColor(status) {
+function statusColor(status) {
   if (['working', 'settling', 'starting'].includes(status)) return 'success';
   if (['question', 'review', 'blocked', 'permission'].includes(status)) return 'warning';
   if (['attention', 'error', 'interrupted'].includes(status)) return 'error';
@@ -61,27 +61,6 @@ export function ageLabel(ageMs) {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${seconds % 60}s`;
 }
-/** Compact whole-unit duration for budget badges: seconds below a minute, minutes above.
- * @param {number} ms @returns {string} */
-export function minutesLabel(ms) {
-  const seconds = Math.round(ms / 1000);
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
-}
-/** Compatibility helper for raw task telemetry — elapsed time and accumulated
- * model turns — without limit ratios or thresholds. Elapsed time and turn counts
- * are no longer displayed anywhere: indicator() and statusText() never call this.
- * The former per-step turn and task-duration limits are removed and never
- * color-escalate; startedAt/turns remain raw internal counters.
- * @param {{startedAt?: number, turns?: number}} task
- * @param {(color: IndicatorColor, text: string) => string} paint @param {number} [now]
- * @returns {string[]} */
-export function budgetBadges(task, paint, now = Date.now()) {
-  const badges = [];
-  if (typeof task.startedAt === 'number' && task.startedAt > 0) badges.push(paint('muted', minutesLabel(Math.max(0, now - task.startedAt))));
-  if (typeof task.turns === 'number') badges.push(paint('muted', `${task.turns} turns`));
-  return badges;
-}
-
 /** Active workers silent past STALE_AGE_MS; for one-shot alerting, not rendering.
  * @param {PairSummary} summary @param {number} [now]
  * @returns {{id: string, ageMs: number}[]} */
@@ -95,7 +74,7 @@ export function staleWorkers(summary, now = Date.now()) {
  * '→' points at the worker while a dispatched plan/step is heading there or being
  * worked; '←' points at Main while a worker report/question waits for a decision.
  * @param {string} status @returns {'' | '→' | '←'} */
-export function flowArrow(status) {
+function flowArrow(status) {
   if (['working', 'settling', 'starting'].includes(status)) return '→';
   if (['question', 'review', 'blocked', 'permission'].includes(status)) return '←';
   return '';
@@ -118,7 +97,7 @@ export function speedLabel(speed) {
  * observation; historical/legacy observations have none and stay unavailable.
  * @param {PairSummary['workers'][number]['observation']} observation
  * @returns {{tokens?: unknown, seconds?: unknown} | null | undefined} */
-export function observedSpeed(observation) {
+function observedSpeed(observation) {
   return observation && typeof observation === 'object' && 'speed' in observation
     ? /** @type {{tokens?: unknown, seconds?: unknown} | null | undefined} */ (observation.speed) : undefined;
 }
@@ -168,7 +147,7 @@ export function indicator(summary, mainBusy, theme, now = Date.now()) {
 }
 /** Stable widget label for a configured worker: `W` alone, otherwise `W1`, `W2`…
  * @param {PairSummary} summary @param {string} id @returns {string} */
-export function workerLabel(summary, id) {
+function workerLabel(summary, id) {
   return summary.workers.length === 1 ? 'W' : `W${summary.workers.findIndex(w => w.id === id) + 1}`;
 }
 /** The worker whose plan the widget shows: one that is working or waiting on Main

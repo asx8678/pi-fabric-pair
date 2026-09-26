@@ -24,7 +24,7 @@ export class RpcUncertainError extends Error {
   constructor(message) { super(message); this.name = 'RpcUncertainError'; }
 }
 /** This particular frame was fenced before stdin.write; it did not execute. */
-export class RpcCancelledError extends Error {
+class RpcCancelledError extends Error {
   /** @param {string} message */
   constructor(message) { super(message); this.name = 'RpcCancelledError'; }
 }

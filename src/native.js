@@ -160,7 +160,7 @@ export function isDirectMutation(name) {
   return /^(write|edit|apply_patch)$/.test(n) || /^(fs\.)?(write|edit|append|delete|remove|rename|move|mkdir|copy)(File|Dir)?$/.test(n) || /^(file|files)\.(write|edit|delete|move|copy)/.test(n);
 }
 /** @param {unknown} name */
-export function isReadCapability(name) {
+function isReadCapability(name) {
   const n = toolName(name);
   return /^(read|grep|find|ls|pair_report)$/.test(n) || /^fovea_(sketch|focus|dwell|impact)$/.test(n) || /^(tools\.(list|describe|search)|schema\.(status|list|get)|compact\.status|state\.get)$/.test(n) || /^(fs|files|file)\.(read|stat|list|exists|glob|search)/.test(n);
 }

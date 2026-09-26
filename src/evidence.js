@@ -36,7 +36,7 @@ const MAX_PATCH_BYTES = MAX_PATCH_CHARS * 3;
  * @typedef {{file: string, deleted: true, kind: 'file' | 'symlink', sha: string, checkpointHash: unknown, binary: boolean, bytes: number, content: string | null, truncated: boolean} | {file: string, kind: unknown, sha: string, checkpointHash: unknown, binary: boolean, bytes: number, content: string | null, truncated: boolean}} FileInspection
  */
 /** @param {string} command @param {string[]} args @param {CommandOptions} [options] @returns {Promise<CommandResult>} */
-export async function runCommand(command, args, { cwd, timeoutMs = 30000, maxBytes = 1024 * 1024, signal } = {}) {
+async function runCommand(command, args, { cwd, timeoutMs = 30000, maxBytes = 1024 * 1024, signal } = {}) {
   assert(typeof command === 'string' && Array.isArray(args), 'Command and argv must be explicit');
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat' }, stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true, detached: process.platform !== 'win32' });
