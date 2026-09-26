@@ -10,7 +10,26 @@
     "strict": true,
     "useUnknownInCatchVariables": true,
     "skipLibCheck": false,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src/**/*.js", "src/**/*.mts", "scripts/**/*.mjs"]
+  "include": [
+    "src/extension.js",
+    "src/main.js",
+    "src/worker.js",
+    "src/controller.js",
+    "src/actor-runtime.js",
+    "src/rpc.js",
+    "src/config.js",
+    "src/schema.js",
+    "src/contracts.js",
+    "src/evidence.js",
+    "src/native.js",
+    "src/util.js",
+    "src/metrics.js",
+    "src/warming.js",
+    "src/observations.js",
+    "src/ui.js"
+  ]
 }

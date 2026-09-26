@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/actor-*.js",
+    "src/actor-*.mts",
+    "src/coordination.js",
+    "src/transitions.js",
+    "scripts/**/*.mjs"
+  ]
+}

@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { assert, atomicJSON, bounded, canonical, digest, exists, inside, mkdirPrivate, plain, readJSON } from './util.js';
+import { assert, atomicJSON, bounded, canonical, digest, exists, inside, mkdirPrivate, plain, readJSON, signalGroup } from './util.js';
 import { validateSnapshot } from './contracts.js';
 
 const MAX_PATCH_CHARS = 1024 * 1024;
@@ -24,8 +24,10 @@ const MAX_PATCH_BYTES = MAX_PATCH_CHARS * 3;
  * @typedef {{root: string, head: string | null, entries: SnapshotEntry[], hash: string, capturedAt: number, totalBytes: number}} Snapshot
  */
 /** @typedef {{path: string, before: SnapshotEntry | null, after: SnapshotEntry | null}} CheckpointFile */
-/** @typedef {{version: 1, taskId: string, reportId: string, baseHash: string, checkpointHash: string, root: string, changed: string[], changedBytes: number, files: CheckpointFile[], snapshot: Snapshot, verification: import('./contracts.js').VerificationResult[], patchTruncated: boolean, createdAt: number}} CheckpointManifest */
-/** @typedef {{absolute: string, missing: true} | {absolute: string, missing: false, stat: import('node:fs').Stats}} WorkspaceEntry */
+/** The snapshot is stored once under snapshots/<checkpointHash>.json; manifests written before
+ * that change embed it as `snapshot`, and both layouts stay readable.
+ * @typedef {{version: 1, taskId: string, reportId: string, baseHash: string, checkpointHash: string, root: string, changed: string[], changedBytes: number, files: CheckpointFile[], snapshot?: Snapshot, verification: import('./contracts.js').VerificationResult[], patchTruncated: boolean, createdAt: number}} CheckpointManifest */
+/** @typedef {{absolute: string, missing: true} | {absolute: string, missing: false, stat: import('node:fs').BigIntStats}} WorkspaceEntry */
 /** Inspection returns retained metadata, not a validated CheckpointManifest.
  * File inspection validates the snapshot and the selected after-image against it.
  * A deleted path is additionally authenticated against the exact saved base
@@ -45,7 +47,7 @@ async function runCommand(command, args, { cwd, timeoutMs = 30000, maxBytes = 10
     /** @type {Promise<void>} */
     let containment = Promise.resolve();
     /** @param {NodeJS.Signals} sig */
-    const kill = sig => { try { if (process.platform !== 'win32') { if (child.pid !== undefined) process.kill(-child.pid, sig); } else child.kill(sig); } catch {} };
+    const kill = (/** @type {NodeJS.Signals} */ sig) => { try { signalGroup(child.pid, sig, child); } catch {} };
     const stop = () => {
       if (stopping) return;
       stopping = true; kill('SIGTERM');
@@ -80,8 +82,11 @@ export async function repositoryRoot(cwd) {
   try { return canonical((await git(cwd, ['rev-parse', '--show-toplevel'])).trim()); }
   catch { throw new Error(`Pair needs a Git repository to record review evidence, and ${cwd} is not inside one. Open Pi in a Git project, or set the worker workspace in /pair settings → Advanced.`); }
 }
-/** @param {string} root @param {string} name @returns {Promise<WorkspaceEntry>} */
-async function workspaceEntry(root, name) {
+/** Per-capture memo of verified ancestor directories: 'dir' (a real directory), 'gone'
+ * (missing, or a file replaced it), so each directory is checked once per capture.
+ * @typedef {Map<string, 'dir' | 'gone'>} AncestorMemo */
+/** @param {string} root @param {string} name @param {AncestorMemo} [memo] @returns {Promise<WorkspaceEntry>} */
+async function workspaceEntry(root, name, memo = new Map()) {
   assert(!path.isAbsolute(name), `Unsafe absolute Git path: ${name}`);
   const absolute = path.resolve(root, name);
   assert(inside(root, absolute) && absolute !== root, `Unsafe Git path: ${name}`);
@@ -90,28 +95,40 @@ async function workspaceEntry(root, name) {
   let cursor = root;
   for (const part of parts.slice(0, -1)) {
     cursor = path.join(cursor, part);
+    const known = memo.get(cursor);
+    if (known === 'gone') return { absolute, missing: true };
+    if (known === 'dir') continue;
     let ancestor;
     try { ancestor = await fs.lstat(cursor); }
-    catch (error) { if (plain(error) && error.code === 'ENOENT') return { absolute, missing: true }; throw error; }
+    catch (error) { if (plain(error) && error.code === 'ENOENT') { memo.set(cursor, 'gone'); return { absolute, missing: true }; } throw error; }
     if (ancestor.isSymbolicLink() || !ancestor.isDirectory()) {
       // A symlink ancestor could point outside the workspace and is never
       // followed, and other special types stay fail-closed. An ordinary file
       // ancestor means a former parent directory was replaced by a file, so
       // every Git-listed descendant beneath it is simply gone.
       assert(ancestor.isFile(), `Unsafe symlink or non-directory ancestor in evidence path: ${name}`);
+      memo.set(cursor, 'gone');
       return { absolute, missing: true };
     }
+    memo.set(cursor, 'dir');
   }
   let stat;
-  try { stat = await fs.lstat(absolute); }
+  try { stat = await fs.lstat(absolute, { bigint: true }); }
   catch (error) { if (plain(error) && error.code === 'ENOENT') return { absolute, missing: true }; throw error; }
   return { absolute, stat, missing: false };
 }
-/** @param {import('node:fs').Stats} before @param {import('node:fs').Stats} after */
+/** @param {import('node:fs').Stats | import('node:fs').BigIntStats} before @param {import('node:fs').Stats | import('node:fs').BigIntStats} after */
 function sameEntry(before, after) {
   return before.dev === after.dev && before.ino === after.ino && before.mode === after.mode &&
     before.size === after.size && before.mtimeMs === after.mtimeMs;
 }
+/** Content identity key for the hash cache. ctime changes on every write or metadata
+ * change and cannot be set by user tools, so mtime-preserving rewrites still miss.
+ * @param {import('node:fs').BigIntStats} stat */
+function statKey(stat) { return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.mode}`; }
+/** Entries modified this recently are "racily clean" (a later write within the same timestamp
+ * granularity would be invisible), so they are re-hashed rather than cached. */
+const RACY_NS = 2_000_000_000n;
 
 /** Validate BEFORE selecting a content-addressed path. Syntax is not a sandbox:
  * parent-directory symlinks/replacement still require trusted Pair storage.
@@ -171,7 +188,20 @@ async function indexModes(root) {
 }
 export class Evidence {
   /** @param {string} baseDir @param {import('./config.js').EvidenceConfig} limits */
-  constructor(baseDir, limits) { this.baseDir = baseDir; this.blobs = path.join(baseDir, 'blobs'); this.limits = limits; }
+  constructor(baseDir, limits) {
+    this.baseDir = baseDir; this.blobs = path.join(baseDir, 'blobs'); this.limits = limits;
+    /** Stat-keyed content hashes from earlier captures: path → {key, sha, size, executable}.
+     * Unchanged files are identified without being read again. @type {Map<string, {key: string, sha: string, size: number, executable: boolean}>} */
+    this.hashCache = new Map();
+    /** Blobs known to exist in the store; cleared by collection. @type {Set<string>} */
+    this.knownBlobs = new Set();
+  }
+  /** @param {string} sha */
+  async hasBlob(sha) {
+    if (this.knownBlobs.has(sha)) return true;
+    if (!await exists(path.join(this.blobs, sha))) return false;
+    this.knownBlobs.add(sha); return true;
+  }
   /** @param {string} root @returns {Promise<Snapshot>} */
   async capture(root) {
     root = await canonical(root); await mkdirPrivate(this.blobs);
@@ -180,11 +210,13 @@ export class Evidence {
     const indexed = await indexModes(root);
     const headResult = await runCommand('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root });
     const head = headResult.code === 0 ? headResult.stdout.trim() : null;
+    const now = BigInt(Date.now()) * 1_000_000n;
+    /** @type {AncestorMemo} */ const memo = new Map();
     let total = 0;
     /** @type {SnapshotEntry[]} */
     const entries = [];
     for (const name of names) {
-      const entry = await workspaceEntry(root, name);
+      const entry = await workspaceEntry(root, name, memo);
       if (entry.missing) { entries.push({ path: name, kind: 'missing', sha: null, size: 0, executable: false }); continue; }
       const { absolute, stat } = entry;
       if (stat.isDirectory()) {
@@ -210,19 +242,27 @@ export class Evidence {
       assert(stat.isFile() || stat.isSymbolicLink(), `Unsupported file type: ${name}`);
       if (stat.isSymbolicLink()) {
         const bytes = Buffer.from(await fs.readlink(absolute));
-        const stable = await workspaceEntry(root, name);
+        const stable = await workspaceEntry(root, name, memo);
         assert(!stable.missing && stable.stat.isSymbolicLink() && sameEntry(stat, stable.stat), `Symlink changed while capturing evidence: ${name}`);
         total += bytes.length; assert(total <= this.limits.maxTotalBytes, 'Workspace exceeds evidence.maxTotalBytes');
         const sha = digest(bytes.toString('utf8'));
-        if (!await exists(path.join(this.blobs, sha))) await fs.writeFile(path.join(this.blobs, sha), bytes, { flag: 'wx', mode: 0o600 }).catch(/** @param {unknown} e */ e => { if (!plain(e) || e.code !== 'EEXIST') throw e; });
+        if (!await this.hasBlob(sha)) { await fs.writeFile(path.join(this.blobs, sha), bytes, { flag: 'wx', mode: 0o600 }).catch(/** @param {unknown} e */ e => { if (!plain(e) || e.code !== 'EEXIST') throw e; }); this.knownBlobs.add(sha); }
         entries.push({ path: name, kind: 'symlink', sha, size: bytes.length, executable: false }); continue;
       }
-      const remaining = this.limits.maxTotalBytes - total;
-      assert(stat.size <= remaining, 'Workspace exceeds evidence.maxTotalBytes');
+      const size = Number(stat.size), remaining = this.limits.maxTotalBytes - total;
+      assert(size <= remaining, 'Workspace exceeds evidence.maxTotalBytes');
+      // Unchanged content (same inode, size, mtime and ctime as a verified earlier read) is
+      // not read again, provided its immutable blob is still in the store.
+      const key = statKey(stat), cached = this.hashCache.get(name);
+      if (cached && cached.key === key && await this.hasBlob(cached.sha)) {
+        total += cached.size;
+        entries.push({ path: name, kind: 'file', sha: cached.sha, size: cached.size, executable: cached.executable });
+        continue;
+      }
       const tmp = path.join(this.blobs, `.tmp-${randomUUID()}`);
       const handle = await fs.open(absolute, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
       try {
-        const before = await handle.stat();
+        const before = await handle.stat({ bigint: true });
         assert(sameEntry(stat, before) && before.isFile(), `Evidence path changed before capture: ${name}`);
         const hash = createHash('sha256'); let actual = 0;
         const transform = new Transform({
@@ -236,17 +276,22 @@ export class Evidence {
           }
         });
         await pipeline(handle.createReadStream({ autoClose: false }), transform, createWriteStream(tmp, { flags: 'wx', mode: 0o600 }));
-        const after = await handle.stat();
-        const stable = await workspaceEntry(root, name);
-        assert(sameEntry(before, after) && !stable.missing && stable.stat.isFile() && sameEntry(after, stable.stat) && actual === after.size, `File or evidence path changed while capturing: ${name}`);
+        const after = await handle.stat({ bigint: true });
+        const stable = await workspaceEntry(root, name, memo);
+        assert(sameEntry(before, after) && !stable.missing && stable.stat.isFile() && sameEntry(after, stable.stat) && actual === Number(after.size), `File or evidence path changed while capturing: ${name}`);
         const resolved = await fs.realpath(absolute);
         assert(inside(root, resolved), `Evidence path resolves outside the workspace: ${name}`);
         const sha = hash.digest('hex');
-        if (await exists(path.join(this.blobs, sha))) await fs.unlink(tmp); else await fs.rename(tmp, path.join(this.blobs, sha));
+        if (await this.hasBlob(sha)) await fs.unlink(tmp); else { await fs.rename(tmp, path.join(this.blobs, sha)); this.knownBlobs.add(sha); }
+        const executable = (Number(after.mode) & 0o111) !== 0;
+        if (now - after.mtimeNs > RACY_NS && now - after.ctimeNs > RACY_NS) this.hashCache.set(name, { key: statKey(after), sha, size: actual, executable });
+        else this.hashCache.delete(name);
         total += actual;
-        entries.push({ path: name, kind: 'file', sha, size: actual, executable: (after.mode & 0o111) !== 0 });
+        entries.push({ path: name, kind: 'file', sha, size: actual, executable });
       } finally { await handle.close(); await fs.unlink(tmp).catch(() => {}); }
     }
+    // Forget paths that left the workspace so the cache tracks the current tree only.
+    if (this.hashCache.size > names.length) { const present = new Set(names); for (const name of this.hashCache.keys()) if (!present.has(name)) this.hashCache.delete(name); }
     const identity = { root, head, entries };
     return { ...identity, hash: digest(identity), capturedAt: Date.now(), totalBytes: total };
   }
@@ -285,6 +330,8 @@ export class Evidence {
     validateSnapshot(base, this.limits); validateSnapshot(current, this.limits);
     assert(base.root === current.root, 'Checkpoint snapshots belong to different repositories');
     const dir = path.join(this.baseDir, 'reports', taskId, reportId); await mkdirPrivate(dir);
+    // The manifest names its snapshot by content hash instead of embedding a full copy.
+    await this.saveSnapshot(current);
     const old = new Map(base.entries.map(e => [e.path, e])); const next = new Map(current.entries.map(e => [e.path, e]));
     const names = [...new Set([...old.keys(), ...next.keys()])].sort();
     const changed = names.filter(name => JSON.stringify(old.get(name) || null) !== JSON.stringify(next.get(name) || null));
@@ -309,7 +356,7 @@ export class Evidence {
       if (patch.length > MAX_PATCH_CHARS) { patch = patch.slice(0, MAX_PATCH_CHARS); patchTruncated = true; break; }
     }
     /** @type {CheckpointManifest} */
-    const manifest = { version: 1, taskId, reportId, baseHash: base.hash, checkpointHash: current.hash, root: current.root, changed, changedBytes, files: changed.map(name => ({ path: name, before: old.get(name) || null, after: next.get(name) || null })), snapshot: current, verification, patchTruncated, createdAt: Date.now() };
+    const manifest = { version: 1, taskId, reportId, baseHash: base.hash, checkpointHash: current.hash, root: current.root, changed, changedBytes, files: changed.map(name => ({ path: name, before: old.get(name) || null, after: next.get(name) || null })), verification, patchTruncated, createdAt: Date.now() };
     await fs.writeFile(path.join(dir, 'diff.patch'), patch, { mode: 0o600 });
     await atomicJSON(path.join(dir, 'manifest.json'), manifest);
     return { path: dir, checkpointHash: current.hash, changed, verification, patchTruncated };
@@ -334,7 +381,9 @@ export class Evidence {
     assert(plain(manifest), 'Invalid checkpoint manifest');
     // Summary inspection also marks the report inspected in Controller. Its
     // intrinsic snapshot binding must be checked before any patch is consumed.
-    const snapshot = validateSnapshot(manifest.snapshot, this.limits);
+    assert(typeof manifest.checkpointHash === 'string' && typeof manifest.root === 'string', 'Invalid checkpoint manifest identity');
+    const snapshot = manifest.snapshot !== undefined ? validateSnapshot(manifest.snapshot, this.limits)
+      : await this.readSnapshot(path.join(this.baseDir, 'snapshots', `${manifest.checkpointHash}.json`), manifest.root);
     assert(snapshot.hash === manifest.checkpointHash && snapshot.root === manifest.root, 'Checkpoint snapshot identity mismatch');
     if (file !== undefined) {
       assert(Array.isArray(manifest.files), 'Invalid checkpoint file list');
@@ -362,13 +411,52 @@ export class Evidence {
     const patch = await readEvidenceBytes(path.join(artifact, 'diff.patch'), MAX_PATCH_BYTES);
     return { checkpointHash: manifest.checkpointHash, baseHash: manifest.baseHash, changed: manifest.changed, verification: manifest.verification, patchTruncated: manifest.patchTruncated, patch: bounded(patch.toString('utf8'), 60000), localArtifact: artifact };
   }
+  /** Remove evidence no retained task can reach: report directories of other tasks, snapshots
+   * that neither a retained manifest nor `retain.snapshots` names, and blobs that no remaining
+   * snapshot references. The caller guarantees no capture, checkpoint or inspection of a
+   * non-retained task is in flight (Pair collects only while no task is active).
+   * @param {{tasks: Set<string>, snapshots: Set<string>}} retain @returns {Promise<{reports: number, snapshots: number, blobs: number}>} */
+  async collect(retain) {
+    /** @param {string} dir @returns {Promise<string[]>} */
+    const list = dir => fs.readdir(dir).catch(error => { if (plain(error) && error.code === 'ENOENT') return []; throw error; });
+    const reportsDir = path.join(this.baseDir, 'reports'), snapshotsDir = path.join(this.baseDir, 'snapshots');
+    const live = new Set(retain.snapshots), removed = { reports: 0, snapshots: 0, blobs: 0 };
+    /** @type {unknown[]} */ const embedded = [];
+    for (const task of await list(reportsDir)) {
+      const taskDir = path.join(reportsDir, task);
+      if (!retain.tasks.has(task)) { await fs.rm(taskDir, { recursive: true, force: true }); removed.reports++; continue; }
+      for (const report of await list(taskDir)) {
+        const manifest = await readJSON(path.join(taskDir, report, 'manifest.json'), null, 64 * 1024 * 1024).catch(() => null);
+        if (!plain(manifest)) continue;
+        for (const key of ['checkpointHash', 'baseHash']) if (typeof manifest[key] === 'string') live.add(manifest[key]);
+        if (manifest.snapshot !== undefined) embedded.push(manifest.snapshot);
+      }
+    }
+    /** @type {Set<string>} */ const blobs = new Set([digest('')]);
+    /** @param {unknown} snapshot */
+    const mark = snapshot => { if (plain(snapshot) && Array.isArray(snapshot.entries)) for (const entry of snapshot.entries) if (plain(entry) && typeof entry.sha === 'string') blobs.add(entry.sha); };
+    for (const name of await list(snapshotsDir)) {
+      const file = path.join(snapshotsDir, name);
+      if (!live.has(name.replace(/\.json$/, ''))) { await fs.rm(file, { force: true }); removed.snapshots++; continue; }
+      mark(await readJSON(file, null, 64 * 1024 * 1024).catch(() => null));
+    }
+    embedded.forEach(mark);
+    for (const name of await list(this.blobs)) {
+      if (blobs.has(name)) continue;
+      await fs.rm(path.join(this.blobs, name), { force: true }); removed.blobs++;
+    }
+    this.knownBlobs.clear();
+    return removed;
+  }
 }
 /** Per-command source identity: every configured check is bound to the exact
  * workspace state it ran against. A mutation between checks — even a
  * mutation-then-restoration — cannot create passing evidence for a different
  * source: each command's before/after source hash must equal the batch's
  * expected checkpointed hash, and the hashes are retained in the check
- * artifacts. The VerificationResult wire contract is unchanged.
+ * artifacts. Drift is reported as a failed check (so the report still reaches
+ * Main and approval stays blocked by requirePassing), never as a thrown error.
+ * The VerificationResult wire contract is unchanged.
  *
  * Documented limitation: these are ENDPOINT snapshots around each command. A
  * transient within-command mutation that is fully restored before the command
@@ -385,25 +473,36 @@ export async function verifyConfigured(config, cwd, artifactDir, signal, identit
   /** @type {import('./contracts.js').VerificationResult[]} */
   const results = [];
   for (const [i, check] of config.commands.entries()) {
-    /** Source identity before the check: drift from the checkpointed evidence
-     * (including external mutation between commands) fails the whole verification. */
-    let sourceHash = null;
+    /** Source identity before the check: drift from the checkpointed evidence (including an
+     * external mutation between commands, even one restored later) fails this check. With the
+     * stat-keyed hash cache an unchanged tree is re-identified without reading file contents. */
+    let sourceHash = null, drift = null;
     if (identity.captureSource) {
       sourceHash = await identity.captureSource();
-      if (identity.expectedHash) assert(sourceHash === identity.expectedHash, `VERIFICATION_SOURCE_DRIFT: check ${check.name} ran against a different workspace state than the checkpointed evidence`);
+      if (identity.expectedHash && sourceHash !== identity.expectedHash) drift = `VERIFICATION_SOURCE_DRIFT: check ${check.name} would run against a different workspace state than the checkpointed evidence; it was not run.`;
+    }
+    if (drift) {
+      const evidencePath = path.join(artifactDir, `check-${i + 1}.json`);
+      await atomicJSON(evidencePath, { name: check.name, command: check.command, args: check.args, sourceHash, drift, at: Date.now() });
+      results.push({ name: check.name, source: 'controller-configured', passed: false, code: null, timedOut: false, output: drift, artifact: evidencePath });
+      break;
     }
     /** @type {VerificationCommandResult} */
     let result;
     try { result = await runCommand(check.command, check.args, { cwd, timeoutMs: config.timeoutMs, maxBytes: 1024 * 1024, signal }); }
     catch (e) { result = { code: null, stderr: String(e), stdout: '', timedOut: false, truncated: false }; }
+    /** A mutation during the check makes its evidence describe some other source. It is
+     * recorded as a failed check for Main to see, and no further checks run. */
+    let afterHash = null;
     if (identity.captureSource) {
-      const afterHash = await identity.captureSource();
-      assert(afterHash === sourceHash, `VERIFICATION_SOURCE_DRIFT: the workspace changed while running check ${check.name}`);
+      afterHash = await identity.captureSource();
+      if (afterHash !== sourceHash) drift = `VERIFICATION_SOURCE_DRIFT: the workspace changed while running check ${check.name}; this result does not describe the checkpointed source.`;
     }
     const evidencePath = path.join(artifactDir, `check-${i + 1}.json`);
-    await atomicJSON(evidencePath, { name: check.name, command: check.command, args: check.args, ...(sourceHash === null ? {} : { sourceHash }), ...result, at: Date.now() });
-    results.push({ name: check.name, source: 'controller-configured', passed: result.code === 0 && !result.timedOut && !result.aborted, code: result.code, timedOut: !!result.timedOut, output: bounded((result.stdout || '') + '\n' + (result.stderr || ''), 6000), artifact: evidencePath });
-    if (signal?.aborted) break;
+    await atomicJSON(evidencePath, { name: check.name, command: check.command, args: check.args, ...(sourceHash === null ? {} : { sourceHash }), ...(afterHash === null ? {} : { afterHash }), ...(drift ? { drift } : {}), ...result, at: Date.now() });
+    const output = bounded((result.stdout || '') + '\n' + (result.stderr || ''), 6000);
+    results.push({ name: check.name, source: 'controller-configured', passed: !drift && result.code === 0 && !result.timedOut && !result.aborted, code: result.code, timedOut: !!result.timedOut, output: drift ? bounded(`${drift}\n${output}`, 6000) : output, artifact: evidencePath });
+    if (drift || signal?.aborted) break;
   }
   return results;
 }

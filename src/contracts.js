@@ -13,10 +13,14 @@ export const WIRE_VERSION = 1;
 const RESERVED_IDS = new Set(['prototype', ...Object.getOwnPropertyNames(Object.prototype)]);
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
-const POLICY_KEYS = ['mode', 'finalReview', 'maxRevisions', 'maxRevisionsPerStep', 'summaryDetail'];
+const POLICY_KEYS = ['mode', 'finalReview', 'maxRevisions', 'maxRevisionsPerStep', 'summaryDetail', 'maxStepFiles'];
 const LIMIT_KEYS = ['maxTurnsPerStep', 'taskTimeoutMs', 'activeStepTimeoutMs', 'maxQueuedTasks', 'maxQueuedReviews', 'maxReportsPerTask', 'maxReportBytes', 'maxAutomaticReportRepairs', 'maxAutomaticRecoveryAttempts', 'maxReportedCostUsd', 'maxOutputTokens'];
-const LIMIT_BOUNDS = Object.freeze({ maxQueuedTasks: [0, 128], maxQueuedReviews: [0, 128], maxReportsPerTask: [1, 1000], maxReportBytes: [1, 1048576], maxAutomaticReportRepairs: [0, 20], maxAutomaticRecoveryAttempts: [0, 20] });
-const TASK_STATUSES = ['running', 'awaiting_settle', 'question', 'blocked', 'review', 'paused', 'interrupted', 'completed', 'cancelled'];
+const LIMIT_BOUNDS = Object.freeze({ maxReportsPerTask: [1, 1000], maxReportBytes: [1, 1048576], maxAutomaticReportRepairs: [0, 20] });
+/** Deprecated queue/recovery limits: valid when present (older snapshots), absent in new tasks. */
+const DEPRECATED_LIMIT_BOUNDS = Object.freeze({ maxQueuedTasks: [0, 128], maxQueuedReviews: [0, 128], maxAutomaticRecoveryAttempts: [0, 20] });
+// 'activating' is a granted-but-not-yet-sent attempt: running intent is persisted before the
+// work prompt is written, so a task found 'activating' after a crash provably never received it.
+const TASK_STATUSES = ['activating', 'running', 'awaiting_settle', 'question', 'blocked', 'review', 'paused', 'interrupted', 'completed', 'cancelled'];
 // startUnlocked also retains an unresolved task's status as a worker observation.
 const WORKER_STATUSES = ['stopped', 'starting', 'ready', 'working', 'settling', 'question', 'blocked', 'review', 'paused', 'attention', 'error', 'running', 'awaiting_settle', 'interrupted'];
 const AUTHORITY_PHASES = ['idle', 'running', 'waiting', 'paused', 'stopped'];
@@ -27,13 +31,18 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 
 /** @typedef {'final-only' | 'milestones' | 'every-step'} ReviewMode */
 /** @typedef {'minimal' | 'normal' | 'detailed'} SummaryDetail */
-/** @typedef {{mode: ReviewMode, finalReview: true, maxRevisions: number, maxRevisionsPerStep: number, summaryDetail: SummaryDetail}} TaskPolicy */
+/** maxStepFiles (every-step only) caps the files one step may change; older policies omit it.
+ * @typedef {{mode: ReviewMode, finalReview: true, maxRevisions: number, maxRevisionsPerStep: number, summaryDetail: SummaryDetail, maxStepFiles?: number}} TaskPolicy */
 /** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, maxRevisionsPerStep?: number, summaryDetail: SummaryDetail}} LegacyTaskPolicy */
 /** Removed per-step turn and overall task-duration limits. Legacy snapshots and
  * authority files may still carry them; they are validated but never enforced. */
 /** @typedef {{maxTurnsPerStep?: number, taskTimeoutMs?: number}} DeprecatedTurnTaskLimits */
 /** @typedef {{maxReportedCostUsd: number | null, maxOutputTokens: number | null}} BaseTaskLimits */
 /** @typedef {{activeStepTimeoutMs: number, maxQueuedTasks: number, maxQueuedReviews: number, maxReportsPerTask: number, maxReportBytes: number, maxAutomaticReportRepairs: number, maxAutomaticRecoveryAttempts: number}} DeferredTaskLimits */
+/** Limits of the live V1 controller: the queue and automatic-recovery limits are deprecated
+ * (absent in new tasks, still valid in older snapshots). DeferredTaskLimits/TaskLimits keep the
+ * full shape the parked actor layer (coordination.js) was designed against.
+ * @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & {activeStepTimeoutMs: number, maxReportsPerTask: number, maxReportBytes: number, maxAutomaticReportRepairs: number, maxQueuedTasks?: number, maxQueuedReviews?: number, maxAutomaticRecoveryAttempts?: number}} CurrentTaskLimits */
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & DeferredTaskLimits} TaskLimits */
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & Partial<DeferredTaskLimits>} LegacyTaskLimits */
 /** @typedef {{id: string, title: string, instructions: string, acceptance?: string[]}} Step */
@@ -65,12 +74,12 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, phase: AuthorityPhase, leaseId: string, attemptId: string | null, readOnly: boolean, model: {provider: string, id: string}, repoRoot: string, task: AuthorityTask | null, updatedAt: number, cacheWarming?: 'off' | 'active'}} Authority */
 /** @typedef {{ownerEpoch: number, workerGeneration: number, leaseId: string, attemptId: string, report: ReportEnvelope}} Latch */
 
-/** @typedef {'running' | 'awaiting_settle' | 'question' | 'blocked' | 'review' | 'paused' | 'interrupted' | 'completed' | 'cancelled'} TaskStatus */
+/** @typedef {'activating' | 'running' | 'awaiting_settle' | 'question' | 'blocked' | 'review' | 'paused' | 'interrupted' | 'completed' | 'cancelled'} TaskStatus */
 /** @typedef {'stopped' | 'starting' | 'ready' | 'working' | 'settling' | 'question' | 'blocked' | 'review' | 'paused' | 'attention' | 'error' | 'running' | 'awaiting_settle' | 'interrupted'} WorkerStatus */
 /** @typedef {{hash: string, taskId: string, workerId: string, acceptedAt: number, status: string}} StoredRequestV1 */
 /** Delivery receipts are truthful offers, never confirmed comprehension: offeredAt/channel name the channel that received the report; observedAt records an explicit Main read. Legacy 'delivered' remains readable but is never newly written (sendMessage is fire-and-forget).
  * observedBranch pins the persisted conversation-branch counter the report was last inspected on; a decision on a different branch is stale and needs fresh inspection.
- * @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual' | 'auto', observedAt?: number, observedBranch?: number, error?: string}} HistoricalNoticeV1 */
+ * @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual' | 'auto' | 'prompt', observedAt?: number, observedBranch?: number, autoAttempts?: number, error?: string}} HistoricalNoticeV1 */
 /** @typedef {HistoricalNoticeV1 & {ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} StoredNoticeV1 */
 /** Explicit, nonauthorizing Main logical-phase marker. It only channels report delivery after an explicit yield; it never grants worker or Main authority, and a missing marker never implies readiness or yield. revision is a real monotonic phase token; runToken binds a yield to the exact Main agent run that recorded it.
  * The armed flag records whether an empty yield may receive one future automatic boundary offer; activity is the logical activity epoch captured with the yield.
@@ -104,10 +113,10 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
  * @typedef {Omit<PreDeferredPolicyV1, 'mode'> & {mode: 'final' | 'milestones' | 'strict'}} HistoricalTaskPolicyV1
  */
 /** @typedef {PreDeferredPolicyV1 & {maxRevisionsPerStep: number}} StoredPolicyV1 */
-/** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string}} StoredTaskFieldsV1 */
+/** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number}} StoredTaskFieldsV1 */
 /** @typedef {StoredTaskFieldsV1 & {workerId: string, attemptId: string, attemptNumber: number, pendingReport: ReportEnvelope | null, report: FinalizedReport | null, decisions: Record<string, StoredDecision>} & ({policy: StoredPolicyV1, limits: TaskLimits} | {policy: PreDeferredPolicyV1, limits: BaseTaskLimits})} StoredTaskV1 */
 /** @typedef {StoredTaskFieldsV1 & {policy: HistoricalTaskPolicyV1, limits: BaseTaskLimits, pendingReport: HistoricalReportEnvelopeV1 | null, report: HistoricalFinalizedReportV1 | null, decisions: Record<string, HistoricalDecisionV1>}} HistoricalTaskV1 */
-/** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null}} StoredWorkerFieldsV1 */
+/** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null, pid?: number, spawnedAt?: number}} StoredWorkerFieldsV1 */
 /** @typedef {StoredWorkerFieldsV1 & {workerGeneration: number, task: StoredTaskV1 | null}} StoredWorkerV1 */
 /** @typedef {StoredWorkerFieldsV1 & {task: HistoricalTaskV1 | null}} HistoricalWorkerV1 */
 /** state.branch is a persisted monotonic conversation-branch counter (normal turns and compaction never bump it); it only fences stale branch decisions, never authorizes anything.
@@ -257,6 +266,7 @@ function assertTaskPolicy(value, label = 'task.policy', { legacy = false } = {})
   integer(required(policy, 'maxRevisions', label), `${label}.maxRevisions`, 0, 20);
   if (!legacy || Object.hasOwn(policy, 'maxRevisionsPerStep')) integer(required(policy, 'maxRevisionsPerStep', label), `${label}.maxRevisionsPerStep`, 0, 20);
   choice(required(policy, 'summaryDetail', label), ['minimal', 'normal', 'detailed'], `${label}.summaryDetail`);
+  if (Object.hasOwn(policy, 'maxStepFiles')) integer(policy.maxStepFiles, `${label}.maxStepFiles`, 1, 1000);
 
 }
 
@@ -274,6 +284,7 @@ function assertTaskLimits(value, label = 'task.limits', { legacy = false } = {})
     if (legacy && !Object.hasOwn(limits, key)) continue;
     integer(required(limits, key, label), `${label}.${key}`, bounds[0], bounds[1]);
   }
+  for (const [key, bounds] of Object.entries(DEPRECATED_LIMIT_BOUNDS)) if (Object.hasOwn(limits, key)) integer(limits[key], `${label}.${key}`, bounds[0], bounds[1]);
   for (const key of ['maxReportedCostUsd', 'maxOutputTokens']) {
     const entry = required(limits, key, label);
     invariant(entry === null || (typeof entry === 'number' && Number.isFinite(entry) && entry > 0), `${label}.${key} must be positive or null`, `${label}.${key}`);
@@ -355,6 +366,7 @@ function checkStoredPolicy(task, label, historical, facts) {
   integer(required(policy, 'maxRevisions', at), `${at}.maxRevisions`, 0, 20);
   if (!legacy) integer(required(policy, 'maxRevisionsPerStep', at), `${at}.maxRevisionsPerStep`, 0, 20);
   choice(required(policy, 'summaryDetail', at), ['minimal', 'normal', 'detailed'], `${at}.summaryDetail`);
+  if (Object.hasOwn(policy, 'maxStepFiles')) integer(policy.maxStepFiles, `${at}.maxStepFiles`, 1, 1000);
   validateTaskLimits(task.limits, `${label}.limits`, { legacy });
   const alias = mode === 'final' || mode === 'strict' ? mode : null;
   facts.taskLayouts.push({ path: label, policyLayout: legacy ? 'pre-deferred-policy' : 'current-policy', alias });
@@ -557,7 +569,7 @@ function validateTaskReportIdentity(report, label, task, workerId, stepIds, curr
 /** @param {unknown} value @param {string} label @param {string} workerId @param {boolean} historical @param {ProfileFacts} facts */
 function checkStoredTask(value, label, workerId, historical, facts) {
   const task = object(value, label);
-  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', ...(historical ? [] : ['workerId', 'attemptId', 'attemptNumber'])], label);
+  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', ...(historical ? [] : ['workerId', 'attemptId', 'attemptNumber'])], label);
   for (const key of ['id', 'requestId', 'leaseId']) id(required(task, key, label), `${label}.${key}`);
   if (!historical) {
     reference(id(required(task, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Task targets a different worker');
@@ -611,7 +623,7 @@ function checkStoredTask(value, label, workerId, historical, facts) {
     const decision = object(decisions[last.reportId], `${label}.decisions.${last.reportId}`);
     reference(decision.action === last.action && decision.feedback === last.feedback, `${label}.lastDecision`, 'Last decision contradicts its retained decision');
   }
-  for (const key of ['dispatchSettleSequence', 'pendingSince', 'completedAt']) if (Object.hasOwn(task, key)) integer(task[key], `${label}.${key}`);
+  for (const key of ['dispatchSettleSequence', 'pendingSince', 'completedAt', 'stepRevisions']) if (Object.hasOwn(task, key)) integer(task[key], `${label}.${key}`);
   if (Object.hasOwn(task, 'abortRequested')) bool(task.abortRequested, `${label}.abortRequested`);
   for (const key of ['interruption', 'previousStatus', 'cancelReason']) if (Object.hasOwn(task, key)) text(task[key], `${label}.${key}`, 10000);
 }
@@ -622,7 +634,7 @@ function validateStoredTask(value, label, workerId) { assertStoredTask(value, la
 /** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @param {boolean} historical @param {ProfileFacts} facts */
 function checkWorkerRecord(value, label, workerId, ownerSession, historical, facts) {
   const record = object(value, label);
-  keys(record, ['id', 'cwd', 'repoRoot', 'status', 'sessionId', 'sessionFile', 'bound', 'task', 'history', 'usage', 'error', 'diagnosticFile', 'lastObservation', 'lastExchange', 'staleReports', 'probe', ...(historical ? [] : ['workerGeneration'])], label);
+  keys(record, ['id', 'cwd', 'repoRoot', 'status', 'sessionId', 'sessionFile', 'bound', 'task', 'history', 'usage', 'error', 'diagnosticFile', 'lastObservation', 'lastExchange', 'staleReports', 'probe', 'pid', 'spawnedAt', ...(historical ? [] : ['workerGeneration'])], label);
   reference(id(required(record, 'id', label), `${label}.id`) === workerId, `${label}.id`, 'Worker identity differs from its map key');
   for (const key of ['cwd', 'repoRoot']) text(required(record, key, label), `${label}.${key}`, 10000);
   choice(required(record, 'status', label), WORKER_STATUSES, `${label}.status`);
@@ -638,6 +650,9 @@ function checkWorkerRecord(value, label, workerId, ownerSession, historical, fac
   validateUsageTotals(required(record, 'usage', label), `${label}.usage`);
   if (Object.hasOwn(record, 'error')) nullableText(record.error, `${label}.error`);
   if (Object.hasOwn(record, 'diagnosticFile')) text(record.diagnosticFile, `${label}.diagnosticFile`, 10000);
+  // Process identity of the current generation, recorded at spawn for exit proof after a crash.
+  if (Object.hasOwn(record, 'pid')) integer(record.pid, `${label}.pid`, 1);
+  if (Object.hasOwn(record, 'spawnedAt')) integer(record.spawnedAt, `${label}.spawnedAt`);
   if (Object.hasOwn(record, 'lastObservation')) checkTelemetry(record.lastObservation, `${label}.lastObservation`, workerId, ownerSession, facts);
   if (Object.hasOwn(record, 'probe')) checkProbe(record.probe, `${label}.probe`, workerId, ownerSession, facts);
   if (Object.hasOwn(record, 'lastExchange') && record.lastExchange !== null) {
@@ -713,7 +728,7 @@ function checkRequest(value, label) {
 /** @param {unknown} value @param {string} label @param {string} reportId @param {boolean} historical */
 function checkNotice(value, label, reportId, historical) {
   const notice = object(value, label);
-  keys(notice, ['reportId', 'workerId', 'taskId', 'status', 'createdAt', 'deliveredAt', 'error', 'offeredAt', 'channel', 'observedAt', 'observedBranch', ...(historical ? [] : ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'])], label);
+  keys(notice, ['reportId', 'workerId', 'taskId', 'status', 'createdAt', 'deliveredAt', 'error', 'offeredAt', 'channel', 'observedAt', 'observedBranch', 'autoAttempts', ...(historical ? [] : ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'])], label);
   reference(id(required(notice, 'reportId', label), `${label}.reportId`) === reportId, `${label}.reportId`, 'Notice identity differs from its map key');
   for (const key of ['workerId', 'taskId', ...(historical ? [] : ['attemptId', 'deliveryOperationId'])]) id(required(notice, key, label), `${label}.${key}`);
   if (!historical) for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(notice, key, label), `${label}.${key}`, 1);
@@ -725,7 +740,9 @@ function checkNotice(value, label, reportId, historical) {
   // Offer receipts name the delivery channel that received the report; observedAt
   // records an explicit Main read. Neither confirms the model comprehended it.
   if (Object.hasOwn(notice, 'offeredAt')) integer(notice.offeredAt, `${label}.offeredAt`);
-  if (Object.hasOwn(notice, 'channel')) choice(notice.channel, ['tool-result', 'boundary', 'manual', 'auto'], `${label}.channel`);
+  if (Object.hasOwn(notice, 'channel')) choice(notice.channel, ['tool-result', 'boundary', 'manual', 'auto', 'prompt'], `${label}.channel`);
+  // Unconfirmed automatic delivery attempts; bounded retries fall back to the inbox.
+  if (Object.hasOwn(notice, 'autoAttempts')) integer(notice.autoAttempts, `${label}.autoAttempts`, 0);
   if (Object.hasOwn(notice, 'observedAt')) integer(notice.observedAt, `${label}.observedAt`);
   // The branch the report was last inspected on; only fences stale decisions.
   if (Object.hasOwn(notice, 'observedBranch')) integer(notice.observedBranch, `${label}.observedBranch`, 0);

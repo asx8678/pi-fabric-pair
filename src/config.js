@@ -17,10 +17,10 @@ function isArray(value) { return Array.isArray(value); }
 export const INDICATORS = ['minimal', 'compact', 'off'];
 /** @param {unknown} value @returns {value is Indicator} */
 export function isIndicator(value) { return INDICATORS.some(mode => mode === value); }
-/** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], extraSkills: string[], inheritExtensions: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
+/** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], excludeExtensions: string[], extraSkills: string[], inheritExtensions: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
-/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').TaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean}} PairConfig */
+/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean}} PairConfig */
 /** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence'} NestedConfigKey */
 /** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>}} ConfigLayer */
 /** @typedef {{scope: ConfigScope, kind: 'fabric-pair-v1' | 'handoff-v1', sourceFile: string, targetFile: string, fromVersion: 1, toVersion: 2, warnings: string[]}} ConfigMigration */
@@ -31,6 +31,7 @@ export function isIndicator(value) { return INDICATORS.some(mode => mode === val
 /** @typedef {{kind: 'handoff-v1-backup', scope: ConfigScope, sourceFile: string, targetFile: string, sourceHash: string, targetHash: string, layer: ConfigLayer, fields: Record<string, number>, origins: Record<string, string>}} BackupImportPreview */
 
 export const CONFIG_VERSION = 2;
+
 /** @type {Readonly<PairConfig>} */
 export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   version: CONFIG_VERSION,
@@ -40,13 +41,12 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   indicator: 'minimal',
   maxWorkers: 1,
   workers: [{ id: 'worker', provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }],
-  supervision: { mode: 'milestones', finalReview: true, maxRevisions: 3, maxRevisionsPerStep: 3, summaryDetail: 'normal' },
-  runtime: { command: 'pi', commandArgs: [], extraExtensions: [], extraSkills: [], inheritExtensions: true, startupTimeoutMs: 120000, requestTimeoutMs: 30000, shutdownTimeoutMs: 5000 },
+  supervision: { mode: 'milestones', finalReview: true, maxRevisions: 20, maxRevisionsPerStep: 3, summaryDetail: 'normal', maxStepFiles: 5 },
+  runtime: { command: 'pi', commandArgs: [], extraExtensions: [], excludeExtensions: [], extraSkills: [], inheritExtensions: true, startupTimeoutMs: 120000, requestTimeoutMs: 30000, shutdownTimeoutMs: 5000 },
   requirements: { fabric: true, fovea: true, prewalkDisabled: true, autoCompaction: true },
   limits: {
     activeStepTimeoutMs: 1800000,
-    maxQueuedTasks: 8, maxQueuedReviews: 8, maxReportsPerTask: 40, maxReportBytes: 16384,
-    maxAutomaticReportRepairs: 1, maxAutomaticRecoveryAttempts: 1,
+    maxReportsPerTask: 40, maxReportBytes: 16384, maxAutomaticReportRepairs: 1,
     maxReportedCostUsd: null, maxOutputTokens: null
   },
   verification: { commands: [], requirePassing: true, timeoutMs: 120000 },
@@ -61,7 +61,12 @@ const POLICY_ALIASES = { final: 'final-only', strict: 'every-step', 'final-only'
 /** Removed per-step turn and overall task-duration limits: no longer enforced,
  * advertised, or persisted. Legacy files that still declare them stay readable —
  * present values are checked then dropped; unrelated unknown settings stay errors. */
-const DEPRECATED_LIMIT_KEYS = ['maxTurnsPerStep', 'taskTimeoutMs'];
+/** Pair V1 has one unresolved assignment and never recovers automatically, so the queue and
+ * recovery limits it once carried are deprecated the same way: accepted in old files and backups
+ * (bounds-checked), then dropped. */
+const DEPRECATED_LIMIT_KEYS = ['maxTurnsPerStep', 'taskTimeoutMs', 'maxQueuedTasks', 'maxQueuedReviews', 'maxAutomaticRecoveryAttempts'];
+/** @type {Record<string, [number, number]>} */
+const DEPRECATED_LIMIT_BOUNDS = { maxTurnsPerStep: [1, Number.MAX_SAFE_INTEGER], taskTimeoutMs: [1, Number.MAX_SAFE_INTEGER], maxQueuedTasks: [0, 128], maxQueuedReviews: [0, 128], maxAutomaticRecoveryAttempts: [0, 20] };
 /** @param {Record<string, unknown>} limits @returns {boolean} whether a deprecated key was dropped */
 function dropDeprecatedLimits(limits) {
   let dropped = false;
@@ -84,8 +89,10 @@ export function validateConfig(raw = {}) {
     const keys = Object.keys(DEFAULTS[section]);
     assertKeys(raw[section], section === 'limits' ? [...keys, ...DEPRECATED_LIMIT_KEYS] : keys, section);
   }
-  if (isObject(raw.limits)) for (const key of DEPRECATED_LIMIT_KEYS) if (Object.hasOwn(raw.limits, key))
-    assert(typeof raw.limits[key] === 'number' && Number.isSafeInteger(raw.limits[key]) && raw.limits[key] > 0, `${key} is a removed limit and no longer enforced; delete it or keep a positive integer`);
+  if (isObject(raw.limits)) for (const key of DEPRECATED_LIMIT_KEYS) if (Object.hasOwn(raw.limits, key)) {
+    const [minimum, maximum] = DEPRECATED_LIMIT_BOUNDS[key], value = raw.limits[key];
+    assert(typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum && value <= maximum, `${key} is a removed limit and no longer enforced; delete it or keep an integer ${minimum}–${maximum}`);
+  }
   /** @type {unknown} */
   const c = merge(DEFAULTS, raw);
   if (isObject(c) && isObject(c.limits)) dropDeprecatedLimits(c.limits);
@@ -117,12 +124,13 @@ function assertMergedConfig(c) {
   assert(typeof c.supervision.mode === 'string' && ['final-only', 'milestones', 'every-step'].includes(c.supervision.mode), 'Invalid supervision mode');
   assert(c.supervision.finalReview === true, 'This release always requires final review');
   for (const key of ['maxRevisions', 'maxRevisionsPerStep']) assert(typeof c.supervision[key] === 'number' && Number.isInteger(c.supervision[key]) && c.supervision[key] >= 0 && c.supervision[key] <= 20, `${key} must be 0–20`);
+  assert(typeof c.supervision.maxStepFiles === 'number' && Number.isSafeInteger(c.supervision.maxStepFiles) && c.supervision.maxStepFiles >= 1 && c.supervision.maxStepFiles <= 1000, 'maxStepFiles must be 1–1000');
   assert(typeof c.supervision.summaryDetail === 'string' && ['minimal', 'normal', 'detailed'].includes(c.supervision.summaryDetail), 'Invalid summary detail');
   assert(typeof c.runtime.command === 'string' && c.runtime.command.length > 0 && !c.runtime.command.includes('\0'), 'runtime.command is required');
   assert(typeof c.runtime.inheritExtensions === 'boolean', 'runtime.inheritExtensions must be boolean');
   assert(typeof c.verification.requirePassing === 'boolean', 'verification.requirePassing must be boolean');
   assert(typeof c.verification.timeoutMs === 'number' && Number.isSafeInteger(c.verification.timeoutMs) && c.verification.timeoutMs > 0, 'verification.timeoutMs must be a positive integer');
-  for (const key of ['commandArgs', 'extraExtensions', 'extraSkills']) assert(isArray(c.runtime[key]) && c.runtime[key].every(v => typeof v === 'string' && !v.includes('\0')), `runtime.${key} must be a string array`);
+  for (const key of ['commandArgs', 'extraExtensions', 'excludeExtensions', 'extraSkills']) assert(isArray(c.runtime[key]) && c.runtime[key].every(v => typeof v === 'string' && !v.includes('\0')), `runtime.${key} must be a string array`);
   for (const key of ['fabric', 'fovea', 'prewalkDisabled', 'autoCompaction']) assert(typeof c.requirements[key] === 'boolean', `requirements.${key} must be boolean`);
   /** @type {[Record<string, unknown>, string[]][]} */
   const positiveFields = [[c.runtime, ['startupTimeoutMs', 'requestTimeoutMs', 'shutdownTimeoutMs']], [c.limits, ['activeStepTimeoutMs']], [c.evidence, ['maxFiles', 'maxTotalBytes', 'maxArtifactBytes']]];
@@ -130,7 +138,7 @@ function assertMergedConfig(c) {
     for (const key of keys) assert(typeof obj[key] === 'number' && Number.isSafeInteger(obj[key]) && obj[key] > 0, `${key} must be a positive integer`);
   }
   /** @type {Record<string, [number, number]>} */
-  const boundedLimits = { maxQueuedTasks: [0, 128], maxQueuedReviews: [0, 128], maxReportsPerTask: [1, 1000], maxReportBytes: [1, 1048576], maxAutomaticReportRepairs: [0, 20], maxAutomaticRecoveryAttempts: [0, 20] };
+  const boundedLimits = { maxReportsPerTask: [1, 1000], maxReportBytes: [1, 1048576], maxAutomaticReportRepairs: [0, 20] };
   for (const [key, [minimum, maximum]] of Object.entries(boundedLimits)) assert(typeof c.limits[key] === 'number' && Number.isSafeInteger(c.limits[key]) && c.limits[key] >= minimum && c.limits[key] <= maximum, `${key} must be ${minimum}–${maximum}`);
   for (const key of ['maxReportedCostUsd', 'maxOutputTokens']) assert(c.limits[key] === null || (typeof c.limits[key] === 'number' && Number.isFinite(c.limits[key]) && c.limits[key] > 0), `${key} must be positive or null`);
   assert(isArray(c.verification.commands) && c.verification.commands.length <= 12, 'verification.commands must be an array of at most 12 commands');
@@ -229,14 +237,14 @@ function migrateHandoffV1(raw, sourceFile, scope, targetFile) {
       summaryDetail: raw.collaboration?.summaryDetail || 'normal'
     },
     limits: {
-      ...Object.fromEntries(['maxQueuedTasks', 'maxQueuedReviews', 'maxReportsPerTask', 'maxReportBytes', 'maxAutomaticReportRepairs', 'maxAutomaticRecoveryAttempts'].filter(key => legacyLimits?.[key] !== undefined).map(key => [key, legacyLimits?.[key]])),
+      ...Object.fromEntries(['maxReportsPerTask', 'maxReportBytes', 'maxAutomaticReportRepairs'].filter(key => legacyLimits?.[key] !== undefined).map(key => [key, legacyLimits?.[key]])),
       ...(raw.limits?.activeStepTimeoutMs === undefined ? {} : { activeStepTimeoutMs: raw.limits.activeStepTimeoutMs }),
       ...(raw.limits?.taskBudgetUsd === undefined ? {} : { maxReportedCostUsd: raw.limits.taskBudgetUsd })
     }
   };
   const warnings = ['Handoff provider identity is not inferred; choose the canonical provider/model before enabling.'];
   if (raw.enabled === true) warnings.push('Handoff enabled:true was reset to false; migration never grants new consent.');
-  if ((raw.limits && Object.keys(raw.limits).some(key => key.startsWith('maxQueued') || key.startsWith('maxReport') || key.startsWith('maxAutomatic') || key === 'activeStepTimeoutMs')) || raw.collaboration?.maxRevisionsPerStep !== undefined) warnings.push('Queue, report, repair, recovery, active-step and per-step values are preserved in assignment policy; their R5 runtime enforcement remains pending and Pair will not advertise them as active limits.');
+  if ((raw.limits && Object.keys(raw.limits).some(key => key.startsWith('maxQueued') || key.startsWith('maxReport') || key.startsWith('maxAutomatic') || key === 'activeStepTimeoutMs')) || raw.collaboration?.maxRevisionsPerStep !== undefined) warnings.push('Report, repair, active-step and per-step limits are migrated and enforced. Queue and automatic-recovery limits are deprecated (Pair V1 runs one assignment and never recovers automatically) and are dropped.');
   assertConfigLayer(layer);
   return { layer, migration: { scope, kind: 'handoff-v1', sourceFile, targetFile, fromVersion: 1, toVersion: CONFIG_VERSION, warnings } };
 }
@@ -278,8 +286,8 @@ export function configPaths(cwd, env = process.env) {
   const home = agentDir(env);
   return { global: path.join(home, 'fabric-pair.json'), project: path.join(cwd, '.pi', 'fabric-pair.json'), legacyGlobal: path.join(home, 'pair.json'), legacyProject: path.join(cwd, '.pi', 'pair.json'), ui: path.join(home, 'fabric-pair-ui.json') };
 }
-/** @type {(keyof Omit<import('./contracts.js').DeferredTaskLimits, 'activeStepTimeoutMs'>)[]} */
-const BACKUP_FIELDS = ['maxQueuedTasks', 'maxQueuedReviews', 'maxReportsPerTask', 'maxReportBytes', 'maxAutomaticReportRepairs', 'maxAutomaticRecoveryAttempts'];
+/** @type {('maxReportsPerTask' | 'maxReportBytes' | 'maxAutomaticReportRepairs')[]} */
+const BACKUP_FIELDS = ['maxReportsPerTask', 'maxReportBytes', 'maxAutomaticReportRepairs'];
 /** @param {unknown} scope @returns {asserts scope is ConfigScope} */
 function assertScope(scope) { assert(scope === 'global' || scope === 'project', 'Backup import scope must be global or project'); }
 /** @param {ConfigPaths} files @param {ConfigScope} scope */

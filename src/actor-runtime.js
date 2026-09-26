@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import { constants as FS } from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { PiRpc, RpcUncertainError, isRpcRecord } from './rpc.js';
 import { checkReadiness, meshRootFor } from './native.js';
@@ -19,13 +20,23 @@ import { checkReadiness, meshRootFor } from './native.js';
 /** @typedef {{input: number, output: number, cacheRead: number, cacheWrite: number, cost?: {total: number}}} Usage */
 /** @typedef {{type: string, at: number, message?: {role: string, usage?: Usage}, reason?: string, toolCallId?: string, toolName?: string, steering?: number, followUp?: number, error?: string, notifyType?: string}} RuntimeObservation */
 /** @typedef {{id: string, event: RecordValue, activation: Activation | null, startup: boolean, scope: number, controller: AbortController, deadline: number, timer: ReturnType<typeof setTimeout>, bytes: number}} Dialog */
-/** @typedef {{header: RecordValue, entries: RecordValue[]}} History */
-/** @typedef {{rpcOptions: RpcOptions, rpcFactory?: (options: RpcOptions) => PiRpc, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, nonce: string, dir: string, cwd: string, sessionFile: string, sessionId: string | null, freshSession: boolean, config: RuntimeConfig, spec: WorkerSpec, entryPath: string, promptUser?: (workerId: string, event: RecordValue, options: {signal: AbortSignal, timeout: number}) => Promise<unknown>, onWake: () => void, isCurrent: (runtime: PiRuntime, activation: Activation | null) => boolean}} RuntimeOptions */
+/** Verified retained-history fingerprint: the exact verified byte prefix and its hash, identity
+ * facts of every verified entry, parent links for branch checks, and a bounded tail.
+ * @typedef {{header: RecordValue, bytes: number, sha256: string, known: Map<string, EntryFact>, parents: Map<string, string | null>, count: number, lastId: string | null, tail: RecordValue[]}} VerifiedHistory */
+/** @typedef {{rpcOptions: RpcOptions, rpcFactory?: (options: RpcOptions) => PiRpc, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, nonce: string, dir: string, cwd: string, sessionFile: string, sessionId: string | null, freshSession: boolean, config: RuntimeConfig, spec: WorkerSpec, entryPath: string, promptUser?: (workerId: string, event: RecordValue, options: {signal: AbortSignal, timeout: number}) => Promise<unknown>, onWake: () => void, onSpawn?: (pid: number) => void, isCurrent: (runtime: PiRuntime, activation: Activation | null) => boolean}} RuntimeOptions */
 
 // Internal bounded retention, deliberately not configuration or wire-format additions.
 const OBS_COUNT = 256, OBS_BYTES = 1024 * 1024, OBS_BATCH = 32;
 const DIALOG_COUNT = 8, DIALOG_BYTES = 64 * 1024, TOOL_COUNT = 128;
-const HISTORY_BYTES = 16 * 1024 * 1024, HISTORY_ENTRIES = 100_000, PROBE_BYTES = 256 * 1024;
+// Session files are stream-verified (memory tracks entry identities, not bytes), so the
+// ceiling is a sanity bound, not a practical lifetime limit for a retained worker.
+const HISTORY_BYTES = 4 * 1024 * 1024 * 1024, HISTORY_ENTRIES = 2_000_000, PROBE_BYTES = 256 * 1024;
+/** Entries compared directly against Pi's in-memory history at startup (RPC frames stay small). */
+const TAIL_ENTRIES = 64;
+/** Sessions up to this size are compared entry-for-entry against Pi's whole in-memory history
+ * (one RPC frame) at every verification, which also catches in-memory rewrites of old entries.
+ * Larger sessions are verified by prefix hash plus the appended suffix. */
+const FULL_COMPARE_BYTES = 8 * 1024 * 1024;
 const MAX_TIMEOUT = 300_000, UI_TIMEOUT = 120_000;
 const THINKING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const COMPACTION_REASONS = new Set(['manual', 'threshold', 'overflow']);
@@ -124,14 +135,29 @@ function validateMessage(value, allowPending = false) {
   if (message.role === 'compactionSummary') requireValue(typeof message.summary === 'string' && nonnegative(message.tokensBefore), 'Invalid stored compaction summary');
   if (message.usage !== undefined) validateUsage(message.usage);
 }
+/** Minimal retained facts about an already-verified entry: enough to validate references from later entries.
+ * @typedef {{type: string, role: string | null}} EntryFact */
+/** @param {RecordValue} entry @returns {EntryFact} */
+function factOf(entry) {
+  const message = entry.type === 'message' && isRpcRecord(entry.message) ? entry.message : null;
+  return { type: String(entry.type), role: message && typeof message.role === 'string' ? message.role : null };
+}
 /** Strict base/payload/ref validation. Arbitrary extension/custom JSON is preserved, never interpreted.
- * @param {unknown[]} values @returns {RecordValue[]}
+ * `known` carries facts of previously verified entries, so an appended suffix can be validated
+ * against the history before it without re-reading that history.
+ * @param {unknown[]} values @param {Map<string, EntryFact>} [known] @returns {RecordValue[]}
  */
-function validateEntries(values) {
-  requireValue(values.length <= HISTORY_ENTRIES, 'Session entry count exceeds retention bound');
-  /** @type {Map<string, RecordValue>} */ const seen = new Map();
+function validateEntries(values, known = new Map()) {
+  requireValue(values.length + known.size <= HISTORY_ENTRIES, 'Session entry count exceeds retention bound');
+  const seen = new Map(known);
   const result = [];
-  for (const value of values) {
+  for (const value of values) { const entry = validateEntry(value, seen); seen.set(String(entry.id), factOf(entry)); result.push(entry); }
+  return result;
+}
+/** Validate one entry against the facts of every entry before it. Does not record it.
+ * @param {unknown} value @param {Map<string, EntryFact>} seen @returns {RecordValue} */
+function validateEntry(value, seen) {
+  {
     const entry = record(value, 'Session entry');
     requireValue(text(entry.id) && !seen.has(entry.id) && text(entry.type) && entry.type !== 'session', 'Invalid/duplicate session entry identity');
     requireValue(typeof entry.timestamp === 'string' && Number.isFinite(Date.parse(entry.timestamp)), 'Invalid session entry timestamp');
@@ -152,7 +178,7 @@ function validateEntries(values) {
         requireValue(text(entry.targetId) && seen.has(entry.targetId), 'Broken context-edit target');
         const target = seen.get(entry.targetId);
         requireValue(target && ['message', 'custom_message'].includes(String(target.type)), 'Context-edit target is not editable');
-        const role = target.type === 'custom_message' ? 'custom' : record(target.message, 'Context-edit target message').role;
+        const role = target.type === 'custom_message' ? 'custom' : target.role;
         requireValue(typeof role === 'string' && (target.type === 'custom_message' || ['user', 'assistant', 'toolResult'].includes(role)), 'Context-edit target is not editable');
         // Pi 0.87.1 persists a wrapper, not the shorthand shown in older prose docs.
         if (entry.replacement !== null) validateContent(record(entry.replacement, 'Context-edit replacement').content, role);
@@ -167,21 +193,96 @@ function validateEntries(values) {
     }
     if (entry.usage !== undefined) validateUsage(entry.usage);
     if (entry.systemMessage !== undefined) { validateMessage(entry.systemMessage); requireValue(record(entry.systemMessage, 'System checkpoint').role === 'system', 'Invalid system checkpoint'); }
-    seen.set(entry.id, entry); result.push(entry);
+    return entry;
   }
-  return result;
 }
-/** @param {string} file @param {string} cwd @returns {Promise<History>} */
-async function readHistory(file, cwd) {
-  const raw = await readBounded(file, HISTORY_BYTES);
-  requireValue(raw.length > 0, 'Retained session is empty; refusing replacement');
-  const lines = raw.split('\n'); if (lines.at(-1) === '') lines.pop();
-  // No trim/filter: blank lines, malformed tails, or legacy migration would hide history.
-  const values = lines.map((line, i) => { try { return record(JSON.parse(line), `Session line ${i + 1}`); } catch { throw new Error(`Malformed session JSONL at line ${i + 1}`); } });
-  const header = values.shift();
-  requireValue(header && header.type === 'session' && header.version === 3 && text(header.id) && header.cwd === cwd && typeof header.timestamp === 'string' && Number.isFinite(Date.parse(header.timestamp)), 'Invalid bound V3 session header');
+/** Whether `leafId` lies on the branch that continues from `priorLeaf`.
+ * @param {Map<string, string | null>} parents @param {string} priorLeaf @param {string} leafId */
+function descendsFrom(parents, priorLeaf, leafId) {
+  /** @type {string | null | undefined} */ let node = leafId;
+  for (let steps = 0; node !== null && node !== undefined && steps <= parents.size; steps++) {
+    if (node === priorLeaf) return true;
+    node = parents.get(node);
+  }
+  return false;
+}
+/** @param {unknown} value @param {string} cwd @returns {RecordValue} */
+function validateHeader(value, cwd) {
+  const header = record(value, 'Session header');
+  requireValue(header.type === 'session' && header.version === 3 && text(header.id) && header.cwd === cwd && typeof header.timestamp === 'string' && Number.isFinite(Date.parse(header.timestamp)), 'Invalid bound V3 session header');
   requireValue(header.parentSession === undefined || text(header.parentSession), 'Invalid parent session path');
-  return { header, entries: validateEntries(values) };
+  return header;
+}
+/** Parse and validate one session line against the facts of everything before it.
+ * @param {Buffer} bytes @param {number} lineNumber @param {Map<string, EntryFact>} seen @returns {RecordValue} */
+function parseEntryLine(bytes, lineNumber, seen) {
+  /** @type {RecordValue} */ let value;
+  // No trim/filter: blank lines, malformed tails, or legacy migration would hide history.
+  try { value = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), `Session line ${lineNumber}`); }
+  catch { throw new Error(`Malformed session JSONL at line ${lineNumber}`); }
+  requireValue(seen.size < HISTORY_ENTRIES, 'Session entry count exceeds retention bound');
+  const entry = validateEntry(value, seen);
+  seen.set(String(entry.id), factOf(entry));
+  return entry;
+}
+/** Stream-verify a bound session file. Without `base` the whole file is validated; with
+ * `base` the previously verified prefix must hash identically (nothing old was replaced or
+ * truncated) and only the appended suffix is parsed. Memory stays proportional to the
+ * entry count (identity facts), not the file size.
+ * `keepAll` retains every entry of a full scan (small sessions only).
+ * @param {string} file @param {string} cwd @param {VerifiedHistory | null} [base] @param {boolean} [keepAll]
+ * @returns {Promise<{history: VerifiedHistory, suffix: RecordValue[]}>} */
+async function scanHistory(file, cwd, base = null, keepAll = false) {
+  const handle = await fs.open(file, FS.O_RDONLY | FS.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    requireValue(stat.isFile() && stat.size <= HISTORY_BYTES, `Invalid/oversized session file: ${file}`);
+    requireValue(stat.size > 0, 'Retained session is empty; refusing replacement');
+    const start = base ? base.bytes : 0;
+    requireValue(stat.size >= start, 'Session history changed/lost an old branch entry (the file is shorter than its verified prefix)');
+    const hash = createHash('sha256');
+    if (start > 0) {
+      for await (const chunk of handle.createReadStream({ start: 0, end: start - 1, autoClose: false })) hash.update(chunk);
+      requireValue(hash.copy().digest('hex') === base?.sha256, 'Session history changed/lost an old branch entry');
+    }
+    const known = new Map(base?.known), parents = new Map(base?.parents);
+    let header = base?.header ?? null, count = base?.count ?? 0, lastId = base?.lastId ?? null, lineNumber = (base?.count ?? -1) + 1;
+    /** @type {RecordValue[]} */ const suffix = [];
+    /** @type {Buffer[]} */ let pending = []; let pendingBytes = 0;
+    /** @param {Buffer} line */
+    const take = line => {
+      lineNumber++;
+      if (header === null) {
+        try { header = validateHeader(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line)), cwd); }
+        catch (error) { throw error instanceof Error && /header|parent session/.test(error.message) ? error : new Error('Malformed session JSONL at line 1'); }
+        return;
+      }
+      const entry = parseEntryLine(line, lineNumber, known);
+      parents.set(String(entry.id), entry.parentId === null ? null : String(entry.parentId));
+      count++; lastId = String(entry.id);
+      suffix.push(entry);
+      // An initial full scan keeps only a bounded tail for RPC comparison.
+      if (!base && !keepAll && suffix.length > TAIL_ENTRIES) suffix.shift();
+    };
+    if (stat.size > start) {
+      for await (const raw of handle.createReadStream({ start, end: stat.size - 1, autoClose: false })) {
+        const chunk = /** @type {Buffer} */ (raw);
+        hash.update(chunk);
+        let from = 0;
+        for (let at = chunk.indexOf(10); at >= 0; at = chunk.indexOf(10, from)) {
+          pending.push(chunk.subarray(from, at)); take(Buffer.concat(pending)); pending = []; pendingBytes = 0; from = at + 1;
+        }
+        if (from < chunk.length) { pending.push(chunk.subarray(from)); pendingBytes += chunk.length - from; }
+        requireValue(pendingBytes <= 64 * 1024 * 1024, 'Session JSONL line exceeds 64 MiB');
+      }
+    }
+    // Pi appends whole lines; a tail without a newline is an incomplete write.
+    requireValue(pendingBytes === 0, 'Session JSONL ends with an incomplete line');
+    requireValue(header !== null, 'Invalid bound V3 session header');
+    const after = await handle.stat();
+    requireValue(after.size === stat.size && after.mtimeMs === stat.mtimeMs, `File changed during validation: ${file}`);
+    return { history: { header, bytes: stat.size, sha256: hash.digest('hex'), known, parents, count, lastId, tail: base ? [...base.tail, ...suffix].slice(-TAIL_ENTRIES) : suffix.slice(-TAIL_ENTRIES) }, suffix };
+  } finally { await handle.close(); }
 }
 /** @param {unknown} value @returns {RuntimeState} */
 function validateState(value) {
@@ -229,13 +330,14 @@ export class PiRuntime {
   /** @type {Map<string, Dialog>} */ #dialogs = new Map();
   /** @type {RuntimeObservation[]} */ #observations = [];
   /** @type {Map<string, number>} */ #compactions = new Map();
-  /** @type {History | null} */ #history = null;
+  /** @type {VerifiedHistory | null} */ #history = null;
   /** @type {string | null} */ #leaf = null;
   #observationBytes = 0; #dialogBytes = 0; #displayed = false; #wakeQueued = false;
   #settledSequence = 0; #settledAt = 0; #serial = 0; #scope = 0; #revision = 0;
   #ready = false; #started = false; #provenUnspawned = false; #closing = false; #revokedStartup = false;
   #streaming = false; #unsettled = false; #retrying = false; #summaryRetrying = false; #overflowRecovery = false;
-  #steering = 0; #followUp = 0; #idleKnown = false; #promptPending = false; #bridge = false;
+  #steering = 0; #followUp = 0; #idleKnown = false; #promptPending = false; #bridge = false; #rejecting = false;
+  /** Unleased tool calls awaiting their outcome. @type {Set<string>} */ #strayTools = new Set();
   #startupController = new AbortController();
   /** @type {Set<() => void>} */ #waiters = new Set();
   /** @param {RuntimeOptions} options */
@@ -247,6 +349,7 @@ export class PiRuntime {
     // Observers are installed before start(), all commands, and all possible activity.
     this.#rpc.on('event', event => { try { this.#observe(event); } catch (error) { this.#hold(error); } });
     this.#rpc.on('fault', error => this.#hold(error));
+    this.#rpc.on('spawn', pid => { try { this.#options.onSpawn?.(pid); } catch { /* observational */ } });
     this.#rpc.on('exit', exit => { this.#exit = Object.freeze({ ...exit }); this.#ready = false; this.#invalidateDialogs(); this.#activation?.controller.abort(); this.#startupController.abort(); this.#wake(); });
   }
   get rpc() { return this.#rpc; }
@@ -318,77 +421,105 @@ export class PiRuntime {
   async #start() {
     this.#assertCurrent(null); requireValue(!this.#revokedStartup, 'Startup was revoked');
     const o = this.#options;
+    /** @type {VerifiedHistory | null} */ let prelaunch = null;
     if (o.freshSession) {
       requireValue(o.sessionId === null, 'Fresh session cannot replace a retained session identity');
       // Only a live Controller reservation can authorize this exclusive empty file.
       this.#assertCurrent(null);
       const handle = await fs.open(o.sessionFile, 'wx', 0o600);
       await handle.close(); this.#assertCurrent(null);
-      this.#history = null;
     } else {
-      this.#history = await readHistory(o.sessionFile, o.cwd); this.#assertCurrent(null);
-      requireValue(o.sessionId === null || this.#history.header.id === o.sessionId, 'Recorded session identity disagrees with header');
+      prelaunch = (await scanHistory(o.sessionFile, o.cwd)).history; this.#assertCurrent(null);
+      requireValue(o.sessionId === null || prelaunch.header.id === o.sessionId, 'Recorded session identity disagrees with header');
     }
+    this.#history = prelaunch;
     requireValue(!this.#revokedStartup, 'Startup was revoked'); this.#assertCurrent(null);
     this.#started = true; this.#rpc.start();
     const initial = await this.#readState(null, this.#startupTimeout());
-    if (this.#history) requireValue(initial.sessionId === this.#history.header.id, 'Pi replaced the retained session');
-    const materialized = await readHistory(o.sessionFile, o.cwd); this.#assertCurrent(null);
+    if (prelaunch) requireValue(initial.sessionId === prelaunch.header.id, 'Pi replaced the retained session');
+    // The retained prefix must hash identically after Pi loaded it; only an initialization suffix may follow.
+    const loaded = await scanHistory(o.sessionFile, o.cwd, prelaunch); this.#assertCurrent(null);
+    const materialized = loaded.history;
     requireValue(materialized.header.id === initial.sessionId, 'Pi did not materialize the bound session header');
-    if (this.#history) requireValue(isDeepStrictEqual(materialized.header, this.#history.header), 'Bound session header changed during launch');
-    this.#checkPrefix(this.#history?.entries || [], materialized.entries, initial.thinkingLevel);
-    const entries = await this.#entries(null); this.#assertCurrent(null);
-    requireValue(isDeepStrictEqual(entries, materialized.entries), 'Pi history differs from prelaunch/materialized history');
+    if (prelaunch) requireValue(isDeepStrictEqual(materialized.header, prelaunch.header), 'Bound session header changed during launch');
+    requireValue(materialized.count - (prelaunch?.count ?? 0) <= 4, 'Session history has an unexpected initialization suffix');
+    this.#checkInitSuffix(prelaunch?.lastId ?? null, loaded.suffix, initial.thinkingLevel);
+    await this.#compareTail(materialized, null); this.#assertCurrent(null);
     this.#history = materialized;
     // CLI model selection may be fuzzy. An exact setter followed by exact reads is mandatory.
     await this.#send('set_model', { provider: o.spec.provider, modelId: o.spec.model }, null);
     const modelState = await this.#readState(null);
-    const afterModel = await this.#entries(null); this.#assertCurrent(null);
-    this.#checkPrefix(materialized.entries, afterModel, modelState.thinkingLevel);
+    const afterModel = await this.#extend(materialized, null);
+    this.#checkInitSuffix(materialized.lastId, afterModel.suffix, modelState.thinkingLevel);
     const levels = record(await this.#send('get_available_thinking_levels', {}, null), 'Thinking levels');
     requireValue(Array.isArray(levels.levels) && levels.levels.includes(o.spec.effort), `Unsupported worker effort: ${o.spec.effort}`);
     await this.#send('set_thinking_level', { level: o.spec.effort }, null);
     const state = await this.#readState(null); this.#exactState(state);
-    const afterSetters = await this.#entries(null); this.#assertCurrent(null);
-    requireValue(afterSetters.length - materialized.entries.length <= 4, 'Session history has an unexpected initialization suffix');
-    this.#checkPrefix(afterModel, afterSetters, o.spec.effort); this.#history = { header: materialized.header, entries: afterSetters };
+    const afterSetters = await this.#extend(afterModel.history, null);
+    requireValue(afterSetters.history.count - materialized.count <= 4, 'Session history has an unexpected initialization suffix');
+    this.#checkInitSuffix(afterModel.history.lastId, afterSetters.suffix, o.spec.effort); this.#history = afterSetters.history;
     await this.#waitIdle(this.#startupTimeout(), null); // separately scoped startup dialogs must finish first
     const readiness = await this.#bridgeCommand('probe', null);
     this.#assertCurrent(null); this.#ready = true; this.#wake(); return readiness;
   }
-  /** @param {RecordValue[]} before @param {RecordValue[]} after @param {string} initialThinking */
-  #checkPrefix(before, after, initialThinking) {
-    requireValue(after.length >= before.length && after.length - before.length <= 4, 'Session history lost entries or has an unexpected initialization suffix');
-    for (let i = 0; i < before.length; i++) requireValue(isDeepStrictEqual(before[i], after[i]), 'Session history changed/lost an old branch entry');
-    /** @type {unknown} */ let parent = before.at(-1)?.id ?? null;
-    for (const entry of after.slice(before.length)) {
+  /** Entries Pi appended while loading the session or applying the exact model/effort setters.
+   * @param {string | null} parentId last verified entry before the suffix @param {RecordValue[]} suffix @param {string} initialThinking */
+  #checkInitSuffix(parentId, suffix, initialThinking) {
+    requireValue(suffix.length <= 4, 'Session history has an unexpected initialization suffix');
+    /** @type {unknown} */ let parent = parentId;
+    for (const entry of suffix) {
       requireValue(entry.parentId === parent, 'Initialization suffix moved the active branch'); parent = entry.id;
       requireValue((entry.type === 'model_change' && entry.provider === this.#options.spec.provider && entry.modelId === this.#options.spec.model) || (entry.type === 'thinking_level_change' && entry.thinkingLevel === initialThinking), 'Unexpected session initialization entry');
     }
   }
-  /** @param {RecordValue[]} entries @param {string} priorLeaf @param {string} leafId */
-  #descendsFrom(entries, priorLeaf, leafId) {
-    const byId = new Map(entries.map(e => [e.id, e]));
-    let node = byId.get(leafId);
-    for (let steps = 0; node !== undefined && steps <= entries.length; steps++) {
-      if (node.id === priorLeaf) return true;
-      node = node.parentId === null ? undefined : byId.get(node.parentId);
-    }
-    return false;
-  }
-  /** @param {Activation | null} activation @returns {Promise<RecordValue[]>} */
-  async #entries(activation) {
-    const data = record(await this.#send('get_entries', {}, activation), 'RPC entries');
+  /** Pi's in-memory entries after `since` (all entries when null), validated against the facts
+   * of everything before them; the active leaf may only advance along its own branch.
+   * @param {string | null} since @param {Map<string, EntryFact>} known @param {Map<string, string | null>} parents
+   * @param {Activation | null} activation @returns {Promise<RecordValue[]>} */
+  async #entriesSince(since, known, parents, activation) {
+    const data = record(await this.#send('get_entries', since === null ? {} : { since }, activation), 'RPC entries');
     requireValue(Array.isArray(data.entries), 'RPC entries missing');
-    const entries = validateEntries(data.entries);
+    const entries = validateEntries(data.entries, known);
     const leafId = data.leafId === null ? null : /** @type {string} */ (data.leafId);
-    requireValue(leafId === null || (text(leafId) && entries.some(entry => entry.id === leafId)), 'RPC history has a broken leaf');
+    requireValue(leafId === null || (text(leafId) && parents.has(leafId)), 'RPC history has a broken leaf');
     if (this.#leaf !== null) {
       requireValue(leafId !== null, 'Retained session lost its active leaf');
-      requireValue(leafId === this.#leaf || this.#descendsFrom(entries, this.#leaf, leafId), 'Retained session moved to an unexpected branch');
+      requireValue(leafId === this.#leaf || descendsFrom(parents, this.#leaf, leafId), 'Retained session moved to an unexpected branch');
     }
     if (leafId !== null) this.#leaf = leafId;
     return entries;
+  }
+  /** Compare the verified tail of the persisted session with Pi's in-memory history. The
+   * `since` anchor must exist in Pi's history, and every entry after it must be identical.
+   * @param {VerifiedHistory} verified @param {Activation | null} activation */
+  async #compareTail(verified, activation) {
+    if (verified.bytes <= FULL_COMPARE_BYTES) { await this.#compareAll(verified, activation); return; }
+    const tail = verified.tail, full = verified.count <= tail.length;
+    const expected = full ? tail : tail.slice(1);
+    const known = new Map(verified.known); for (const entry of expected) known.delete(String(entry.id));
+    const entries = await this.#entriesSince(full ? null : String(tail[0].id), known, verified.parents, activation);
+    requireValue(isDeepStrictEqual(entries, expected), 'Pi history differs from prelaunch/materialized history');
+  }
+  /** Verify only what was appended since `base`: the persisted prefix hashes identically, and the
+   * persisted suffix equals Pi's in-memory entries after the same anchor.
+   * @param {VerifiedHistory} base @param {Activation | null} activation */
+  async #extend(base, activation) {
+    const scanned = await scanHistory(this.#options.sessionFile, this.#options.cwd, base); this.#assertCurrent(activation);
+    requireValue(isDeepStrictEqual(scanned.history.header, base.header), 'Bound session header changed/disappeared');
+    const entries = await this.#entriesSince(base.lastId, base.known, scanned.history.parents, activation); this.#assertCurrent(activation);
+    requireValue(isDeepStrictEqual(entries, scanned.suffix), 'RPC/persisted full session histories differ');
+    if (scanned.history.bytes <= FULL_COMPARE_BYTES) await this.#compareAll(scanned.history, activation);
+    return scanned;
+  }
+  /** Entry-for-entry comparison of the whole persisted session with Pi's whole in-memory
+   * history, for sessions small enough to transfer in one frame.
+   * @param {VerifiedHistory} verified @param {Activation | null} activation */
+  async #compareAll(verified, activation) {
+    const all = await scanHistory(this.#options.sessionFile, this.#options.cwd, null, true); this.#assertCurrent(activation);
+    requireValue(all.history.sha256 === verified.sha256, 'Session history changed during verification');
+    const entries = await this.#entriesSince(null, new Map(), all.history.parents, activation); this.#assertCurrent(activation);
+    requireValue(entries.length === all.suffix.length, 'Session history lost entries or has an unexpected initialization suffix');
+    for (let i = 0; i < entries.length; i++) requireValue(isDeepStrictEqual(entries[i], all.suffix[i]), 'Session history changed/lost an old branch entry');
   }
   /** @param {Activation | null} activation @param {number} [timeoutMs] @returns {Promise<RuntimeState>} */
   async #readState(activation, timeoutMs) {
@@ -443,17 +574,14 @@ export class PiRuntime {
     } finally { this.#bridge = false; }
   }
 
-  /** Check the persisted file and full append-only tree again before any work.
+  /** Check the persisted file and append-only tree again before any work. Cost is proportional
+   * to what was appended since the last verification, plus one streaming hash of the prefix.
    * @param {Activation | null} activation
    */
   async #verifyRetainedHistory(activation) {
-    const history = await readHistory(this.#options.sessionFile, this.#options.cwd); this.#assertCurrent(activation);
-    requireValue(this.#history && isDeepStrictEqual(history.header, this.#history.header), 'Bound session header changed/disappeared');
-    requireValue(history.entries.length >= this.#history.entries.length, 'Bound session history was truncated');
-    for (let i = 0; i < this.#history.entries.length; i++) requireValue(isDeepStrictEqual(history.entries[i], this.#history.entries[i]), 'Old session branch entry was replaced');
-    const entries = await this.#entries(activation); this.#assertCurrent(activation);
-    requireValue(isDeepStrictEqual(entries, history.entries), 'RPC/persisted full session histories differ');
-    this.#history = history;
+    requireValue(this.#history, 'Bound session history is unavailable');
+    const extended = await this.#extend(this.#history, activation); this.#assertCurrent(activation);
+    this.#history = extended.history;
   }
 
   /** Synchronous reservation MUST precede the Controller's first await. @param {ActivationIdentity} identity @returns {Activation} */
@@ -496,7 +624,11 @@ export class PiRuntime {
       const state = await this.#readState(activation); this.#exactState(state);
       requireValue(this.#lifecycleIdle(), 'Worker ceased to be idle before work');
       this.#promptPending = true;
-      await this.#rpc.send('prompt', { message }, this.#requestTimeout(), { signal: active.controller.signal, observeAfterWrite: true, guard: () => {
+      // Pi acknowledges a prompt only after its preflight, which may include a threshold
+      // compaction (an LLM call) and blocking before_agent_start hooks such as Fovea's sync.
+      // Allow the startup deadline, extended while a compaction or retry is observably running.
+      const busy = () => this.#compactions.size > 0 || this.#summaryRetrying || this.#retrying;
+      await this.#rpc.send('prompt', { message }, Math.max(this.#requestTimeout(), this.#startupTimeout()), { signal: active.controller.signal, observeAfterWrite: true, extend: busy, maxWaitMs: 30 * 60_000, guard: () => {
         if (!this.#current(activation) || !this.#lifecycleIdle() || (validity !== undefined && !validity())) return false;
         // Bind session activity before bytes leave. Events are NEVER correlated to prompt id.
         this.#unsettled = true; this.#idleKnown = false; this.#revision++; return true;
@@ -548,7 +680,7 @@ export class PiRuntime {
     // Revocation permits terminal events already in flight, never a new turn/run/tool.
     const startsWork = ['agent_start', 'turn_start', 'tool_execution_start', 'compaction_start', 'auto_retry_start', 'summarization_retry_scheduled', 'summarization_retry_attempt_start'].includes(type);
     const unauthorizedActivity = (activity && this.#bridge) || (startsWork && !this.#closing && !this.#abortPromise && (!this.#activation?.attempted || this.#activation.settled || !this.#current(this.#activation.token)));
-    const activityError = () => this.#hold(new RpcUncertainError(this.#bridge ? 'Agent activity during bridge command; no work prompt authorized' : 'Agent activity outside a current activation'));
+    const activityError = () => this.#rejectActivity(type, event);
     if (type === 'extension_ui_request') { this.#handleUI(event); return; }
     /** @type {RuntimeObservation} */ const observation = { type, at: Date.now() };
     switch (type) {
@@ -602,7 +734,16 @@ export class PiRuntime {
         requireValue(text(event.toolCallId) && this.#tools.has(event.toolCallId) && event.toolName === this.#tools.get(event.toolCallId), 'Unmatched/mismatched tool end');
         requireValue(typeof event.isError === 'boolean', 'Invalid tool outcome');
         validateContent(record(event.result, 'Tool result').content, 'toolResult');
-        this.#tools.delete(event.toolCallId); observation.toolCallId = event.toolCallId; break;
+        this.#tools.delete(event.toolCallId); observation.toolCallId = event.toolCallId;
+        if (this.#strayTools.delete(event.toolCallId)) {
+          // Blocked by the worker's Pair gate: nothing executed, the turn is already being aborted.
+          // Anything else ran without a lease and may have had effects: hold this generation.
+          const content = record(event.result, 'Tool result').content;
+          const first = Array.isArray(content) ? content.find(block => isRpcRecord(block) && block.type === 'text') : null;
+          const message = isRpcRecord(first) && typeof first.text === 'string' ? first.text : '';
+          if (!(event.isError === true && /^PAIR_WAIT\b/.test(message))) this.#hold(new RpcUncertainError(`Worker ran tool ${String(event.toolName)} outside a current activation`));
+        }
+        break;
       }
       case 'message_end': {
         const message = record(event.message, 'Message event');
@@ -617,6 +758,28 @@ export class PiRuntime {
     this.#enqueue(observation);
   }
 
+  /** Activity nobody authorized. During a bridge command the generation is held. Otherwise the
+   * run is aborted (another extension started it; the worker's own gates refuse to let it act,
+   * and killing a healthy retained worker would lose the conversation for nothing). An unleased
+   * tool is judged when it ends: blocked by the Pair gate is harmless, anything that ran holds.
+   * @param {string} type @param {RecordValue} event */
+  #rejectActivity(type, event) {
+    if (this.#bridge) { this.#hold(new RpcUncertainError('Agent activity during bridge command; no work prompt authorized')); return; }
+    // Pi emits tool_execution_start BEFORE the worker's tool_call gate runs, so a start alone
+    // proves nothing ran. Remember it and decide at tool_execution_end.
+    if (type === 'tool_execution_start' && text(event.toolCallId)) this.#strayTools.add(event.toolCallId);
+    this.#enqueue({ type: 'notify', at: Date.now(), error: `Worker ${type.replace(/_/g, ' ')} began without a Pair lease (probably another extension); Pair aborted it.`, notifyType: 'warning' });
+    if (this.#rejecting || this.closed) return;
+    this.#rejecting = true;
+    const guard = () => this.#current(null, true);
+    void (async () => {
+      try {
+        await this.#rpc.send('clear_queue', {}, this.#requestTimeout(), { control: true, guard });
+        await this.#rpc.send('abort', {}, this.#requestTimeout(), { control: true, guard });
+      } catch (error) { this.#hold(error); }
+      finally { this.#rejecting = false; this.#wake(); }
+    })();
+  }
   /** @param {RecordValue} event */
   #handleUI(event) {
     if (event.method === 'notify') {

@@ -20,6 +20,18 @@ export const PROTOCOL = WIRE_VERSION;
 export const clone = value => structuredClone(value);
 /** @param {unknown} value @returns {string} */
 export const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
+/** Key-order independent JSON for identity hashes: object keys sorted recursively, arrays kept in order.
+ * @param {unknown} value @returns {string} */
+export function stableJSON(value) {
+  if (Array.isArray(value)) return `[${value.map(item => stableJSON(item === undefined ? null : item)).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = /** @type {Record<string, unknown>} */ (value);
+    return `{${Object.keys(record).filter(key => record[key] !== undefined).sort().map(key => `${JSON.stringify(key)}:${stableJSON(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+/** @param {unknown} value @returns {string} */
+export const stableDigest = value => digest(stableJSON(value));
 /** @param {string} prefix */
 export const uid = prefix => `${prefix}-${randomUUID()}`;
 /** @param {unknown} condition @param {string} message @returns {asserts condition} */
@@ -75,7 +87,67 @@ export async function atomicJSON(file, value) {
     await handle.sync();
     await handle.close(); handle = undefined;
     await fs.rename(tmp, file);
+    await syncDirectory(path.dirname(file));
   } finally { await handle?.close().catch(() => {}); await fs.unlink(tmp).catch(() => {}); }
+}
+/** Make a completed rename durable. Platforms that cannot open or fsync a directory
+ * (Windows) keep the previous best-effort behaviour. @param {string} dir */
+export async function syncDirectory(dir) {
+  /** @type {import('node:fs/promises').FileHandle | undefined} */
+  let handle;
+  try { handle = await fs.open(dir, constants.O_RDONLY); await handle.sync(); }
+  catch (e) { if (!(plain(e) && ['EISDIR', 'EPERM', 'EACCES', 'EINVAL', 'ENOTSUP', 'EBADF'].includes(String(e.code)))) throw e; }
+  finally { await handle?.close().catch(() => {}); }
+}
+/** Whether a PID may safely be signalled as a child we spawned. PID 0/1 and negatives would
+ * address the whole process group or every process of this user (kill(-1) signals everything),
+ * and this process or its parent must never be targeted. @param {unknown} pid @returns {pid is number} */
+export function signallablePid(pid) {
+  return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid && pid !== process.ppid;
+}
+/** Signal a spawned child's process group (or the child alone on Windows). Refuses any PID that
+ * is not a plausible child, so a bad value can never become kill(-1). @param {number | undefined} pid
+ * @param {NodeJS.Signals | 0} signal @param {{kill?: (signal: NodeJS.Signals) => boolean} | null} [child] @returns {boolean} whether a signal was sent */
+export function signalGroup(pid, signal, child = null) {
+  if (!signallablePid(pid)) return false;
+  if (process.platform === 'win32') { if (child && signal !== 0) child.kill?.(signal); else process.kill(pid, signal); return true; }
+  process.kill(-pid, signal); return true;
+}
+/** Liveness of a process ID: 'dead' (no such process), 'alive', or 'foreign' (exists but
+ * owned by another user, so it cannot be a process this user spawned). @param {number} pid
+ * @returns {'dead' | 'alive' | 'foreign'} */
+export function processState(pid) {
+  // Negative values name a process group; never probe the special groups 0 and -1.
+  if (!Number.isSafeInteger(pid) || Math.abs(pid) <= 1) return 'alive';
+  try { process.kill(pid, 0); return 'alive'; }
+  catch (e) { return plain(e) && e.code === 'ESRCH' ? 'dead' : plain(e) && e.code === 'EPERM' ? 'foreign' : 'alive'; }
+}
+/** Wall-clock start time of a live process, or null when it cannot be observed
+ * (no `ps`, Windows, or the process is gone). Used to detect PID reuse.
+ * @param {number} pid @returns {Promise<number | null>} */
+export async function processStartedAt(pid) {
+  if (process.platform === 'win32' || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  const { execFile } = await import('node:child_process');
+  return new Promise(resolve => {
+    execFile('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 5000, env: { ...process.env, LC_ALL: 'C' } }, (error, stdout) => {
+      const at = error ? NaN : Date.parse(String(stdout).trim());
+      resolve(Number.isFinite(at) ? at : null);
+    });
+  });
+}
+/** Start time of this process, recorded in lock owners so a recycled PID is not mistaken for the owner. */
+export const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
+/** Whether a lock owner record still names a live process. A live PID whose start time is
+ * provably later than the recorded owner start is a recycled PID, not the owner.
+ * @param {unknown} owner @returns {Promise<boolean>} */
+export async function ownerAlive(owner) {
+  if (!plain(owner) || typeof owner.pid !== 'number') return false;
+  const state = processState(owner.pid);
+  if (state !== 'alive') return false;
+  if (typeof owner.startedAt !== 'number') return true;
+  const started = await processStartedAt(owner.pid);
+  // `ps` reports whole seconds; allow for that and for clock rounding.
+  return started === null || started <= owner.startedAt + 2000;
 }
 /** Parsed data is unvalidated; callers must narrow at their domain boundary.
  * The presence of the fallback argument (including explicit undefined) is significant.
@@ -149,26 +221,41 @@ export class Serial {
   run(fn) { const p = this.#tail.then(fn); this.#tail = p.catch(() => {}); return p; }
   async drain() { await this.#tail; }
 }
-/** @param {string} dir @param {Record<string, unknown>} owner @returns {Promise<() => Promise<void>>} */
-export async function acquireLock(dir, owner) {
+/** A lock directory without an owner record older than this is a crashed acquisition. */
+const ORPHAN_LOCK_MS = 60_000;
+/** Exclusive directory lock. The owner record is written into a private temporary
+ * directory that is then renamed into place, so a lock never exists without its owner.
+ * A lock whose owner process is gone (or whose PID was recycled) is broken.
+ * @param {string} dir @param {Record<string, unknown>} owner
+ * @param {{name?: string, conflict?: (owner: Record<string, unknown>) => string}} [options]
+ * @returns {Promise<() => Promise<void>>} */
+export async function acquireLock(dir, owner, { name = '.owner-lock', conflict } = {}) {
   await mkdirPrivate(dir);
-  const lock = path.join(dir, '.owner-lock');
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const lock = path.join(dir, name);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const staging = `${lock}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await fs.mkdir(lock, { mode: 0o700 });
-      await atomicJSON(path.join(lock, 'owner.json'), { ...owner, pid: process.pid, createdAt: Date.now() });
+      await fs.mkdir(staging, { mode: 0o700 });
+      await atomicJSON(path.join(staging, 'owner.json'), { ...owner, pid: process.pid, startedAt: PROCESS_STARTED_AT, createdAt: Date.now() });
+      await fs.rename(staging, lock);
+      await syncDirectory(dir);
       let released = false;
       return async () => { if (!released) { released = true; await fs.rm(lock, { recursive: true, force: true }); } };
     } catch (e) {
-      if (!plain(e) || e.code !== 'EEXIST') throw e;
+      await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
+      // rename(2) onto an existing non-empty directory fails with ENOTEMPTY or EEXIST.
+      if (!plain(e) || !['EEXIST', 'ENOTEMPTY'].includes(String(e.code))) throw e;
       const previous = await readJSON(path.join(lock, 'owner.json'), null);
-      assert(previous, 'Another Pair controller is initializing. Retry after it finishes.');
-      assert(plain(previous) && typeof previous.pid === 'number', 'Invalid Pair owner lock: pid must be a number');
-      let alive = true;
-      try { process.kill(previous.pid, 0); } catch (err) { if (plain(err) && err.code === 'ESRCH') alive = false; }
-      assert(!alive, `Pair session is already owned by process ${previous.pid}; never attach two controllers to one session.`);
+      if (previous === null) {
+        // Legacy/crashed acquisition: a directory with no owner record.
+        const stat = await fs.stat(lock).catch(() => null);
+        assert(!stat || Date.now() - stat.mtimeMs > ORPHAN_LOCK_MS, 'Another Pair controller is initializing. Retry after it finishes.');
+      } else {
+        assert(plain(previous) && typeof previous.pid === 'number', 'Invalid Pair owner lock: pid must be a number');
+        assert(!await ownerAlive(previous), conflict ? conflict(previous) : `Pair session is already owned by process ${previous.pid}; never attach two controllers to one session.`);
+      }
       await fs.rm(lock, { recursive: true, force: true });
     }
   }
-  throw new Error('Could not acquire Pair session lock');
+  throw new Error('Could not acquire Pair lock');
 }

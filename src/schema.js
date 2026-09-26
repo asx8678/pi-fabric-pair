@@ -113,9 +113,12 @@ export function validateReport(input) { return validateReportPayload(input); }
 /** UTF-8 byte ceiling for one report payload, checked by both the worker and the controller.
  * @param {string | undefined} summaryDetail */
 export function reportByteLimit(summaryDetail) { return { minimal: 4000, normal: 12000, detailed: 32000 }[summaryDetail || 'normal'] || 12000; }
-/** @param {unknown} payload @param {string | undefined} summaryDetail */
-export function assertReportSize(payload, summaryDetail) {
-  const limit = reportByteLimit(summaryDetail);
+/** The summary policy sets the ceiling; limits.maxReportBytes can only lower it.
+ * @param {unknown} payload @param {string | undefined} summaryDetail @param {object | null} [limits] */
+export function assertReportSize(payload, summaryDetail, limits = null) {
+  const bytes = limits && 'maxReportBytes' in limits ? limits.maxReportBytes : undefined;
+  const configured = typeof bytes === 'number' ? bytes : Infinity;
+  const limit = Math.min(reportByteLimit(summaryDetail), configured);
   assert(Buffer.byteLength(JSON.stringify(payload), 'utf8') <= limit, `Report is too large for the selected summary policy (${limit} UTF-8 bytes); use concise references.`);
 }
 /** @param {unknown} input @returns {DecisionPayload} */

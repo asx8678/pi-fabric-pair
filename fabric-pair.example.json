@@ -18,14 +18,16 @@
   "supervision": {
     "mode": "every-step",
     "finalReview": true,
-    "maxRevisions": 3,
+    "maxRevisions": 20,
     "maxRevisionsPerStep": 3,
-    "summaryDetail": "normal"
+    "summaryDetail": "normal",
+    "maxStepFiles": 5
   },
   "runtime": {
     "command": "pi",
     "commandArgs": [],
     "extraExtensions": [],
+    "excludeExtensions": [],
     "extraSkills": [],
     "inheritExtensions": true,
     "startupTimeoutMs": 120000,
@@ -40,12 +42,9 @@
   },
   "limits": {
     "activeStepTimeoutMs": 1800000,
-    "maxQueuedTasks": 8,
-    "maxQueuedReviews": 8,
     "maxReportsPerTask": 40,
     "maxReportBytes": 16384,
     "maxAutomaticReportRepairs": 1,
-    "maxAutomaticRecoveryAttempts": 1,
     "maxReportedCostUsd": null,
     "maxOutputTokens": null
   },

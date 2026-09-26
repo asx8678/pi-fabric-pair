@@ -57,7 +57,7 @@ Open `/pair settings` and set:
 - **Enabled for new work:** on.
 - **Autostart:** off.
 - **Worker:** one writer, with the exact provider/model and supported effort you intend to use.
-- **Review policy:** `every-step`; final review stays required.
+- **Review policy:** `every-step`; final review stays required. Each step may change at most the step size limit of files (default 5).
 - **Advanced → Verification commands:** configure and explicitly authorize relevant bounded project checks if needed. Empty commands means no project checks were run, not that tests passed.
 
 Every completed valid edit saves immediately; **Done** or Esc closes without undoing saved changes. Canceled/no-op/invalid edits do not save. Save scope switches the displayed layer without copying values: global editing excludes project overrides. Worker selection, workspace, limits and verification are under **Advanced**. Main stays under `/model`.
@@ -79,9 +79,9 @@ For example:
 
 > Use Pair's configured worker to make one small change. Dispatch one bounded step, inspect its report and actual diff, and ask me before approving it. Do not use a separate ad-hoc agent.
 
-Main uses `pair_dispatch`, then calls `pair_yield` to receive the worker's finalized question/report from the durable inbox, and uses `pair_inspect` before `pair_decide`. `answer`, `revise` and `approve` continue the same worker conversation. Approval requires the exact inspected checkpoint hash and unchanged workspace; failed configured checks block it. Final approval completes the task but leaves the worker conversation available.
+Main uses `pair_dispatch`. By default the worker's finalized question/report is delivered to Main automatically once Main's current work is done (never interrupting it, and never attached to your message); with `autoDeliverReports: false` Main calls `pair_yield` to receive it from the durable inbox. Main uses `pair_inspect` before `pair_decide`. `answer`, `revise` and `approve` continue the same worker conversation. Approval requires the exact inspected checkpoint hash and unchanged workspace; failed configured checks block it. Final approval completes the task but leaves the worker conversation available.
 
-Every-step review gates Main's decisions; it is not an automatic human-permission dialog. Tell Main explicitly if you want to approve each decision yourself. Do not poll: finalized reports wait in the durable inbox — Main retrieves them with `pair_yield` (a report finalizing before the yielded run settles is delivered once at its settlement boundary). `/pair yield` and `/pair inbox` are the human fallbacks for retained reports, and after a branch navigation Main re-inspects a pending report before deciding.
+Every-step review gates Main's decisions; it is not an automatic human-permission dialog. Tell Main explicitly if you want to approve each decision yourself. Do not poll: finalized reports wait in the durable inbox and are delivered automatically by default; Main can also retrieve them with `pair_yield` (a report finalizing before the yielded run settles is delivered once at its settlement boundary). `/pair yield` and `/pair inbox` are the human fallbacks for retained reports, and after a branch navigation Main re-inspects a pending report before deciding.
 
 ## 5. Cancel or stop
 

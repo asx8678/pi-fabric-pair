@@ -14,6 +14,60 @@ export function sourcePaths(pi) {
   const entries = [...(pi.getAllTools?.() || []), ...(pi.getCommands?.() || []).filter(c => c.source === 'extension' || c.source === undefined)];
   return [...new Set(entries.map(v => v.sourceInfo?.path).filter(/** @returns {v is string} */ v => typeof v === 'string' && path.isAbsolute(v) && /\.(?:[cm]?[jt]s)$/.test(v)))];
 }
+/** Whether an extension source is excluded from worker inheritance. An absolute entry matches that
+ * file or anything under that directory; a bare name matches a package directory of that name
+ * anywhere in the path (for example "pi-retry" or "@scope/pkg").
+ * @param {string} source @param {readonly string[]} excludes */
+export function excludedExtension(source, excludes) {
+  const normal = path.resolve(source);
+  return excludes.some(entry => {
+    if (path.isAbsolute(entry)) { const root = path.resolve(entry); return normal === root || normal.startsWith(`${root}${path.sep}`); }
+    const name = entry.split('/').filter(Boolean).join(path.sep);
+    return name.length > 0 && normal.includes(`${path.sep}${name}${path.sep}`);
+  });
+}
+/** Package root of an extension entry file: the nearest directory with a package.json. @param {string} source */
+async function packageRoot(source) {
+  let dir = path.dirname(source);
+  for (let i = 0; i < 8; i++) {
+    try { await fs.access(path.join(dir, 'package.json')); return dir; } catch { /* keep walking */ }
+    const parent = path.dirname(dir); if (parent === dir) break; dir = parent;
+  }
+  return path.dirname(source);
+}
+/** Inherited extensions whose source can start a turn on its own (sendMessage with triggerTurn,
+ * or sendUserMessage). In a worker such a turn has no Pair lease: Pair aborts it, but it is noise
+ * and costs a request. Static and bounded; used only for /pair doctor.
+ * @param {readonly string[]} sources @returns {Promise<{name: string, source: string}[]>} */
+export async function turnStartingExtensions(sources) {
+  const pattern = /triggerTurn\s*:\s*true|sendUserMessage\s*\(/;
+  /** @type {{name: string, source: string}[]} */ const found = [];
+  const seen = new Set();
+  for (const source of sources) {
+    const root = await packageRoot(source);
+    if (seen.has(root)) continue; seen.add(root);
+    let name = path.basename(root);
+    try { const pkg = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')); if (plain(pkg) && typeof pkg.name === 'string') name = pkg.name; } catch { /* unnamed */ }
+    if (name === 'pi-fabric-pair') continue;
+    let files = 0, bytes = 0, hit = false;
+    /** @param {string} dir */
+    const walk = async dir => {
+      /** @type {import('node:fs').Dirent[]} */ let entries = [];
+      try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        if (hit || files > 400 || bytes > 32 * 1024 * 1024) return;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) { if (!['node_modules', '.git', 'test', 'tests', '__tests__'].includes(entry.name)) await walk(full); continue; }
+        if (!/\.(?:[cm]?js|[cm]?ts)$/.test(entry.name) || entry.name.endsWith('.d.ts')) continue;
+        files++;
+        try { const text = await fs.readFile(full, 'utf8'); bytes += text.length; if (pattern.test(text)) hit = true; } catch { /* unreadable */ }
+      }
+    };
+    await walk(root);
+    if (hit) found.push({ name, source });
+  }
+  return found;
+}
 /** Pair-owned private Fabric mesh namespace for one retained worker directory.
  * Derived only from the worker directory: stable across process generations and
  * retained-session restarts, different per worker directory, never keyed by PID,

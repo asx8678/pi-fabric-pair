@@ -143,6 +143,10 @@ export function registerWorker(pi, env = process.env) {
   /** @type {ReturnType<typeof setInterval> | undefined} */
   let parentTimer;
   let compacting = false, stopped = false;
+  /** Rejected pair_report attempts for the current lease, and the lease whose repair limit ran out. */
+  /** @type {Map<string, number>} */ const reportRejections = new Map();
+  /** @type {string | null} */
+  let repairsExhausted = null;
   const hadIpc = process.connected !== undefined;
   let parentDead = false;
   const parentGone = () => {
@@ -267,7 +271,7 @@ export function registerWorker(pi, env = process.env) {
     if (!authority?.model || !ctx.model) return true;
     return ctx.model.provider === authority.model.provider && ctx.model.id === authority.model.id;
   }
-  function waiting() { return !authority || authority.phase !== 'running' || !!report; }
+  function waiting() { return !authority || authority.phase !== 'running' || !!report || repairsExhausted === authority.leaseId; }
 
   pi.registerTool({
     name: 'pair_report', label: 'Pair report', executionMode: 'sequential',
@@ -277,42 +281,65 @@ export function registerWorker(pi, env = process.env) {
     /** @returns {Promise<ReportToolResult>} */
     async execute(_callId, input, _signal, _update, ctx) {
       return runSerial(reportSerial, /** @returns {Promise<ReportToolResult>} */ async () => {
-        const params = validateReport(input); await load();
+        await load();
         assert(authority && authority.phase === 'running', 'PAIR_WAIT: this step is not authorized');
-        assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job outlived its Fabric call; this worker must stop and reconcile before reporting.');
-        const task = authority.task;
-        assertReportSize(params, task?.policy.summaryDetail);
-        assert(task && params.taskId === task.id && params.stepId === task.steps[task.stepIndex].id, 'Report task/step does not match the current lease');
-        if (report) {
-          /** @type {import('./contracts.js').ReportEnvelope} */
-          const retained = report;
-          assert(retained.payloadHash === digest(params), 'A different report already closed this lease');
-          await publishReport(retained);
-          await telemetry(ctx);
-          // Publication is not a controller acknowledgement; this only wakes Main.
-          ctx.ui.notify(`fabric-pair:report:${retained.reportId}`, 'info');
-          ctx.abort();
-          return { content: [{ type: 'text', text: `Report ${retained.reportId} already submitted. Stop and wait.` }], details: { pairReportId: retained.reportId }, terminate: true };
-        }
-        if (task.policy.mode === 'final-only') assert(params.kind !== 'checkpoint', 'Final-only policy requires final_review after the whole plan, or a question/blocker.');
-        if (params.kind === 'final_review') assert(task.policy.mode === 'final-only' || task.stepIndex === task.steps.length - 1, 'Not authorized to finish later steps');
-        const result = validateReportEnvelope({ version: PROTOCOL, reportId: uid('report'), workerId, ownerSession, ownerEpoch, workerGeneration, nonce,
-          sessionId: ctx.sessionManager.getSessionId(), leaseId: authority.leaseId, attemptId: task.attemptId, attemptNumber: task.attemptNumber, planRevision: task.planRevision,
-          payload: params, payloadHash: digest(params), createdAt: Date.now() });
-        // Latch before exposing the report, so sibling/nested tool hooks see the stop immediately.
-        report = result;
-        await atomicJSON(latchFile, validateLatch({ ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: task.attemptId, report: result }));
-        await publishReport(result);
-        await telemetry(ctx);
-        // This is a notification wakeup, not a model message or an acknowledgement channel.
-        ctx.ui.notify(`fabric-pair:report:${result.reportId}`, 'info');
-        // A captured pair_report can be nested inside fabric_exec. Abort the outer
-        // invocation as well as returning terminate so no later provider call runs.
-        ctx.abort();
-        return { content: [{ type: 'text', text: `Report ${result.reportId} recorded. Do not call more tools. Yield and wait for Main in this session.` }], details: { pairReportId: result.reportId }, terminate: true };
+        assert(repairsExhausted !== authority.leaseId, 'PAIR_WAIT: the report repair limit for this step was reached; stop and wait for Main');
+        const lease = authority.leaseId;
+        try { return await submitReport(input, ctx); }
+        catch (error) { if (!/^PAIR_(WAIT|DETACHED_EFFECT)/.test(error instanceof Error ? error.message : String(error))) rejectedReport(lease, ctx); throw error; }
       });
     }
   });
+  /** A rejected report is a repair opportunity: the worker may fix and resubmit it up to
+   * limits.maxAutomaticReportRepairs times per lease. Past that it stops, its tools are refused,
+   * and the controller holds the task for the human and Main.
+   * @param {string} lease @param {ExtensionContext} ctx */
+  function rejectedReport(lease, ctx) {
+    const count = (reportRejections.get(lease) || 0) + 1;
+    reportRejections.clear(); reportRejections.set(lease, count);
+    const limits = authority?.task?.limits;
+    const allowed = limits && 'maxAutomaticReportRepairs' in limits && typeof limits.maxAutomaticReportRepairs === 'number' ? limits.maxAutomaticReportRepairs : 1;
+    if (count <= allowed) return;
+    repairsExhausted = lease;
+    ctx.ui.notify(`Pair: the worker's report was rejected ${count} times (repair limit ${allowed}); the worker stopped and the task is held.`, 'warning');
+    ctx.abort();
+  }
+  /** @param {unknown} input @param {ExtensionContext} ctx @returns {Promise<ReportToolResult>} */
+  async function submitReport(input, ctx) {
+    const params = validateReport(input);
+    assert(authority && authority.phase === 'running', 'PAIR_WAIT: this step is not authorized');
+    assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job outlived its Fabric call; this worker must stop and reconcile before reporting.');
+    const task = authority.task;
+    assertReportSize(params, task?.policy.summaryDetail, task?.limits);
+    assert(task && params.taskId === task.id && params.stepId === task.steps[task.stepIndex].id, 'Report task/step does not match the current lease');
+    if (report) {
+      /** @type {import('./contracts.js').ReportEnvelope} */
+      const retained = report;
+      assert(retained.payloadHash === digest(params), 'A different report already closed this lease');
+      await publishReport(retained);
+      await telemetry(ctx);
+      // Publication is not a controller acknowledgement; this only wakes Main.
+      ctx.ui.notify(`fabric-pair:report:${retained.reportId}`, 'info');
+      ctx.abort();
+      return { content: [{ type: 'text', text: `Report ${retained.reportId} already submitted. Stop and wait.` }], details: { pairReportId: retained.reportId }, terminate: true };
+    }
+    if (task.policy.mode === 'final-only') assert(params.kind !== 'checkpoint', 'Final-only policy requires final_review after the whole plan, or a question/blocker.');
+    if (params.kind === 'final_review') assert(task.policy.mode === 'final-only' || task.stepIndex === task.steps.length - 1, 'Not authorized to finish later steps');
+    const result = validateReportEnvelope({ version: PROTOCOL, reportId: uid('report'), workerId, ownerSession, ownerEpoch, workerGeneration, nonce,
+      sessionId: ctx.sessionManager.getSessionId(), leaseId: authority.leaseId, attemptId: task.attemptId, attemptNumber: task.attemptNumber, planRevision: task.planRevision,
+      payload: params, payloadHash: digest(params), createdAt: Date.now() });
+    // Latch before exposing the report, so sibling/nested tool hooks see the stop immediately.
+    report = result;
+    await atomicJSON(latchFile, validateLatch({ ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: task.attemptId, report: result }));
+    await publishReport(result);
+    await telemetry(ctx);
+    // This is a notification wakeup, not a model message or an acknowledgement channel.
+    ctx.ui.notify(`fabric-pair:report:${result.reportId}`, 'info');
+    // A captured pair_report can be nested inside fabric_exec. Abort the outer
+    // invocation as well as returning terminate so no later provider call runs.
+    ctx.abort();
+    return { content: [{ type: 'text', text: `Report ${result.reportId} recorded. Do not call more tools. Yield and wait for Main in this session.` }], details: { pairReportId: result.reportId }, terminate: true };
+  }
   // AR-02: probe/load are extension commands only. Neither may request a model turn.
   // V1 telemetry below remains diagnostic; PiRuntime's RPC tool-ID map owns lifecycle/idle eligibility.
   pi.registerCommand('pair-bridge', {
@@ -361,7 +388,7 @@ export function registerWorker(pi, env = process.env) {
     ctxRef = ctx; await load();
     assert(authority, 'PAIR_WAIT: no implementation lease is active');
     if (stopped) { ctx.abort(); return { block: true, reason: 'PAIR_WAIT: parent controller is gone; retained worker is stopping' }; }
-    const blocked = gateTool(event.toolName, authority, !!report, !!authority.readOnly);
+    const blocked = gateTool(event.toolName, authority, !!report || repairsExhausted === authority.leaseId, !!authority.readOnly);
     if (blocked) { if (waiting()) ctx.abort(); return blocked; }
     if (!expectedModel(ctx)) { ctx.abort(); return { block: true, reason: 'Pair worker model changed unexpectedly' }; }
     const n = toolName(event.toolName);
@@ -420,7 +447,7 @@ export function registerWorker(pi, env = process.env) {
   pi.on('session_compact', async (_event, ctx) => {
     compacting = false; await load();
     // Restore bounded coordination state, not the transcript; never trigger a paid turn just to restore state.
-    pi.sendMessage({ customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false }, { deliverAs: 'nextTurn', triggerTurn: false });
+    pi.sendMessage({ customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false }, { triggerTurn: false });
     await telemetry(ctx);
   });
   pi.on('session_compact_failed', async (_event, ctx) => { compacting = false; await reconcileWarming(ctx); await telemetry(ctx); });

@@ -7,11 +7,13 @@ For first use, follow the [quickstart](QUICKSTART.md).
 
 | Review policy | When Main reviews |
 | --- | --- |
-| `every-step` | After each small step in the dispatched plan. Use this for first runs. |
+| `every-step` | After each small step in the dispatched plan. A step may change at most `supervision.maxStepFiles` files (default 5): a larger checkpoint cannot be approved, so Main asks for smaller steps. Use this for first runs. |
 | `milestones` | After each planned milestone. This is the configuration default. |
 | `final-only` | After the full assigned plan; questions and blockers can still return earlier. |
 
-Final review is required in every policy.
+Final review is required in every policy. `every-step` and `milestones` both review
+each dispatched step; they differ in how Main is asked to size steps, and `every-step`
+additionally enforces the step size limit.
 
 ## Commands
 
@@ -31,7 +33,8 @@ Commands with an optional worker ID use the first configured worker by default.
 | `/pair report [worker]` | Show the current report as a card: summary, question, Pair-captured files and checks, then worker claims. Read-only: it never marks the report inspected for Main. |
 | `/pair diff [worker]` | Scroll the checkpoint diff with real file names and added-file contents. Keys: ↑/↓, PgUp/PgDn, `g`/`G`, `/` search, `n`/`N`, `[`/`]` previous/next file, Esc. Read-only, like `/pair report`. |
 | `/pair inbox` | Inspect unresolved reports and recovery delivery options. |
-| `/pair yield` | Explicitly deliver retained, unacknowledged reports to Main. Each delivery starts a Main turn. |
+| `/pair yield` | Explicitly send retained, unacknowledged reports to Main now. An idle Main starts a turn for them; a busy Main reads them right after its current work. |
+| `/pair reconcile [worker]` | After Main crashed or was killed, prove that the previous worker process exited so the worker can be used again. If it may still run, Pair offers to stop that process group, and as a last resort asks you to confirm it is gone. The task stays held; nothing is replayed. |
 | `/pair pause [worker]` | Abort current work and hold the assignment. |
 | `/pair resume [worker]` | Confirm continuation after inspecting interrupted work. |
 | `/pair cancel [worker] [reason]` | Cancel the assignment and retain the conversation. |
@@ -52,7 +55,7 @@ work, then the current step, what the worker is doing right now, and metrics:
 pair · ◉ Worker working on step 2/5 · Wire controller · editing src/controller.js · 42.3 tok/s · $0.013 · cache M 99% W 100%
 pair · ◉ Worker revising step 2/5 · Wire controller · running npm · 38.1 tok/s
 pair · ◐ Checkpoint 2/5 ready for review · Wire controller · Main is reviewing
-pair · ◐ Question for Main · step 2/5 · Main is busy; delivered when idle
+pair · ◐ Question for Main · step 2/5 · Main is busy; delivered when its current work is done
 pair · ● Task done · worker ready · gpt-6-luna · max
 pair · ○ Worker stopped · not a Git repo
 pair · ○ Worker not set up · /pair to choose a model
@@ -70,9 +73,10 @@ display-only and never affects work. `/pair status` lists every step.
 
 ## Report delivery, phases and branches
 
-Finalized worker reports are never pushed into Main's conversation automatically
-and never wake an idle Main. They wait in Pair's durable inbox and are retrieved
-explicitly.
+Finalized worker reports always wait in Pair's durable inbox. With the default
+`autoDeliverReports: true` they are also delivered to Main automatically (see
+**Automatic delivery** below). With `autoDeliverReports: false` they never wake Main
+and are retrieved explicitly.
 
 - **`pair_yield`** returns every unacknowledged report — pending, offered
   (including legacy `delivered` receipts) or failed — as compact summaries in
@@ -81,8 +85,9 @@ explicitly.
   IDs; reading consumes nothing.
 - **Acknowledgment is explicit.** An offer is only a delivery attempt. A report
   stops waiting when `pair_inspect` reads it (`observedAt`) or `pair_decide`
-  resolves it. `sendMessage` channels are fire-and-forget and are never treated
-  as confirmed delivery.
+  resolves it. A triggered delivery is recorded as offered only after Main's
+  session observably receives the report message; otherwise it returns to
+  pending.
 - **One settlement-boundary delivery per empty yield.** A `pair_yield` that
   returned no reports arms the current run's settlement boundary: one report
   finalizing before that run settles is injected once as a boundary entry
@@ -92,15 +97,34 @@ explicitly.
   observed all defer or revoke the offer; dropped offers stay retrievable.
   `canContinue` is deliberately not pre-gated — native validates it after
   committing the draft.
-- **Automatic delivery (`autoDeliverReports`, default `true`).** Each finalized
-  report is also sent to an idle Main as a follow-up message that starts a
-  turn. If Main is running, delivery waits for Main's `agent_settled`, so it
-  never interrupts Main. Only never-offered reports are sent (a `pair_yield` or
-  armed-yield delivery that got there first wins), and at most
+- **Automatic delivery (`autoDeliverReports`, default `true`).** A finalized
+  report is durable pending work and **never interrupts Main**:
+  - *Main is working* (generating, running tools, compacting, or holding queued
+    messages): nothing is sent. When Main's run completes normally and no user
+    message is queued, the report is appended at that run's settlement boundary
+    (`agent_before_settle`), so Main reviews it after finishing its own work, in
+    the same run. If a user message is queued, the run continues with it first.
+  - *Main's run settles with the report still waiting* (for example a queued
+    message took the boundary): the report is sent from the `agent_settled`
+    handler. Pi defers that turn and runs it in order with anything else queued at
+    settlement, including a prompt you submit meanwhile.
+  - *Main is idle*: the report starts a Main turn. Pair re-checks that Main is
+    idle in the same tick as the send. If your prompt still collides with that
+    turn (another extension's input handler was busy), Pair takes over your
+    prompt, stops the report run, and sends your message next as a normal
+    prompt, so it is never rejected or lost.
+  - *Main's run was aborted or failed*: Main is not woken; the report waits for
+    the next run's boundary, `pair_yield` or `/pair yield`.
+
+  Your prompt never carries a report. A sent report is recorded as `offered`
+  only once Main's session observably holds it; while Main is busy the wait
+  continues (a queued report is read when the run drains it). If an idle Main's
+  session does not hold it, the send is retried (at most 3 attempts), and a
+  report already present in Main's session is never sent twice. Only
+  never-offered reports are sent automatically, at most
   `limits.maxReportsPerTask` (default 40) per task; after that, reports wait
-  for `/pair inbox`. Main inspects it and approves, answers or revises; a
-  revise sends the fixes back to the worker, bounded by the revision limit. The
-  notice records `channel: "auto"`.
+  for `/pair inbox`. `deliveries.jsonl` in Pair's state directory logs each
+  claim, deferral, observation and retry.
 - **Manual fallback.** With `autoDeliverReports: false`, a result arriving after
   a yielded Main has settled stays retained with a waiting indicator until the
   next explicit `pair_yield`, or the human `/pair yield` / `/pair inbox`
@@ -134,8 +158,8 @@ advances a persisted conversation-branch counter and:
     the retained evidence and outcomes, explicitly stop the held generation
     (confirmed exit) and only then `/pair resume` continues the same
     conversation. Re-inspection alone does not restore a committed decision
-    to review. Unknown or unconfirmed exits still require offline
-    reconciliation — never reset, history deletion or lock removal.
+    to review. An unconfirmed exit (for example after Main crashed) is resolved
+    with `/pair reconcile`, never with reset, history deletion or lock removal.
 
 Inspections pin the branch they actually read: the branch is captured before
 the first await and re-verified at transaction admission and after the
@@ -204,11 +228,41 @@ JSON fields:
 ```
 
 Pair runs these commands in the worker's Git root at code-review checkpoints.
-They run with your permissions. Choose checks that leave source files unchanged:
-a check that modifies the workspace requires a fresh report. With
-`requirePassing: true`, failed checks block approval.
+They run with your permissions. Choose checks that leave source files unchanged.
+If the workspace changes before or while a check runs, that check is recorded as
+failed (`VERIFICATION_SOURCE_DRIFT`) and the rest are skipped; the report still
+reaches Main. If files keep changing while the checkpoint is frozen, Pair retries a
+few times and then holds the task without stopping the worker; resume once other
+writers are done. With `requirePassing: true`, failed checks block approval.
 
 An empty command list means **no independent checks ran**.
+
+### Limits
+
+| Setting | Enforced as |
+| --- | --- |
+| `limits.activeStepTimeoutMs` (30 min) | A running step that has not reported in this time is paused; the worker process is kept. |
+| `limits.maxReportedCostUsd`, `limits.maxOutputTokens` | Reaching either pauses the task. Both default to `null` (no budget). |
+| `limits.maxReportsPerTask` (40) | Automatic deliveries per task; later reports wait for `/pair inbox`. |
+| `limits.maxReportBytes` (16384) | Upper bound on one report; the summary-detail policy may set a lower one. |
+| `limits.maxAutomaticReportRepairs` (1) | Rejected `pair_report` attempts the worker may fix and resubmit per step; past that it stops and the task is held. |
+| `supervision.maxRevisions` / `maxRevisionsPerStep` (20 / 3) | Revisions per task and per step. The per-step limit stops one step from looping; the task limit bounds the whole plan. |
+| `supervision.maxStepFiles` (5) | `every-step` only: files one step may change and still be approved. |
+
+`limits.maxQueuedTasks`, `maxQueuedReviews` and `maxAutomaticRecoveryAttempts` are
+deprecated: Pair runs one assignment at a time and never recovers automatically.
+They are still accepted in older files and backups, then ignored.
+
+### Worker extensions
+
+With `runtime.inheritExtensions: true` (default) the worker loads Main's extensions.
+Some start turns on their own (retries, queued messages). In a worker such a turn
+has no Pair lease: Pair aborts it and keeps the worker, and a tool call the Pair
+gate blocked is harmless; only a tool that actually ran without a lease stops the
+worker. `/pair doctor` lists inherited extensions that can start turns; leave out
+the ones the worker does not need with `runtime.excludeExtensions` (package names
+such as `"pi-retry"`, or absolute paths). Keep provider extensions your worker
+model needs.
 
 ## Context, warming and cost
 
@@ -254,18 +308,22 @@ what processes can do.
 
 - **One live worker and one unresolved assignment.** Additional configured slots
   are for sequential use. Increasing `maxWorkers` does not enable parallel work.
-- **One controller and writer per workspace.** Cross-controller exclusion,
-  unattended operation, and automatic crash recovery are not qualified.
+  `pair_dispatch` and `pair_decide` return once the assignment or decision is
+  durable; the worker starts in the background, and a failure is reported to you
+  and to Main.
+- **One writer per repository.** A repository lock stops a second Pair session
+  (another Main session or process) from dispatching into a repository while a
+  task there is unresolved. Unattended operation is not qualified.
 - **The supported worker is a writer.** Read-only workers with generic Fabric,
   background/monitored shell jobs, and recursive workers are rejected.
-- **Uncertain state stays held.** Unknown exits or missing/corrupt histories need
-  explicit reconciliation. Pair does not silently replace a lost conversation.
+- **Uncertain state stays held.** After Main crashes, Pair proves the old worker
+  process exited when it starts again; if it cannot, `/pair reconcile` resolves it.
+  Missing or corrupt histories need explicit reconciliation. Pair does not silently
+  replace a lost conversation. Retained worker sessions of any size are verified
+  incrementally.
 - **Approval covers captured source.** It does not certify databases, external
   services, ignored files, or arbitrary shell side effects. Pair does not create
   branches, merge, commit, push, or deploy on your behalf.
-- **Some retained settings are future-facing.** Queue, report, repair, recovery,
-  active-step, and per-step migration fields are preserved; their presence is not
-  a claim that all associated limits are enforced.
 
 A bounded integration run exercised actual **Pi 0.87.1, Fabric 0.96.3,
 Fovea 0.31.1, and Node 24 on macOS**, using a deterministic local model. It covered
@@ -274,6 +332,8 @@ duplicate decisions, cancellation, and confirmed stop. It did not qualify paid
 providers, the interactive Main TUI, or other platforms. See
 [compatibility](COMPATIBILITY.md) and
 [security boundaries](SECURITY.md). That run predates the report-delivery,
-phase/branch-fencing and retained-scope behavior described above: those have
-**not** been natively qualified. The Pair package loaded into a running session
+phase/branch-fencing, retained-scope, reconciliation, repository-lock and
+background-activation behavior described above: those are covered by offline
+tests with fakes of Pi and the worker RPC, and have **not** been natively qualified.
+Pair is verified against Pi `>=0.87.1 <0.88.0` and warns on other versions. The Pair package loaded into a running session
 may differ from this checkout's source.

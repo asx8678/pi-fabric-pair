@@ -1,11 +1,15 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { signalGroup } from './util.js';
 
 /** @typedef {Record<string, unknown>} RpcRecord */
 /** @typedef {{command?: string, args?: string[], cwd?: string, env?: NodeJS.ProcessEnv, requestTimeoutMs?: number, shutdownTimeoutMs?: number, maxLineBytes?: number}} RpcOptions */
 /** send-only observeAfterWrite retains ACK/write observation after caller revocation, not execution authority.
- * @typedef {{control?: boolean, signal?: AbortSignal, guard?: () => boolean, observeAfterWrite?: boolean}} RpcWriteOptions
+ * send-only extend: consulted when the acknowledgement deadline expires; while it returns true
+ * (observable progress, for example a compaction during prompt preflight) the deadline is
+ * re-armed, never beyond maxWaitMs in total.
+ * @typedef {{control?: boolean, signal?: AbortSignal, guard?: () => boolean, observeAfterWrite?: boolean, extend?: () => boolean, maxWaitMs?: number}} RpcWriteOptions
  */
 /** @typedef {{code: number | null, signal: NodeJS.Signals | null, expected: boolean, error: Error | null, spawnFailed?: boolean}} RpcExit */
 /** @typedef {{command: string, control: boolean, resolve: (value: unknown) => void, reject: (error: Error) => void, timer: ReturnType<typeof setTimeout>, controller: AbortController, cleanup: () => void, written: boolean, attempted: boolean, response?: RpcRecord}} Pending */
@@ -17,6 +21,10 @@ const NORMAL_WRITES = 32, CONTROL_WRITES = 16; // 8 control requests + 8 dialog 
 const NORMAL_BYTES = 16 * 1024 * 1024, CONTROL_BYTES = 64 * 1024;
 const MAX_FRAME = 16 * 1024 * 1024, MAX_TIMEOUT = 300_000, KILL_WAIT = 1500;
 const CONTROL_COMMANDS = new Set(['clear_queue', 'abort', 'abort_retry', 'abort_bash', 'get_state']);
+/** Hard ceiling for an acknowledgement whose deadline is extended by observed progress. */
+const MAX_EXTENDED_WAIT = 30 * 60_000;
+/** Non-protocol stdout (an extension's stray console output) is tolerated up to these bounds. */
+const NOISE_LINES = 1000, NOISE_BYTES = 1024 * 1024;
 
 /** ACK loss or a possibly partial write must hold, never resend. */
 export class RpcUncertainError extends Error {
@@ -38,7 +46,7 @@ function timeout(value, fallback) { return Number.isFinite(value) && Number(valu
 /**
  * Bounded public JSONL transport. No session lifecycle/idle mirror belongs here.
  * send deliberately returns unknown: consumers must validate command-specific data.
- * @extends {EventEmitter<{event: [RpcRecord], fault: [Error], exit: [RpcExit], diagnostic: [RpcRecord], late_response: [RpcRecord]}>}
+ * @extends {EventEmitter<{event: [RpcRecord], fault: [Error], exit: [RpcExit], diagnostic: [RpcRecord], late_response: [RpcRecord], spawn: [number]}>}
  */
 export class PiRpc extends EventEmitter {
   /** @param {RpcOptions} [options] */
@@ -54,7 +62,7 @@ export class PiRpc extends EventEmitter {
     this.stderr = '';
     // Incomplete-frame text is kept as parts so each byte is scanned once; after a
     // bad frame, `discarding` skips to the next newline to resynchronize.
-    /** @type {string[]} */ this.parts = []; this.partBytes = 0; this.discarding = false;
+    /** @type {string[]} */ this.parts = []; this.partBytes = 0; this.discarding = false; this.noiseLines = 0; this.noiseBytes = 0;
     this.decoder = new TextDecoder('utf-8', { fatal: true });
     this.closed = false; this.started = false; this.stopping = false;
     /** @type {Error | null} */ this.fault = null;
@@ -88,6 +96,7 @@ export class PiRpc extends EventEmitter {
         this.fail(error);
       });
       child.once('close', (code, signal) => this.finish(code, signal));
+      if (child.pid) this.emit('spawn', child.pid);
     } catch (e) {
       const error = errorOf(e); this.finish(null, null, error); this.fail(error); throw error;
     }
@@ -147,6 +156,16 @@ export class PiRpc extends EventEmitter {
   dropPartial() { this.parts = []; this.partBytes = 0; this.discarding = true; }
   /** @param {string} line */
   frame(line) {
+    // A line that cannot be a JSON object is not a protocol frame: an inherited extension
+    // printed to stdout. It cannot correlate with any request, so it is kept as a bounded
+    // diagnostic instead of killing the worker. Garbled frames still start with '{' and fault.
+    const trimmed = line.trimStart();
+    if (trimmed.length && !trimmed.startsWith('{')) {
+      this.noiseLines++; this.noiseBytes += Buffer.byteLength(line);
+      if (this.noiseLines > NOISE_LINES || this.noiseBytes > NOISE_BYTES) { this.fail(new RpcUncertainError('Invalid worker protocol: too much non-protocol output on stdout')); return; }
+      this.emit('diagnostic', { stdout: line.slice(0, 2000) });
+      return;
+    }
     try {
       if (!line.length || Buffer.byteLength(line) > this.maxLineBytes) throw new Error('Empty or oversized RPC frame');
       /** @type {unknown} */ const value = JSON.parse(line);
@@ -200,10 +219,18 @@ export class PiRpc extends EventEmitter {
         if (p.attempted) this.fail(error);
         rejectRequest(error);
       };
-      const timer = setTimeout(() => {
+      const waitMs = timeout(timeoutMs, 30000), hardDeadline = Date.now() + Math.min(MAX_EXTENDED_WAIT, Math.max(waitMs, options.maxWaitMs ?? waitMs));
+      const expire = () => {
+        const p = this.pending.get(id);
+        // Observable progress (for example a preflight compaction) keeps the wait alive. The
+        // extension never resends anything; it only postpones declaring the outcome unknown.
+        let progressing = false;
+        try { progressing = !!(p && !this.fault && !this.closed && Date.now() < hardDeadline && options.extend?.()); } catch { progressing = false; }
+        if (p && progressing) { p.timer = setTimeout(expire, Math.max(1, Math.min(waitMs, hardDeadline - Date.now()))); return; }
         const error = new RpcUncertainError(`RPC ${command} deadline/acknowledgement lost; no automatic retry`);
         this.fail(error); rejectRequest(error); // also settles control requests AFTER a prior fault
-      }, timeout(timeoutMs, 30000));
+      };
+      const timer = setTimeout(expire, waitMs);
       /** @type {Pending} */
       const p = { command, control: !!options.control, resolve, reject, timer, controller, cleanup: () => options.signal?.removeEventListener('abort', cancel), written: false, attempted: false };
       this.pending.set(id, p);
@@ -296,7 +323,7 @@ export class PiRpc extends EventEmitter {
   /** @param {NodeJS.Signals} [signal] */
   kill(signal = 'SIGTERM') {
     if (!this.child || this.closed) return;
-    try { if (process.platform !== 'win32' && this.child.pid) process.kill(-this.child.pid, signal); else this.child.kill(signal); }
+    try { if (!signalGroup(this.child.pid, signal, this.child)) this.emit('diagnostic', { error: `Refused to signal implausible worker PID ${String(this.child.pid)}` }); }
     catch (e) { this.emit('diagnostic', { error: errorOf(e).message.slice(0, 2000) }); }
   }
   /** @param {number} ms @returns {Promise<boolean>} */

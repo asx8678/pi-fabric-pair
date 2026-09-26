@@ -29,7 +29,8 @@ error, read the schema once with `tools.describe({ ref: "extensions.pair_dispatc
 names are `pair_status`, etc.
 
 Do not poll status. With `autoDeliverReports` on (the default), each finalized
-report is delivered to Main as a new turn once Main is idle. With it off,
+report is delivered to Main once Main's current work is done: at the end of the
+current run, or as a new turn when Main is idle. Answer the user first. With it off,
 reports wait in Pair's durable inbox: call `pair_yield` to receive every
 unacknowledged report (repeat reads return the same reports until
 `pair_inspect`/`pair_decide` acknowledge them); a report finalizing before the

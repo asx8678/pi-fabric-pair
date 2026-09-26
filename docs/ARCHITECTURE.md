@@ -31,13 +31,19 @@ handling, and bounded stream parsing. This is not a new wire protocol or gRPC.
    only a wakeup; the outbox is authoritative.
 6. Controller validates the decoded report envelope before reading identities, then checks the incarnation nonce, owner session/epoch, worker slot/generation, session, task attempt/lease, plan revision, step, payload schema, and payload hash.
 7. Controller waits for the native settled event, runs preconfigured checks, and
-   freezes/rechecks a source snapshot. It does not review a moving checkpoint.
-8. The finalized report is stored in Pair's durable inbox and, with
-   `autoDeliverReports` (default), sent to Main as a follow-up message that
-   starts Main's next turn. With it off, Main retrieves reports with
-   `pair_yield`, or one report armed by an empty yield is delivered at the
-   current run's settlement boundary. No entire worker transcript is copied
-   into Main.
+   freezes/rechecks a source snapshot. It does not review a moving checkpoint:
+   drift during a check fails that check, and drift while freezing is retried a
+   few times before the task is held (the worker process is kept).
+8. The finalized report is stored in Pair's durable inbox as pending work. With
+   `autoDeliverReports` (default) it reaches Main only at a safe boundary: the
+   settlement boundary of a normally completed Main run with no queued user
+   input, a send from the `agent_settled` handler (Pi defers it in order with
+   prompts submitted during settlement), or a new turn when Main is idle, with
+   the idle check repeated in the same tick as the send. It never interrupts a
+   running turn or rides on the user's prompt. With it off, Main retrieves
+   reports with `pair_yield`, or one report armed by an empty yield is delivered
+   at the current run's settlement boundary. No entire worker transcript is
+   copied into Main.
 9. Main retrieves immutable evidence, then answers, approves, revises or cancels
    through the decision tool. Approval binds to the snapshot hash and requires the
    live source snapshot still to match.
@@ -58,24 +64,37 @@ has not yet processed its notification.
 Typical task states:
 
 ```text
-running -> awaiting_settle -> question -> running
-                          -> review -> running | completed
-                          -> blocked -> running | cancelled
-running/review/question -> paused | interrupted | cancelled
-paused/interrupted --explicit human resume--> running
+activating -> running -> awaiting_settle -> question -> activating
+                                        -> review -> activating | completed
+                                        -> blocked -> activating | cancelled
+activating/running/review/question -> paused | interrupted | cancelled
+paused/interrupted --explicit human resume--> activating
 ```
+
+`activating` is a granted attempt whose work prompt has not been sent yet:
+running intent is persisted before the prompt, so a task found `activating`
+after a crash provably never received it.
 
 A valid approval may leave the same step active when `stepComplete:false` is used.
 Otherwise it advances one step. No step can be advanced twice by the same report.
-Revision count is per task, not an unlimited count reset at every checkpoint.
+Revisions are bounded per task (`maxRevisions`) and per step (`maxRevisionsPerStep`).
 
 ## Persistence
 
 The workspace/Main-session identity selects a private state directory. A PID
-ownership lock prevents two live controllers attaching to the same state. Failed
-initialization releases its lock. Controller replacement advances a durable owner epoch; each worker process replacement advances its generation. A dead owner can be reconciled on restart.
-State files are atomically replaced with restrictive permissions; this is not a
-transactional database or a distributed exactly-once guarantee.
+ownership lock prevents two live controllers attaching to the same state; its
+owner record is written before the lock directory is renamed into place, and a
+lock whose PID was reused by a newer process is treated as stale. A separate
+repository lock allows one unresolved Pair task per repository across sessions.
+Failed initialization releases its lock. Controller replacement advances a
+durable owner epoch; each worker process replacement advances its generation.
+The worker's PID is recorded at spawn: on restart after a crash, Pair proves the
+previous generation exited (gone, owned by another user, or a reused PID) and
+otherwise holds it until `/pair reconcile`.
+State files are atomically replaced (with a directory fsync) and restrictive
+permissions; this is not a transactional database or a distributed exactly-once
+guarantee. Resolved notices and old request IDs are archived beside their task,
+and evidence of tasks older than the last few is collected at the next dispatch.
 
 Stored data includes:
 
@@ -101,8 +120,13 @@ implementation working tree to avoid recursive evidence capture.
 Each retained worker owns one RPC connection and one session file. Responses are
 correlated with unpredictable IDs. An acknowledgement timeout means **unknown
 outcome**, not “nothing happened”; dispatch is not automatically retried.
-Malformed or oversized stdout is a protocol fault. Stderr is kept separately and
-bounded; startup diagnostics can be retained privately for investigation.
+Malformed or oversized JSON frames are a protocol fault; stray non-JSON lines
+from an extension are kept as bounded diagnostics. Stderr is kept separately and
+bounded; startup diagnostics can be retained privately for investigation. The
+work prompt's acknowledgement waits through Pi's preflight (compaction,
+before-agent hooks) and is extended while a compaction is visibly running.
+Signals are only ever sent to a validated child PID's process group, never to
+PID 0/1, Pair's own process or its parent.
 
 A normal prompt completion does not close stdin. Stop revokes authority, cancels
 queued work, aborts the current run, sends EOF, then escalates to process-group
@@ -180,7 +204,9 @@ a threshold, but cannot provide a provider-enforced total spend ceiling.
 ## Handoff: durable inbox, phases and branch fencing
 
 Reports finalize into a durable inbox of notices. With `autoDeliverReports`
-(default) each one is also pushed to Main as a follow-up that starts a turn.
+(default) each one is delivered at Main's next safe boundary (see step 8 above);
+a send is recorded as offered only once Main's session observably holds it, and
+a report already present in Main's session is never sent again.
 The other delivery channels are explicit: `pair_yield` returns compact reports in
 the tool result; an armed empty yield grants exactly one settlement-boundary
 entry injection (public `agent_before_settle` entries/continue) fenced by the
@@ -210,9 +236,10 @@ references; it is never a new grant and never changes the authority document.
 `agentDir` follows the public native tilde semantics (`~`, `~/...`).
 
 ## Delivery and security limits
-Report notification is at-least-once recoverable, not exactly-once. Persisted IDs
-and idempotent decisions prevent duplicate advancement. A crash between enqueue
-and persistence can require manual `/pair inbox` redelivery. Reports are treated
+Report notification is at-least-once recoverable, not exactly-once. Persisted IDs,
+a session check before any resend, and idempotent decisions prevent duplicate
+advancement. A crash mid-delivery returns the report to pending; it is sent again
+only if Main's session does not already hold it. Reports are treated
 as untrusted content, not as new permissions.
 
 Tool gates are workflow restrictions. A powerful shell, external tool server,

@@ -93,7 +93,9 @@ Now ask Main:
 > Use Pair's worker to make one small change. Inspect its diff and verification
 > results, and ask me before approving it.
 
-Reports wait in Pair's inbox until Main calls `pair_yield`. Review gates govern
+By default (`autoDeliverReports: true`) a finished report is delivered to Main
+automatically once Main's current work is done, and never interrupts it; see
+[Report delivery](docs/REFERENCE.md#report-delivery-phases-and-branches). Review gates govern
 Main's decisions; asking the human before each approval requires that explicit
 instruction.
 
@@ -109,7 +111,8 @@ instruction.
 | `/pair report` | Read the current report as a card (read-only; Main still inspects). |
 | `/pair diff` | Scroll the checkpoint diff; `[`/`]` jump between files, `/` searches. |
 | `/pair inbox` | Inspect retained reports. |
-| `/pair yield` | Explicitly deliver retained, unacknowledged reports to Main. |
+| `/pair yield` | Explicitly send retained, unacknowledged reports to Main. |
+| `/pair reconcile` | After a Main crash, prove the old worker process exited so the worker can be used again. |
 | `/pair cancel worker` | Cancel the task and keep the conversation. |
 | `/pair stop worker` | Stop the worker process and retain its history. |
 
@@ -130,7 +133,11 @@ checkpoint invalidate approval.
 
 After reporting, the worker waits. The controller lets execution settle, runs
 configured checks, and captures the source evidence. Reports wait in Pair's
-durable inbox — they never wake or interrupt Main. Main calls `pair_yield` to
+durable inbox and, by default, are delivered to Main automatically once Main's
+current work is done: at the end of its current run, or as a new turn if Main is
+idle. A report never interrupts Main, never rides on your prompt, and never takes
+your prompt's place; if the two collide, your message is sent first. With
+`autoDeliverReports: false` they never wake Main. Main can always call `pair_yield` to
 receive every unacknowledged report (repeat reads return the same reports until
 inspected or decided); a yield that found nothing arms one settlement-boundary
 delivery for a late result, and anything later stays retained until the next

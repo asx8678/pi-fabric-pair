@@ -3,7 +3,8 @@
 ## Historical supervised MVP observation (predates the handoff changes)
 
 **Current native qualification: NOT RUN.** The observation below predates the
-report-delivery, phase/branch-fencing and retained-scope changes; it is
+report-delivery, phase/branch-fencing, retained-scope, reconciliation, repository-lock and
+background-activation changes; it is
 retained as historical evidence and does not qualify this checkout.
 
 The historical public Controller/PiRuntime/PiRpc/Worker path was exercised on **Pi 0.87.1, Fabric 0.96.3, Fovea 0.31.1, Node 24 and macOS**. A disposable Git workspace and private temporary agent directory used an OpenAI-compatible deterministic loopback model, with no real provider credentials or paid inference.
@@ -87,8 +88,9 @@ Pair configuration schema V2 is the current package format. Shipped V1
 `fabric-pair.json` and handoff V1 `pair.json` are accepted only as disabled
 migration previews; explicit settings Apply archives the legacy source before
 writing V2. Settings writes update only changed fields in the selected raw scope layer, preserving inherited values and unrelated overrides. Same-scope old/new filename conflicts and `adaptive` migration fail
-with actionable errors. Handoff queue/report/repair/recovery limits plus distinct
-active-step/per-step fields are retained in V2 assignment snapshots. A previously
+with actionable errors. Handoff report/repair limits and distinct active-step/per-step
+fields are migrated and enforced; handoff queue and automatic-recovery limits are
+accepted and dropped (deprecated). A previously
 archived handoff `.v1.bak` is imported only from an explicitly selected, scope-matching
 regular file after confirmation; Pair does not search for one. These limits are not
 yet enforced by R5 runtime consumers. Migration and selected-layer settings behavior
@@ -116,8 +118,8 @@ Worker dialogs are bounded and tied to startup or a current implementation
 activation. Select/confirm/input use public cancellation and timeout options.
 Worker editor requests are denied because Pi's editor API has no cancellation
 option; Main's own editor/UI remains unchanged. An ambiguous prior generation
-blocks launches and reset until explicit offline reconciliation. No new recovery
-UI or migration is implied.
+blocks launches and reset until its exit is proven at startup or with
+`/pair reconcile`.
 
 See [the AR-02 checkpoint](ACTOR-RPC-IMPLEMENTATION-PLAN.md#11-ar-02-source-checkpoint)
 for source/static evidence and remaining gaps. None of this is native qualification.

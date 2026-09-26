@@ -75,7 +75,11 @@ credentials or unrelated session directories.
 ## Failure policy
 
 An unknown RPC outcome does not cause an automatic retry. A missing session file
-does not cause a blank replacement. Interruptions need explicit reconciliation.
+does not cause a blank replacement. Interruptions need explicit reconciliation;
+an unconfirmed worker exit after a Main crash is resolved with `/pair reconcile`,
+which proves the recorded process exited (or, with your confirmation, stops that
+process group) before the worker is used again. Pair signals only a validated
+child PID's process group, never PID 0/1, its own process or its parent.
 Cancellation and shutdown are best effort and do not roll back writes already
 performed. The qualified Fabric profile sets `executor.shellHangMs: 0` and blocks explicit background shell requests. Pair rejects nonzero auto-spill before inference and rechecks it before shell calls. An arbitrary shell can still daemonize work outside the tool contract; apply OS/container controls when that matters. Native warming/provider requests can have already incurred
 cost when a local stop is issued.

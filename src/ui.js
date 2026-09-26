@@ -112,7 +112,7 @@ function tokenLabel(tokens) {
 function nextAction(worker) {
   if (['stopped', 'not_started'].includes(worker.status) && !worker.pid) return !hasModel(worker) ? '/pair to set up' : worker.workspaceGit === false ? 'not a Git repo' : '/pair start';
   if (['paused', 'interrupted'].includes(worker.status) || ['paused', 'interrupted'].includes(worker.task?.status || '')) return '/pair resume';
-  if (['attention', 'error'].includes(worker.status)) return '/pair';
+  if (['attention', 'error'].includes(worker.status)) return /^EXIT_UNCONFIRMED/.test(worker.error || '') ? '/pair reconcile' : '/pair';
   return '';
 }
 /** Last measured cache-read share per actor for the status line, whole percent
@@ -155,13 +155,14 @@ export function workerStage(summary, w, mainBusy, now) {
   const withMain = doing => {
     const waiting = summary.waitingReports || 0;
     if (waiting && summary.autoDeliverReports === false) return d('waiting · pair_yield or /pair yield', 'warning');
-    if (waiting) return d(mainBusy ? 'Main is busy; delivered when idle' : 'delivering to Main');
+    if (waiting) return d(mainBusy ? 'Main is busy; delivered when its current work is done' : 'delivering to Main');
     return d(mainBusy ? `Main is ${doing}` : 'with Main');
   };
   if (!summary.enabled && !t) return { icon: '○', color: 'dim', text: 'Pair off', details: [d('/pair to turn on', 'dim')], active: false };
   if (!hasModel(w)) return { icon: '○', color: 'warning', text: 'Worker not set up', details: [d('/pair to choose a model', 'dim')], active: false };
-  if (['error', 'attention'].includes(w.status)) return { icon: '!', color: 'error', text: 'Worker needs attention', details: [...(w.error ? [d(inline(w.error, 80), 'error')] : []), d('/pair', 'dim')], active: false };
+  if (['error', 'attention'].includes(w.status)) return { icon: '!', color: 'error', text: 'Worker needs attention', details: [...(w.error ? [d(inline(w.error, 80), 'error')] : []), d(nextAction(w) || '/pair', 'dim')], active: false };
   if (w.status === 'permission') return { icon: '!', color: 'warning', text: 'Worker is asking for permission', details: [d('answer the dialog', 'dim')], active: false };
+  if (t?.status === 'activating') return { icon: '◉', color: 'accent', text: `Worker starting ${step}`, details: [...(title ? [d(title, 'text')] : []), ...cost], active: true };
   if (t && ['running', 'awaiting_settle'].includes(t.status) && ['working', 'settling', 'starting', 'ready'].includes(w.status)) {
     const verb = t.status === 'awaiting_settle' || w.status === 'settling' ? 'finishing' : t.lastDecision === 'revise' ? 'revising' : t.lastDecision === 'answer' ? 'continuing' : 'working on';
     const age = activityAge(w, now), obs = w.observation, percent = obs?.context?.percent;
@@ -355,7 +356,7 @@ export function statusText(summary, native = null, now = Date.now()) {
     lines.push('## Reports', row('Waiting', `${waiting} report${waiting === 1 ? '' : 's'} not yet read by Main`),
       summary.autoDeliverReports === false
         ? '> Automatic delivery is off: Main calls pair_yield, or run /pair yield or /pair inbox.'
-        : '> Each report starts a Main turn as soon as Main is idle; /pair yield delivers now.', '');
+        : '> Reports reach Main when its current work is done (at once if Main is idle); /pair yield sends them now.', '');
   }
   lines.push('## Main', row('Model', `${summary.main?.model || 'native /model'} · ${summary.main?.busy ? 'working' : 'ready'}`));
   if (summary.main?.context) {
@@ -681,7 +682,7 @@ export function reportCardLines(view) {
   if (view.decisions.length) lines.push('', '## Worker decisions', ...view.decisions.flatMap(d => quoted(`• ${d}`)));
   return lines;
 }
-/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'enable' | 'model' | 'effort' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more', workerId?: string, section: string, hint: string, value?: string, tone?: PanelColor}} DashboardItem */
+/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'reconcile' | 'enable' | 'model' | 'effort' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more', workerId?: string, section: string, hint: string, value?: string, tone?: PanelColor}} DashboardItem */
 /** Dashboard summary lines: one per worker in the same words as the status line, then
  * waiting reports.
  * @param {PairSummary} summary @returns {string[]} */
@@ -711,7 +712,7 @@ export function dashboardItems(summary) {
     }
   }
   const waiting = summary.waitingReports || 0;
-  if (waiting) items.push({ section: 'Needs you', label: `Deliver ${waiting} waiting report${waiting === 1 ? '' : 's'} to Main`, action: 'yield', hint: 'Send them to Main now. Each delivery starts a Main turn.' });
+  if (waiting) items.push({ section: 'Needs you', label: `Deliver ${waiting} waiting report${waiting === 1 ? '' : 's'} to Main`, action: 'yield', hint: 'Send them to Main now, or right after its current work.' });
   if (!summary.enabled) items.push({ section: 'Set up', label: 'Turn Pair on', action: 'enable', value: 'off', tone: 'warning', hint: 'Pair accepts no new work while it is off. This turns it on for new work.' });
   for (const w of summary.workers) {
     if (!hasModel(w)) items.push({ section: 'Set up', label: many ? `Choose a model for ${w.id}` : 'Choose the worker model', action: 'model', workerId: w.id, value: 'not chosen', tone: 'warning', hint: 'Pick the model the worker runs. Main stays on its own model.' });
@@ -722,6 +723,7 @@ export function dashboardItems(summary) {
     items.push({ section, label: 'Effort', action: 'effort', workerId: w.id, value: w.effort, hint: 'Change the thinking effort, from the levels the worker model supports.' });
     if (task?.status === 'running') items.push({ section, label: 'Pause', action: 'pause', workerId: w.id, hint: 'Abort the current step and hold the task.' });
     if (task && ['paused', 'interrupted'].includes(task.status)) items.push({ section, label: 'Resume', action: 'resume', workerId: w.id, hint: 'Continue the held task after checking interrupted work.' });
+    if (!w.pid && /^EXIT_UNCONFIRMED/.test(w.error || '')) items.push({ section: 'Needs you', label: `Reconcile ${w.id}`, action: 'reconcile', workerId: w.id, tone: 'warning', hint: 'Prove the previous worker process exited (or stop it), so the worker can be used again.' });
     if (task) items.push({ section, label: 'Cancel task', action: 'cancel', workerId: w.id, hint: 'End the task. The conversation and file changes are kept.' });
     if (w.sessionId) items.push({ section, label: 'Transcript', action: 'transcript', workerId: w.id, hint: "Read the worker's recent conversation." });
     if (w.pid) items.push({ section, label: 'Stop worker', action: 'stop', workerId: w.id, hint: 'Stop the worker process. Its conversation is kept for next time.' });
@@ -757,7 +759,7 @@ export function dashboardMenu(items) {
 export function inboxText(entries, autoDeliver) {
   /** @param {string} key @param {string} value */
   const row = (key, value) => `  ${key.padEnd(8)}  ${value}`;
-  const how = autoDeliver ? '> Automatic delivery is on: each report starts a Main turn as soon as Main is idle.'
+  const how = autoDeliver ? '> Automatic delivery is on: each report reaches Main when its current work is done (at once if Main is idle).'
     : '> Automatic delivery is off: Main calls pair_yield, or deliver them with /pair yield.';
   if (!entries.length) return ['', '  ✔ Nothing waiting', '', '> Worker reports stay here until Main reads them with pair_inspect or pair_decide.', how].join('\n');
   const lines = [`> ${entries.length} report${entries.length === 1 ? '' : 's'} not yet resolved.`, how, ''];
@@ -771,9 +773,9 @@ export function inboxText(entries, autoDeliver) {
 }
 /** Readable doctor report: the checks that decide whether Pair can run, then the raw
  * diagnostic data for bug reports.
- * @param {{main: {model?: {provider: string, id: string} | null, thinkingLevel?: unknown, trusted?: boolean, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}}, pair: PairSummary, configuration: {version?: unknown, scope?: unknown, pendingMigrations?: readonly unknown[]}, blockers: string[], raw: unknown}} data
+ * @param {{main: {model?: {provider: string, id: string} | null, thinkingLevel?: unknown, trusted?: boolean, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}}, pair: PairSummary, configuration: {version?: unknown, scope?: unknown, pendingMigrations?: readonly unknown[]}, blockers: string[], raw: unknown, notes?: string[]}} data
  * @returns {string} */
-export function doctorText({ main, pair, configuration, blockers, raw }) {
+export function doctorText({ main, pair, configuration, blockers, raw, notes = [] }) {
   /** @param {boolean} ok @param {string} text */
   const check = (ok, text) => `  ${ok ? '✔' : '✖'} ${text}`;
   /** @param {unknown} version */
@@ -787,7 +789,8 @@ export function doctorText({ main, pair, configuration, blockers, raw }) {
     '## Worker Fabric profile', ...(blockers.length ? blockers.map(item => check(false, item)) : [check(true, 'shellHangMs, maxDepth and prewalk are set for Pair')]), '',
     '## Configuration', `  Version     ${String(configuration.version ?? 'unknown')} · ${String(configuration.scope ?? 'unknown')} scope`,
     check(pending === 0, pending === 0 ? 'no pending migrations' : `${pending} pending migration${pending === 1 ? '' : 's'}; review in /pair settings`),
-    check(pair.enabled, pair.enabled ? 'enabled for new work' : 'disabled for new work; turn it on in /pair settings'), '',
+    check(pair.enabled, pair.enabled ? 'enabled for new work' : 'disabled for new work; turn it on in /pair settings'),
+    ...notes.map(note => check(false, note)), '',
     '## Workers', ...pair.workers.flatMap(w => [check(hasModel(w), `${w.id}: ${hasModel(w) ? `${w.model} · ${w.status.replace(/_/g, ' ')}` : 'no model chosen'}`),
       check(w.workspaceGit !== false, w.workspaceGit === false ? `${w.id}: ${w.cwd} is not in a Git repository` : `${w.id}: workspace is a Git repository`)]), '',
     '## Raw data', '> For bug reports.', ...JSON.stringify(raw, null, 2).split('\n').map(line => `    ${line}`)];
@@ -981,6 +984,7 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
       { id: '6', label: 'Read-only worker', value: onOff(w.readOnly), hint: 'Read and Fovea tools only. Not supported together with Fabric.' },
       { id: '7', label: 'Workspace', value: w.cwd || 'same as Main', hint: 'Absolute path the worker edits. Blank uses the Main workspace.' },
       { section: 'Review' },
+      ...(draft.supervision.mode === 'every-step' ? [{ id: '11', label: 'Step size limit', value: `${draft.supervision.maxStepFiles ?? 5} files`, hint: 'Every-step only: a step that changes more files than this cannot be approved; Main asks for smaller steps.' }] : []),
       { id: '9', label: 'Revision limit', value: String(draft.supervision.maxRevisions), hint: 'How many times Main may ask for revisions before the task stops.' },
       { id: '10', label: 'Summary detail', value: draft.supervision.summaryDetail, hint: 'How much detail the worker puts in its reports.' },
       { id: '17', label: 'Verification commands', value: `${draft.verification.commands.length} configured`, hint: 'Trusted commands Pair runs itself at every checkpoint, with your permissions.' },
@@ -1019,12 +1023,15 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
         const modes = [
           { value: 'final-only', hint: 'Review once after the complete plan. Questions are always allowed.' },
           { value: 'milestones', hint: 'Approve each dispatched plan milestone.' },
-          { value: 'every-step', hint: 'Approve each small plan step. No step skipping.' }
+          { value: 'every-step', hint: 'Approve each small plan step; a step may change at most the step size limit of files.' }
         ];
         draft.supervision.mode = await chooseValue(ctx, 'Review policy · final acceptance is always required', modes, draft.supervision.mode) || draft.supervision.mode;
       }
       else if (index === 9) draft.supervision.maxRevisions = await numberInput(ctx, 'Revision limit', draft.supervision.maxRevisions, {
         accepts: value => Number.isInteger(value) && value >= 0 && value <= 20, expected: 'enter an integer from 0 to 20.'
+      });
+      else if (index === 11) draft.supervision.maxStepFiles = await numberInput(ctx, 'Step size limit (files per step)', draft.supervision.maxStepFiles ?? 5, {
+        accepts: value => Number.isInteger(value) && value >= 1 && value <= 1000, expected: 'enter an integer from 1 to 1000.'
       });
       else if (index === 10) draft.supervision.summaryDetail = await chooseValue(ctx, 'Summary detail', [{ value: 'minimal', hint: 'Shortest reports.' }, { value: 'normal', hint: 'Changes, reasons and evidence.' }, { value: 'detailed', hint: 'Fuller reasoning and evidence.' }], draft.supervision.summaryDetail) || draft.supervision.summaryDetail;
       else if (index === 14) {
