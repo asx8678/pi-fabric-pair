@@ -129,7 +129,7 @@ export class PairController extends EventEmitter {
     this.emit('change', this.summary());
   }
   summary() {
-    return { ownerSession: this.ownerSession, ownerEpoch: this.state?.ownerEpoch || null, directory: this.dir, enabled: this.config.enabled, cacheWarming: this.config.cacheWarming, settingsPending: !!this.pendingConfig,
+    return { ownerSession: this.ownerSession, ownerEpoch: this.state?.ownerEpoch || null, directory: this.dir, enabled: this.config.enabled, cacheWarming: this.config.cacheWarming, autoDeliverReports: this.config.autoDeliverReports !== false, settingsPending: !!this.pendingConfig,
       main: this.mainObservation,
       mainPhase: this.state?.mainPhase ? { status: this.state.mainPhase.status, since: this.state.mainPhase.since, ownerSession: this.state.mainPhase.ownerSession, ownerEpoch: this.state.mainPhase.ownerEpoch, revision: this.state.mainPhase.revision ?? 0, current: !!this.phaseEligible() } : null,
       waitingReports: this.recoveryNotices().length,

@@ -151,8 +151,8 @@ Main and Worker keep separate conversations. Include relevant constraints in
 each work order; the worker does not inherit Main's private chat. Native Pi/Fabric
 manages compaction, while Pair retains task state separately.
 
-**Cache read (last)** shows the share of measured input read from provider cache
-on each role's last request. The hero artwork's 99-100% values are examples;
+The status line's **cache** reading (for example `cache M 99% W 100%`) shows the
+share of measured input read from provider cache on each role's last request. The hero artwork's 99-100% values are examples;
 actual results vary.
 
 Optional cache warming is **off by default**. It requires compatible native SDK

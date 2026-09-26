@@ -1,11 +1,11 @@
 import { PairController } from './controller.js';
-import { configPaths, configForScope, loadConfig, previewBackupImport, saveBackupImport, saveConfig, saveIndicator, updateConfigLayer } from './config.js';
+import { configPaths, configForScope, INDICATORS, isIndicator, loadConfig, previewBackupImport, saveBackupImport, saveConfig, saveIndicator, updateConfigLayer } from './config.js';
 import { decisionSchema, dispatchSchema, inspectSchema, statusSchema, yieldSchema, validate, validateDecision, validateDispatch } from './schema.js';
 import { isDirectMutation, nativeSettings, probeNative, sourcePaths } from './native.js';
 import { selectLastMeasuredUsage } from './metrics.js';
 import { ScopedCacheWarming } from './warming.js';
 import { assert, briefError, cleanText, digest, Serial } from './util.js';
-import { ageLabel, dashboardHeader, dashboardItems, diffLineColor, humanPatch, indicatorWidget, kindLabel, reportCardLines, reportLineColor, settingsUI, staleWorkers, statusText, textView } from './ui.js';
+import { ageLabel, dashboardHeader, dashboardItems, dashboardMoreItems, diffLineColor, humanPatch, indicator, kindLabel, planLine, planWidget, reportCardLines, reportLineColor, settingsUI, staleWorkers, statusText, textView } from './ui.js';
 
 const MAIN_GUIDE = `Fabric Pair provides persistent supervised implementation workers without switching this Main model.
 You own planning, questions, reviews and final acceptance. For implementation requests, check pair_status, make a bounded plan, and delegate with pair_dispatch to a configured worker when Pair is enabled. The dispatch returns an acknowledgement, not completion. Continue talking with the user normally; do not poll, repeatedly call status, or wait inside a tool for the worker.
@@ -77,11 +77,42 @@ export function registerMain(pi) {
     const observation = warming.reconcile(ctx, requested, String(bindingEpoch));
     if (c?.mainObservation) c.mainObservation.warming = observation;
   }
+  /** Mounted plan widget: the UI it was mounted on, the TUI that redraws it and the plan text last drawn.
+   * @type {{ui: BoundMainContext['ui'], tui: import('@earendil-works/pi-tui').TUI, plan: string | null} | null} */
+  let widget = null;
+  /** Latest summary the mounted widget renders. @type {ReturnType<PairController['summary']> | null} */
+  let snapshot = null;
+  /** Footer text last set on a UI, so an unchanged status line does not force a redraw.
+   * @type {{ui: BoundMainContext['ui'] | null, text: string | undefined}} */
+  let shownStatus = { ui: null, text: undefined };
+  /** Forget what was drawn; Pi may have cleared extension UI (new session or shutdown). */
+  function forgetIndicator() { widget = null; snapshot = null; shownStatus = { ui: null, text: undefined }; }
+  /** @param {BoundMainContext['ui']} ui @param {string | undefined} text */
+  function showStatus(ui, text) {
+    if (shownStatus.ui === ui && shownStatus.text === text) return;
+    shownStatus = { ui, text }; ui.setStatus('fabric-pair', text);
+  }
+  /** Cosmetic indicator only; never drives work. Every visible mode shows Pair's one-line
+   * status in Pi's footer under its own key. Minimal mode also mounts the plan widget once;
+   * later refreshes swap its summary snapshot and redraw only when the plan line changed. */
   function render() {
     if (!ctxRef || ctxRef.mode !== 'tui') return;
-    const current = controller;
-    if (!current || config?.indicator === 'off') ctxRef.ui.setWidget('fabric-pair', undefined);
-    else ctxRef.ui.setWidget('fabric-pair', (_tui, theme) => indicatorWidget(current.summary(), busy, theme));
+    const ui = ctxRef.ui, current = controller, mode = config?.indicator ?? 'minimal';
+    if (widget && widget.ui !== ui) widget = null;
+    if (!current || mode === 'off') {
+      snapshot = null; showStatus(ui, undefined);
+      if (widget) { ui.setWidget('fabric-pair', undefined); widget = null; }
+      return;
+    }
+    snapshot = current.summary();
+    showStatus(ui, indicator(snapshot, busy, ui.theme));
+    if (mode !== 'minimal') {
+      if (widget) { ui.setWidget('fabric-pair', undefined); widget = null; }
+      return;
+    }
+    const plan = planLine(snapshot);
+    if (!widget) ui.setWidget('fabric-pair', (tui, theme) => { widget = { ui, tui, plan }; return planWidget(() => snapshot, theme); });
+    else if (widget.plan !== plan) { widget.plan = plan; widget.tui.requestRender(); }
   }
   /** Stale episodes already announced; cleared when the worker goes quiet-free or inactive. @type {Set<string>} */
   const staleWarned = new Set();
@@ -317,10 +348,18 @@ export function registerMain(pi) {
     const outcome = restart ? retained ? 'restarted; conversation retained' : 'started' : 'ready';
     ctx.ui.notify(`Worker ${id} ${outcome}; no model turn was requested.${held}`, 'info');
   }
+  /** Stopping interrupts a running task (the conversation and file changes are kept), so ask first.
+   * Workers that are idle or waiting on Main stop without a prompt.
+   * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx @param {PairController} c @param {string[]} ids @returns {Promise<boolean>} */
+  async function confirmStop(ctx, c, ids) {
+    const running = c.summary().workers.filter(w => ids.includes(w.id) && ['running', 'awaiting_settle'].includes(w.task?.status || '')).map(w => w.id);
+    if (!running.length) return true;
+    return ctx.ui.confirm('Stop worker', `${running.join(', ')} ${running.length === 1 ? 'is' : 'are'} running a task. Stopping interrupts it; the conversation and file changes are kept. Inspect the changes, then /pair resume to continue. Stop now?`);
+  }
   pi.registerCommand('pair', {
     description: 'Pair settings/status/report/diff/start/restart/reload/stop/pause/resume/cancel/yield/indicator/inbox/transcript/doctor/reset-worker/import-backup',
     getArgumentCompletions(prefix) {
-      return ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'yield', 'indicator minimal', 'indicator off', 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup global ', 'import-backup project '].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }));
+      return ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'yield', ...INDICATORS.map(mode => `indicator ${mode}`), 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup global ', 'import-backup project '].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }));
     },
     /** @param {string} args @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx @returns {Promise<void>} */
     async handler(args, ctx) {
@@ -354,13 +393,17 @@ export function registerMain(pi) {
           return await restartWorker(ctx, idArg);
         }
         if (command === 'indicator') {
-          assert(idArg === 'off' || idArg === 'minimal', 'Use /pair indicator off or /pair indicator minimal');
+          assert(isIndicator(idArg), `Use /pair indicator ${INDICATORS.join(', ')}`);
           const next = await readScope(scope); next.indicator = idArg;
           // Rendering-only change: do not autostart workers as a side effect.
           await apply(next, scope); return;
         }
         if (command === 'start') return await startWorker(id);
-        if (command === 'stop') { for (const worker of idArg && idArg !== 'all' ? [id] : [...c.handles.keys()]) await c.stop(worker); return; }
+        if (command === 'stop') {
+          const targets = idArg && idArg !== 'all' ? [id] : [...c.handles.keys()];
+          if (await confirmStop(ctx, c, targets)) for (const worker of targets) await c.stop(worker);
+          return;
+        }
         if (command === 'pause') { await c.pause(id); return; }
         if (command === 'resume') { if (await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) await c.resume(id); return; }
         if (command === 'cancel') { await c.cancel(id, rest.join(' ') || 'Cancelled by the user'); return; }
@@ -380,12 +423,15 @@ export function registerMain(pi) {
           const body = diff.patch.trim() ? humanPatch(diff.patch, diff.added) + (diff.patchTruncated ? '\n\n[patch truncated — pair_inspect individual files for full content]' : '') : 'No source changes in this checkpoint.';
           await textView(ctx, `Checkpoint ${diff.checkpointHash.slice(0, 12)} · ${diff.changed.length} file${diff.changed.length === 1 ? '' : 's'} · ${workerId}`, body, { paint: diffLineColor, section: /^### / });
         };
+        /** Set once a delivery starts a Main turn, so the dashboard closes instead of covering Main's review. */
+        let deliveredToMain = false;
         const showYield = async () => {
           const ready = await c.yieldManual();
+          if (ready.length) deliveredToMain = true;
           const lines = ready.length
             ? [`Delivered ${ready.length} report${ready.length === 1 ? '' : 's'} to Main:`, ...ready.map(n => `  • ${n.workerId} · ${n.reportId} (${n.status})`)]
             : ['No reports were waiting.'];
-          await textView(ctx, 'Pair yield', [...lines, '', 'Main acknowledges a report when it calls pair_inspect or pair_decide. Nothing wakes Main automatically.'].join('\n'));
+          await textView(ctx, 'Pair yield', [...lines, ...(ready.length ? ['', 'Each delivered report starts a Main turn. Main reads a report with pair_inspect or pair_decide.'] : [])].join('\n'));
         };
         const showInbox = async () => {
           const inbox = await c.inbox();
@@ -409,36 +455,52 @@ export function registerMain(pi) {
         if (command && command !== 'status') throw new Error('Unknown Pair command. Use /pair for the dashboard.');
         const showStatus = async () => textView(ctx, 'Pair status', statusText(c.summary(), await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true)));
         if (command === 'status') return await showStatus();
-        const summary = c.summary(), items = dashboardItems(summary);
-        const choice = await ctx.ui.select(`Fabric Pair · ${dashboardHeader(summary)}`, items.map(item => item.label));
-        const item = items.find(entry => entry.label === choice);
-        if (!item || item.action === 'close') return;
-        const target = item.workerId || id;
-        if (item.action === 'report') return await showReport(target);
-        if (item.action === 'diff') return await showDiff(target);
-        if (item.action === 'yield') return await showYield();
-        if (item.action === 'transcript') return textView(ctx, `Worker ${target}: recent text (read-only)`, await c.transcript(target));
-        if (item.action === 'start') return await startWorker(target);
-        // With one worker, restart resolves the default after reloading, which may rename it.
-        if (item.action === 'restart') return await restartWorker(ctx, config.workers.length > 1 ? target : undefined);
-        if (item.action === 'stop') { await c.stop(target); return; }
-        if (item.action === 'pause') { await c.pause(target); return; }
-        if (item.action === 'resume') { if (await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) await c.resume(target); return; }
-        if (item.action === 'cancel') {
-          const reason = await ctx.ui.input('Cancel reason (the worker conversation is kept; file changes are not undone)', 'Cancelled by the user');
-          if (reason !== undefined) await c.cancel(target, reason.trim() || 'Cancelled by the user');
-          return;
+        /** One dashboard action. @param {import('./ui.js').DashboardItem} item @returns {Promise<void>} */
+        const runItem = async item => {
+          // Read per action: a reload or settings change inside the open dashboard replaces the configuration.
+          const current = config; assert(current, 'Pair configuration is not loaded');
+          const target = item.workerId || id;
+          if (item.action === 'report') return await showReport(target);
+          if (item.action === 'diff') return await showDiff(target);
+          if (item.action === 'yield') return await showYield();
+          if (item.action === 'transcript') return textView(ctx, `Worker ${target}: recent text (read-only)`, await c.transcript(target));
+          if (item.action === 'start') return await startWorker(target);
+          // With one worker, restart resolves the default after reloading, which may rename it.
+          if (item.action === 'restart') return await restartWorker(ctx, current.workers.length > 1 ? target : undefined);
+          if (item.action === 'stop') { if (await confirmStop(ctx, c, [target])) await c.stop(target); return; }
+          if (item.action === 'pause') { await c.pause(target); return; }
+          if (item.action === 'resume') { if (await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) await c.resume(target); return; }
+          if (item.action === 'cancel') {
+            const reason = await ctx.ui.input('Cancel reason (the worker conversation is kept; file changes are not undone)', 'Cancelled by the user');
+            if (reason !== undefined) await c.cancel(target, reason.trim() || 'Cancelled by the user');
+            return;
+          }
+          if (item.action === 'status') return await showStatus();
+          if (item.action === 'inbox') return await showInbox();
+          if (item.action === 'settings') return await openSettings(ctx);
+          if (item.action === 'reload') { await reloadConfiguration(ctx, true); return; }
+          if (item.action === 'doctor') return textView(ctx, 'Pair doctor (no inference)', JSON.stringify({ main: await probeMain(ctx), pair: c.summary(), configuration: configObservation(), requirements: current.requirements }, null, 2));
+        };
+        // The dashboard stays open: after each action it redraws from fresh state until Close or Esc.
+        for (;;) {
+          const summary = c.summary(), items = dashboardItems(summary);
+          const choice = await ctx.ui.select(`Fabric Pair · ${dashboardHeader(summary)}`, items.map(item => item.label));
+          let item = items.find(entry => entry.label === choice);
+          if (item?.action === 'more') {
+            const more = dashboardMoreItems(summary);
+            const pick = await ctx.ui.select('Fabric Pair · More', more.map(entry => entry.label));
+            item = more.find(entry => entry.label === pick);
+            if (!item || item.action === 'back') continue;
+          }
+          if (!item || item.action === 'close') return;
+          try { await runItem(item); } catch (error) { ctx.ui.notify(`Pair: ${briefError(error)}`, 'error'); }
+          if (stopped || controller !== c || deliveredToMain) return;
         }
-        if (item.action === 'status') return await showStatus();
-        if (item.action === 'inbox') return await showInbox();
-        if (item.action === 'settings') return await openSettings(ctx);
-        if (item.action === 'reload') { await reloadConfiguration(ctx, true); return; }
-        if (item.action === 'doctor') return textView(ctx, 'Pair doctor (no inference)', JSON.stringify({ main: await probeMain(ctx), pair: c.summary(), configuration: configObservation(), requirements: config.requirements }, null, 2));
       } catch (error) { ctx.ui.notify(`Pair: ${briefError(error)}`, 'error'); }
     }
   });
   pi.on('session_start', async (_event, ctx) => {
-    warming.release(); compacting = false;
+    warming.release(); compacting = false; forgetIndicator();
     const epoch = ++bindingEpoch; stopped = false;
     try {
       /** @type {Promise<PairController | null>} */
@@ -447,8 +509,8 @@ export function registerMain(pi) {
       });
       const bound = await binding; initialized = !!bound;
       if (bound) await startConfigured(bound, epoch); // deliberately outside lifecycle serial
-      // UI-only heartbeat: re-render the widget so the liveness badge counts and
-      // the working dot blinks. No model turn, no tool polling, no context cost.
+      // UI-only heartbeat: refresh the status line so the working dot blinks and
+      // stale workers are flagged. No model turn, no tool polling, no context cost.
       if (ctxRef?.mode === 'tui' && pulseTimer === undefined) pulseTimer = setInterval(pulse, 2000);
     } catch (error) { warming.release(); ctx.ui.notify(`Pair startup: ${briefError(error)}`, 'error'); }
   });
@@ -556,7 +618,7 @@ export function registerMain(pi) {
     await lifecycle.drain();
     const outcomes = [...await early, ...await Promise.allSettled([...heldBindings].map(bound => bound.close()))];
     assert(outcomes.every(outcome => outcome.status === 'fulfilled'), 'Pair shutdown failed; runtime ownership locks remain held');
-    controller = null; ctxRef?.ui.setWidget('fabric-pair', undefined);
+    controller = null; ctxRef?.ui.setWidget('fabric-pair', undefined); ctxRef?.ui.setStatus('fabric-pair', undefined); forgetIndicator();
   });
   return { getController: () => controller, initialized: () => initialized };
 }

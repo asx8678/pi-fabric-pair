@@ -136,4 +136,4 @@ Old SDKs have no fallback: never issue warm prompts, change global settings, inv
 TTLs or reset/restart work to keep a cache hot. Release preserves native policy and
 other owners. Native refresh costs are outside Pair inference-only budgets.
 Native SDK support and Pair deployment must be reviewed/installed separately;
-source edits are not live. Minimal/off indicators remain human UI only.
+source edits are not live. Minimal/compact/off indicators remain human UI only.

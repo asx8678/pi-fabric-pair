@@ -11,7 +11,11 @@ function isObject(value) { return plain(value); }
 function isArray(value) { return Array.isArray(value); }
 
 /** @typedef {'global' | 'project'} ConfigScope */
-/** @typedef {'minimal' | 'off'} Indicator */
+/** @typedef {'minimal' | 'compact' | 'off'} Indicator */
+/** Cosmetic indicator modes: minimal = status line + active-plan widget, compact = status line only. @type {readonly Indicator[]} */
+export const INDICATORS = ['minimal', 'compact', 'off'];
+/** @param {unknown} value @returns {value is Indicator} */
+export function isIndicator(value) { return INDICATORS.some(mode => mode === value); }
 /** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], extraSkills: string[], inheritExtensions: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
@@ -96,7 +100,7 @@ function assertMergedConfig(c) {
   assert(c.version === CONFIG_VERSION, `Unsupported Pair config version ${c.version}; expected ${CONFIG_VERSION}`);
   for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks', 'autoDeliverReports']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
   assert(c.cacheWarming === 'off' || c.cacheWarming === 'active', 'cacheWarming must be off or active');
-  assert(c.indicator === 'minimal' || c.indicator === 'off', 'indicator must be minimal or off');
+  assert(isIndicator(c.indicator), `indicator must be ${INDICATORS.join(', ')}`);
   assert(typeof c.maxWorkers === 'number' && Number.isInteger(c.maxWorkers) && c.maxWorkers >= 1 && c.maxWorkers <= 8, 'maxWorkers must be 1–8');
   assert(isArray(c.workers) && c.workers.length >= 1 && c.workers.length <= 8, 'Configure 1–8 workers');
   /** @type {Set<string>} */
@@ -343,7 +347,7 @@ export async function loadConfig(cwd, trusted, env = process.env) {
   overlay(config, global.layer, 'global', provenance); overlay(config, project.layer, 'project', provenance);
   const ui = await readJSON(files.ui, {});
   assert(ui !== null && ui !== undefined, 'Invalid indicator preference');
-  if (typeof ui === 'object' && 'indicator' in ui && ui.indicator !== undefined) { assert(ui.indicator === 'minimal' || ui.indicator === 'off', 'Invalid indicator preference'); config.indicator = ui.indicator; provenance.indicator = 'ui'; }
+  if (typeof ui === 'object' && 'indicator' in ui && ui.indicator !== undefined) { assert(isIndicator(ui.indicator), 'Invalid indicator preference'); config.indicator = ui.indicator; provenance.indicator = 'ui'; }
   return { config: validateConfig(config), files, scope: trusted ? 'project' : 'global', provenance, migrations: [global.migration, project.migration].filter(migration => migration !== null), layers: { global: structuredClone(global.layer), project: structuredClone(project.layer) } };
 }
 /** Values shown while editing a layer. Global editing must never copy effective
@@ -397,6 +401,6 @@ export async function saveConfig(file, config, { migration = null, layer = false
 /** Cosmetic preferences live outside the workspace so toggling them cannot stale a code checkpoint.
  * @param {string} file @param {string} indicator */
 export async function saveIndicator(file, indicator) {
-  assert(['minimal', 'off'].includes(indicator), 'Invalid indicator preference');
+  assert(isIndicator(indicator), 'Invalid indicator preference');
   await atomicJSON(file, { version: CONFIG_VERSION, indicator });
 }

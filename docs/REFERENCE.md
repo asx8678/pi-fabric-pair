@@ -20,7 +20,7 @@ Commands with an optional worker ID use the first configured worker by default.
 
 | Command | Purpose |
 | --- | --- |
-| `/pair` | Open the dashboard menu. |
+| `/pair` | Open the dashboard menu. It stays open between actions (closing once a delivery hands the turn to Main); restart, reload and doctor are under **More…**. |
 | `/pair settings` | Edit settings with scoped autosave. |
 | `/pair start [worker]` | Start the worker or reconcile staged settings when eligible. |
 | `/pair restart [worker]` | Reread settings and replace only the worker process, retaining its conversation. |
@@ -31,16 +31,36 @@ Commands with an optional worker ID use the first configured worker by default.
 | `/pair report [worker]` | Show the current report as a card: summary, question, Pair-captured files and checks, then worker claims. Read-only: it never marks the report inspected for Main. |
 | `/pair diff [worker]` | Scroll the checkpoint diff with real file names and added-file contents. Keys: ↑/↓, PgUp/PgDn, `g`/`G`, `/` search, `n`/`N`, `[`/`]` previous/next file, Esc. Read-only, like `/pair report`. |
 | `/pair inbox` | Inspect unresolved reports and recovery delivery options. |
-| `/pair yield` | Explicitly deliver retained, unacknowledged reports to Main. |
+| `/pair yield` | Explicitly deliver retained, unacknowledged reports to Main. Each delivery starts a Main turn. |
 | `/pair pause [worker]` | Abort current work and hold the assignment. |
 | `/pair resume [worker]` | Confirm continuation after inspecting interrupted work. |
 | `/pair cancel [worker] [reason]` | Cancel the assignment and retain the conversation. |
-| `/pair stop [worker\|all]` | Stop owned worker processes and retain their history. |
+| `/pair stop [worker\|all]` | Stop owned worker processes and retain their history. Asks first when this would interrupt a running task. |
 | `/pair reset-worker [worker]` | Explicitly confirm a fresh conversation; archive the old state. |
-| `/pair indicator off` / `minimal` | Hide or show Pair's widget. |
+| `/pair indicator minimal` / `compact` / `off` | Choose what Pair shows: the status line plus the current plan step (`minimal`, the default), the status line only (`compact`), or nothing (`off`). |
 
 Cancellation and stopping do not undo files already written. Normal Main shutdown
 also stops owned workers.
+
+### Status line
+
+Pair shows one line in Pi's footer, under its own status key beside other
+extensions' statuses:
+
+```text
+pair M● → W◉ step 3/5 · edit · avg 42.3 tok/s · $0.013 · cache M 99% W 100%
+pair M● ← W◐ question · step 3/5 · ◐ 1 report for Main
+pair M● W○ not started · /pair start
+```
+
+`→` means the work is with the worker; `←` means a report or question is with
+Main. The worker's dot blinks while it is active, and a `stale` marker appears
+after five minutes without activity. Speed appears only while the worker runs
+(`avg — tok/s` until measured), context pressure appears above 75%, and a worker
+that is not running names the command that continues it. No elapsed time or turn
+count is shown. In `minimal` mode a second line above the editor shows the active
+plan: the approved/total bar and the current step. The indicator is display-only
+and never affects work. `/pair status` lists every step and the full legend.
 
 Worker restart keeps Main's session, model and controller running. It waits for
 the old worker's confirmed exit before opening the same conversation in a new
@@ -51,7 +71,7 @@ no model turn. A later stop or Main shutdown cancels a pending restart.
 Restart also reloads the worker's native configuration and extensions through
 normal process startup. Pair settings can be reread separately with `/pair reload`;
 this does not reload Main's extensions or native settings. Both controls are
-available in the `/pair` dashboard.
+also under **More…** in the `/pair` dashboard.
 
 ## Report delivery, phases and branches
 
@@ -201,8 +221,8 @@ Main and Worker keep their own Pi conversations and use native context managemen
 Pair restores a small task-state packet after compaction without requesting an
 extra model turn.
 
-The widget's **Cache read (last)** row shows the last measured request for each
-role:
+The status line's **cache** reading (`cache M 99% W 100%`) and `/pair status`
+show the last measured request for each role:
 
 ```text
 cache-read share = cacheRead / (input + cacheRead + cacheWrite)
@@ -211,8 +231,9 @@ cache-read share = cacheRead / (input + cacheRead + cacheWrite)
 Zero-input report/abort events preserve the previous sample and its timestamp,
 and worker compaction or model changes keep the historical sample with its
 original timestamp; only a new worker session starts from unknown. A measured miss
-appears as `0.0%`; unknown samples are hidden in the widget and
-remain explicit in status. Shares are shown as percentages only — the underlying
+appears as `0%` (`0.0%` in `/pair status`). The status line rounds down to a whole
+percent, so a near miss never shows as 100%. Unknown samples are hidden in the
+status line and remain explicit in `/pair status`. Shares are shown as percentages only — the underlying
 timestamps stay validated and retained internally for staleness handling and are
 never displayed as an age, cache-lifetime estimate or prediction of the next hit.
 

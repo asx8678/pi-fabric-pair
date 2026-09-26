@@ -168,8 +168,8 @@ path imports them, and they grant no authority. See
 ## UI and metrics
 
 UI callbacks render controller state. They do not drive the state machine and do
-not send model heartbeats. Pair only uses its own widget key and dialogs; no
-native footer/header/editor replacement occurs. Turning the indicator off writes
+not send model heartbeats. Pair only uses its own widget key, its own footer
+status key and dialogs; no native footer/header/editor replacement occurs. Turning the indicator off writes
 a cosmetic preference outside the repository and has no dispatch side effect.
 
 Cache ratios are timestamped observations using Pi's separated usage categories.
