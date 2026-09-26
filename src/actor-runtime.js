@@ -3,7 +3,7 @@ import { constants as FS } from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { PiRpc, RpcUncertainError, isRpcRecord } from './rpc.js';
-import { checkReadiness } from './native.js';
+import { checkReadiness, meshRootFor } from './native.js';
 
 /** @typedef {import('./rpc.js').RpcRecord} RecordValue */
 /** @typedef {import('./rpc.js').RpcOptions} RpcOptions */
@@ -196,6 +196,8 @@ function validateState(value) {
 function assertProbe(value) {
   const p = record(value, 'Bridge probe'), model = record(p.model, 'Bridge model'), caps = record(p.capabilities, 'Bridge capabilities'), native = record(p.native, 'Bridge native settings');
   requireValue(p.protocol === 1 && text(p.pairVersion) && count(p.pid) && p.pid > 0 && text(p.cwd) && typeof p.trusted === 'boolean', 'Invalid bridge protocol/process');
+  // Live workers must observe the private mesh root in their own environment.
+  requireValue(text(p.meshRoot) && path.isAbsolute(p.meshRoot), 'Invalid bridge mesh root');
   for (const key of ['sessionId', 'sessionFile', 'nonce', 'workerId', 'ownerSession', 'scope']) requireValue(text(p[key]), `Invalid bridge ${key}`);
   requireValue(count(p.ownerEpoch) && p.ownerEpoch > 0 && count(p.workerGeneration) && p.workerGeneration > 0 && nonnegative(p.checkedAt), 'Invalid bridge generation/time');
   requireValue(text(model.provider) && text(model.id) && nonnegative(model.contextWindow), 'Invalid bridge model');
@@ -340,12 +342,16 @@ export class PiRuntime {
     this.#history = materialized;
     // CLI model selection may be fuzzy. An exact setter followed by exact reads is mandatory.
     await this.#send('set_model', { provider: o.spec.provider, modelId: o.spec.model }, null);
+    const modelState = await this.#readState(null);
+    const afterModel = await this.#entries(null); this.#assertCurrent(null);
+    this.#checkPrefix(materialized.entries, afterModel, modelState.thinkingLevel);
     const levels = record(await this.#send('get_available_thinking_levels', {}, null), 'Thinking levels');
     requireValue(Array.isArray(levels.levels) && levels.levels.includes(o.spec.effort), `Unsupported worker effort: ${o.spec.effort}`);
     await this.#send('set_thinking_level', { level: o.spec.effort }, null);
     const state = await this.#readState(null); this.#exactState(state);
     const afterSetters = await this.#entries(null); this.#assertCurrent(null);
-    this.#checkPrefix(this.#history.entries, afterSetters, o.spec.effort); this.#history = { header: materialized.header, entries: afterSetters };
+    requireValue(afterSetters.length - materialized.entries.length <= 4, 'Session history has an unexpected initialization suffix');
+    this.#checkPrefix(afterModel, afterSetters, o.spec.effort); this.#history = { header: materialized.header, entries: afterSetters };
     await this.#waitIdle(this.#startupTimeout(), null); // separately scoped startup dialogs must finish first
     const readiness = await this.#bridgeCommand('probe', null);
     this.#assertCurrent(null); this.#ready = true; this.#wake(); return readiness;
@@ -432,7 +438,7 @@ export class PiRuntime {
       await this.#verifyRetainedHistory(activation); this.#assertCurrent(activation);
       const finalState = await this.#readState(activation); this.#exactState(finalState);
       requireValue(this.#lifecycleIdle() && isDeepStrictEqual(state, finalState), 'State changed while verifying bridge/history');
-      checkReadiness(probe, finalState, o.config, o.spec, o.cwd);
+      checkReadiness(probe, finalState, o.config, o.spec, o.cwd, meshRootFor(o.dir));
       this.#assertCurrent(activation); this.#probe = freeze(probe); return { state, probe };
     } finally { this.#bridge = false; }
   }
@@ -476,8 +482,12 @@ export class PiRuntime {
       this.#assertCurrent(activation); this.#hold(error); throw error;
     }
   }
-  /** Exactly one work prompt; acceptance is not settlement. @param {Activation} activation @param {string} message @returns {Promise<void>} */
-  async activate(activation, message) {
+  /** Exactly one work prompt; acceptance is not settlement. The optional validity
+   * callback is a cheap synchronous fence evaluated in the RPC write guard
+   * immediately before prompt bytes leave, so navigation during the runtime's
+   * own later awaits (bridge load, state read) cannot send a stale prompt.
+   * @param {Activation} activation @param {string} message @param {() => boolean} [validity] @returns {Promise<void>} */
+  async activate(activation, message, validity) {
     try {
       this.#assertCurrent(activation); const active = this.#activation;
       requireValue(active && active.prepared && !active.attempted && typeof message === 'string' && message.length > 0 && !message.trimStart().startsWith('/'), 'Activation is not prepared or work prompt is invalid');
@@ -487,7 +497,7 @@ export class PiRuntime {
       requireValue(this.#lifecycleIdle(), 'Worker ceased to be idle before work');
       this.#promptPending = true;
       await this.#rpc.send('prompt', { message }, this.#requestTimeout(), { signal: active.controller.signal, observeAfterWrite: true, guard: () => {
-        if (!this.#current(activation) || !this.#lifecycleIdle()) return false;
+        if (!this.#current(activation) || !this.#lifecycleIdle() || (validity !== undefined && !validity())) return false;
         // Bind session activity before bytes leave. Events are NEVER correlated to prompt id.
         this.#unsettled = true; this.#idleKnown = false; this.#revision++; return true;
       } });

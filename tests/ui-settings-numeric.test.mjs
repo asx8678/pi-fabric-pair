@@ -4,9 +4,7 @@ import { settingsUI } from '../src/ui.js';
 import { DEFAULTS, validateConfig } from '../src/config.js';
 
 const fields = [
-  { row: 'Revision limit', path: ['supervision', 'maxRevisions'], title: /Revision limit/, range: /integer.*0.*20/, valid: [['0', 0], ['20', 20]], invalid: ['-1', '21', '1.5'] },
-  { row: 'Reported inference budget (USD)', path: ['limits', 'maxReportedCostUsd'], title: /Inference-only reported USD budget/, range: /finite.*greater than 0/, valid: [['0.25', 0.25], ['1.5', 1.5]], invalid: ['0', '-1'] },
-  { row: 'Preserved slot limit', path: ['maxWorkers'], title: /Preserved slot limit/, range: /integer.*1.*8/, valid: [['1', 1], ['8', 8]], invalid: ['0', '-1', '9', '1.5'] }
+  { row: 'Revision limit', path: ['supervision', 'maxRevisions'], title: /Revision limit/, range: /integer.*0.*20/, valid: [['0', 0], ['20', 20]], invalid: ['-1', '21', '1.5'] }
 ];
 const get = (config, field) => field.path.reduce((value, key) => value[key], config);
 const set = (config, field, value) => {
@@ -76,7 +74,7 @@ for (const field of fields) {
     });
   }
 
-  for (const input of [...field.invalid, 'NaN', 'Infinity', '-Infinity', 'abc', 'none', 'off'].filter(value => field.path.at(-1) !== 'maxReportedCostUsd' || !['none', 'off'].includes(value))) {
+  for (const input of [...field.invalid, 'NaN', 'Infinity', '-Infinity', 'abc', 'none', 'off']) {
     test(`${field.row}: rejects ${input} with field/range and cannot poison later autosaves`, async () => {
       const original = configured();
       const result = await run(['Advanced', field.row, 'Back', 'Enabled', 'Done'], [input], original);
@@ -93,32 +91,31 @@ for (const field of fields) {
   }
 }
 
-test('optional budget is cleared only by explicit none/off, including mixed case and whitespace', async () => {
-  for (const input of ['none', 'off', ' NONE ', ' Off ']) {
-    const original = configured();
-    const result = await run(['Advanced', 'Reported inference budget', 'Reported inference budget', 'Done'], [input, ''], original);
-    assert.deepEqual(result.notices, []);
-    assert.equal(result.saves.length, 1);
-    assert.equal(result.saves[0].limits.maxReportedCostUsd, null);
-    assert.equal(result.prompts[0].placeholder, '4.5');
-    assert.equal(result.prompts[1].placeholder, 'none');
-    assert.match(result.prompts[0].title, /none\/off disables/);
-  }
-});
-
-test('already-disabled budget stays inert for blank, whitespace, cancellation and explicit clear', async () => {
-  const result = await run(['Advanced', ...Array(5).fill('Reported inference budget'), 'Done'], ['', ' \t ', undefined, 'none', 'off'], structuredClone(DEFAULTS));
-  assert.deepEqual(result.saves, []);
-  assert.deepEqual(result.notices, []);
-});
-
-test('removed turn/duration limit rows are absent from Advanced settings', async () => {
+test('all four removed limit rows are absent from Advanced settings', async () => {
   const result = await run(['Advanced', 'Done'], []);
   const advanced = result.menus[1];
-  assert.ok(!advanced.some(row => /Turn limit per step|Task timeout/.test(row)), 'removed limit settings must not be listed');
-  assert.ok(advanced.some(row => row.startsWith('Reported inference budget')), 'cost budget remains configurable');
+  const removed = /Turn limit per step|Task timeout \(minutes\)|Reported inference budget|Preserved slot limit/;
+  assert.ok(!advanced.some(row => removed.test(row)), 'removed limit settings must not be listed');
+  assert.ok(advanced.some(row => row.startsWith('Revision limit')), 'revision limit remains configurable');
   assert.deepEqual(result.notices, []);
   assert.deepEqual(result.saves, []);
+});
+
+test('basic/Advanced navigation still works after row removal', async () => {
+  const result = await run(['Advanced…', 'Back', 'Done'], []);
+  assert.ok(result.menus[0].some(row => row.startsWith('Worker model')), 'basic menu renders');
+  assert.ok(!result.menus[0].some(row => /^Revision limit/.test(row)), 'revision limit is only listed in Advanced');
+  assert.ok(result.menus[1].some(row => row.startsWith('Revision limit')), 'Advanced menu renders');
+  assert.ok(result.menus[2].some(row => row.startsWith('Worker model')), 'Back returns to the basic menu');
+});
+
+test('hidden budget and slot settings are retained through an unrelated autosave', async () => {
+  const original = configured();
+  const result = await run(['Enabled for new work', 'Done'], []);
+  assert.deepEqual(result.saves, [{ ...original, enabled: true }]);
+  assert.equal(result.saves[0].limits.maxReportedCostUsd, original.limits.maxReportedCostUsd);
+  assert.equal(result.saves[0].maxWorkers, original.maxWorkers);
+  assert.deepEqual(result.notices, []);
 });
 
 test('invalid numeric edit retains the last successful numeric autosave', async () => {

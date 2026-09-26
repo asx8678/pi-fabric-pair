@@ -14,7 +14,8 @@ Do not enable native Prewalk while Pair owns the task.
 
 With Fabric active, locate the captured extension tools in the catalog. Their
 normal refs are `extensions.pair_status`, `extensions.pair_dispatch`,
-`extensions.pair_inspect`, `extensions.pair_decide` and `extensions.pair_cancel`.
+`extensions.pair_inspect`, `extensions.pair_decide`, `extensions.pair_cancel`
+and `extensions.pair_yield`.
 The worker role exposes `extensions.pair_report`. Use the actual discovered
 schema; there is no assumed global `pair` proxy.
 
@@ -26,7 +27,12 @@ return await tools.call({ ref: "extensions.pair_status", args: {} });
 
 For Python, use the same ref with the native dictionary/await call form. When
 Fabric is not capturing tools, ordinary Pi tool names are `pair_status`, etc.
-Do not repeatedly poll status; reports are delivered into Main automatically.
+Do not repeatedly poll status; finalized reports wait in Pair's durable inbox
+and never wake Main. Call `pair_yield` to receive every unacknowledged report
+(repeat reads return the same reports until `pair_inspect`/`pair_decide`
+acknowledge them); a report finalizing before the yielded run settles is delivered once at its settlement boundary, and later ones wait for the next
+explicit review. `/pair yield` and `/pair inbox` are the human fallbacks. After
+a branch navigation, re-inspect a pending report before deciding.
 
 ## Dispatch a bounded plan
 

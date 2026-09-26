@@ -4,12 +4,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { registerWorker } from '../src/worker.js';
+import { indicatorWidget, statusText } from '../src/ui.js';
 import { fakeWarming } from './helpers/warming.mjs';
 import { DEFAULTS } from '../src/config.js';
 import { validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope } from '../src/contracts.js';
 
 const cached = { input: 4425, cacheRead: 82048, cacheWrite: 0, output: 27 };
 const zero = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, cost: { total: 0 } };
+const plain = { fg: (_color, text) => text };
 
 async function fixture(run, { cacheWarming, sdk, ipc = false } = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-worker-cache-test-'));
@@ -116,32 +118,55 @@ test('registered Worker hook ignores unusable samples but immediately displays a
   assert.equal(f.aborts(), 0);
 }));
 
-test('Worker model, compaction success/failure and session boundaries do not resurrect retained samples', () => fixture(async f => {
-  for (const boundary of ['model', 'compact', 'compact_failed', 'session']) {
+test('Worker compaction and model-select boundaries retain the last measured sample and its original age', t => fixture(async f => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  for (const boundary of ['model', 'compact', 'compact_failed']) {
     await f.response(cached);
-    assert.ok((await f.packet()).lastUsage.totalInput > 0);
+    const measured = (await f.packet()).lastUsage;
+    assert.ok(measured.totalInput > 0);
     if (boundary === 'model') {
       f.ctx.model = { ...f.ctx.model, id: 'other-model' };
       await f.emit('model_select');
-    } else if (boundary === 'session') {
-      f.session('cache-session-2');
-      await f.emit('session_start');
-      assert.equal((await f.packet()).sessionId, 'cache-session-2');
     } else {
       await f.emit('session_before_compact');
-      assert.equal((await f.packet()).lastUsage, null);
       assert.equal((await f.packet()).compacting, true);
       await f.emit(boundary === 'compact' ? 'session_compact' : 'session_compact_failed');
       assert.equal((await f.packet()).compacting, false);
     }
-    assert.equal((await f.packet()).lastUsage, null, boundary);
+    t.mock.timers.tick(7000);
+    const retained = (await f.packet()).lastUsage;
+    assert.deepEqual(retained, measured, `${boundary}: last measured request is kept with its original observedAt`);
     for (const usage of [zero, undefined]) {
       await f.response(usage);
-      assert.equal((await f.packet()).lastUsage, null, `${boundary}: no stale resurrection`);
+      assert.deepEqual((await f.packet()).lastUsage, measured, `${boundary}: empty placeholders never erase the retained sample`);
     }
+    const s = { main: null, workers: [{ id: 'worker', status: 'working', model: 'fake/model', effort: 'low', cwd: '/project', observation: { lastUsage: retained } }],
+      ownerSession: 'owner', directory: '/state', cacheNote: 'Cache observations describe past requests. Pair does not guarantee retained provider cache.' };
+    assert.equal(indicatorWidget(s, false, plain, retained.observedAt + 5000).render(1000)[1]?.trim(), 'Cache read (last): W 94.9%', `${boundary}: widget renders the retained last-known value`);
+    assert.ok(statusText(s, null, retained.observedAt + 5000).includes('  Last observed cache read: 94.9%\n'), `${boundary}: status renders the retained last-known value`);
+    await f.response({ input: 66898, cacheRead: 0, output: 4 });
+    const miss = (await f.packet()).lastUsage;
+    assert.equal(miss.cacheRatio, 0, `${boundary}: a real measured miss immediately replaces the retained hit`);
+    await f.response(zero);
+    assert.deepEqual((await f.packet()).lastUsage, miss, `${boundary}: the miss is itself retained`);
   }
   assert.equal(f.messages.length, 1, 'only the existing compaction coordination packet');
   assert.deepEqual(f.messages[0][1], { deliverAs: 'nextTurn', triggerTurn: false });
+  assert.equal(f.aborts(), 0);
+}));
+
+test('Worker session boundaries remain isolation resets for the display sample', () => fixture(async f => {
+  await f.response(cached);
+  assert.ok((await f.packet()).lastUsage.totalInput > 0);
+  f.session('cache-session-2');
+  await f.emit('session_start');
+  assert.equal((await f.packet()).sessionId, 'cache-session-2');
+  assert.equal((await f.packet()).lastUsage, null, 'a brand-new session starts from unknown');
+  for (const usage of [zero, undefined]) {
+    await f.response(usage);
+    assert.equal((await f.packet()).lastUsage, null, 'no stale resurrection from the previous session');
+  }
+  assert.equal(f.messages.length, 0);
   assert.equal(f.aborts(), 0);
 }));
 

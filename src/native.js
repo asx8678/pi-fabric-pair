@@ -14,6 +14,17 @@ export function sourcePaths(pi) {
   const entries = [...(pi.getAllTools?.() || []), ...(pi.getCommands?.() || []).filter(c => c.source === 'extension' || c.source === undefined)];
   return [...new Set(entries.map(v => v.sourceInfo?.path).filter(/** @returns {v is string} */ v => typeof v === 'string' && path.isAbsolute(v) && /\.(?:[cm]?[jt]s)$/.test(v)))];
 }
+/** Pair-owned private Fabric mesh namespace for one retained worker directory.
+ * Derived only from the worker directory: stable across process generations and
+ * retained-session restarts, different per worker directory, never keyed by PID,
+ * nonce or worker generation. This is environment/path isolation only, not a
+ * proof of Fabric store health or an OS sandbox.
+ * @param {string} workerDir @returns {string}
+ */
+export function meshRootFor(workerDir) {
+  assert(path.isAbsolute(workerDir), 'Worker directory must be an absolute path');
+  return path.join(workerDir, 'fabric', 'mesh');
+}
 /** Package metadata is observational, not a validated version contract.
  * @param {string | undefined | null} source @param {string} expectedName @returns {Promise<unknown>}
  */
@@ -115,15 +126,17 @@ export async function probeNative(pi, ctx) {
   };
 }
 /** Exact readback after setters: an ACK alone does not establish readiness.
- * @param {{protocol: number, cwd: string, sessionId: string, sessionFile?: string, model: {provider: string, id: string} | null, thinkingLevel: string | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, native: {fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean}}} probe
+ * @param {{protocol: number, cwd: string, sessionId: string, sessionFile?: string, meshRoot?: string | null, model: {provider: string, id: string} | null, thinkingLevel: string | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, native: {fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean}}} probe
  * @param {{sessionId: string, sessionFile?: string, model?: {provider: string, id: string}, thinkingLevel?: string, autoCompactionEnabled?: boolean}} rpcState
  * @param {{requirements: {fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}}} config
  * @param {import('./contracts.js').WorkerSpec} worker
  * @param {string} cwd
+ * @param {string} expectedMeshRoot
  */
-export function checkReadiness(probe, rpcState, config, worker, cwd) {
+export function checkReadiness(probe, rpcState, config, worker, cwd, expectedMeshRoot) {
   assert(probe.protocol === 1, 'Worker bridge protocol mismatch');
   assert(probe.cwd === cwd, 'Worker is running in the wrong workspace');
+  assert(probe.meshRoot === expectedMeshRoot, 'Worker mesh environment does not match the Pair-owned private mesh root; refusing shared, inherited or unknown Fabric mesh state');
   assert(probe.sessionId === rpcState.sessionId, 'Worker bridge and RPC session identities differ');
   assert(typeof rpcState.sessionFile === 'string' && rpcState.sessionFile.length > 0, 'Worker session persistence is disabled');
   assert(probe.sessionFile === rpcState.sessionFile, 'Worker bridge and RPC session paths differ');

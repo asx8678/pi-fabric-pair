@@ -32,8 +32,18 @@ export function safeId(value, label = 'id') {
 }
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 export function plain(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
-/** @param {NodeJS.ProcessEnv} [env] */
-export function agentDir(env = process.env) { return path.resolve(env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent')); }
+/** Matches the public native PI_CODING_AGENT_DIR semantics: `~` expands to the
+ * home directory and `~/...` (or `~\\...` on Windows) joins it; every other
+ * value resolves as before. Profiles are never touched.
+ * @param {NodeJS.ProcessEnv} [env] */
+export function agentDir(env = process.env) {
+  const raw = env.PI_CODING_AGENT_DIR;
+  const base = !raw ? path.join(os.homedir(), '.pi', 'agent')
+    : raw === '~' ? os.homedir()
+    : raw.startsWith('~/') || (process.platform === 'win32' && raw.startsWith('~\\')) ? path.join(os.homedir(), raw.slice(2))
+    : raw;
+  return path.resolve(base);
+}
 /** @param {unknown} value @param {number} [max] */
 export function cleanText(value, max = 4000) {
   return String(value ?? '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').slice(0, max);

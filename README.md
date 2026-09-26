@@ -103,9 +103,16 @@ human before each approval requires that explicit instruction.
 | `/pair` | Open the dashboard. |
 | `/pair settings` | Choose the worker, review policy, and limits. |
 | `/pair status` | See activity, progress, and observed cache usage. |
+| `/pair reload` | Reload saved Pair settings while Main stays open. |
+| `/pair restart worker` | Reload settings and restart only the worker, keeping its conversation. |
 | `/pair inbox` | Inspect retained reports. |
+| `/pair yield` | Explicitly deliver retained, unacknowledged reports to Main. |
 | `/pair cancel worker` | Cancel the task and keep the conversation. |
 | `/pair stop worker` | Stop the worker process and retain its history. |
+
+Restart keeps Main's model and session open. Interrupted work waits for explicit
+resume; staged model changes require finishing or cancelling the current task.
+Invalid configuration leaves the last valid settings in use.
 
 Cancel and stop do not undo file changes. Normal Main shutdown also stops owned
 workers. The [reference](docs/REFERENCE.md) covers pause, resume, staged settings,
@@ -119,8 +126,14 @@ checkpoint invalidate approval.
 ![Worker implements and reports, the controller captures evidence, and Main inspects and approves or requests a revision in the same session.](docs/assets/pi-fabric-pair-review-loop.svg)
 
 After reporting, the worker waits. The controller lets execution settle, runs
-configured checks, and captures the source evidence. Main inspects the checkpoint
-and approves, revises, or cancels. Revisions continue in the same worker session;
+configured checks, and captures the source evidence. Reports wait in Pair's
+durable inbox — they never wake or interrupt Main. Main calls `pair_yield` to
+receive every unacknowledged report (repeat reads return the same reports until
+inspected or decided); a yield that found nothing arms one settlement-boundary
+delivery for a late result, and anything later stays retained until the next
+explicit review. Humans can always use `/pair yield` or `/pair inbox`. After a
+branch navigation, Main re-inspects a pending report before deciding. Main
+inspects the checkpoint and approves, revises, or cancels. Revisions continue in the same worker session;
 final approval completes the task and retains that session.
 
 Add project checks under **Settings > Advanced > Verification commands**.

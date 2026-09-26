@@ -6,7 +6,7 @@ import { PiRpc, isRpcRecord } from './rpc.js';
 import { PiRuntime } from './actor-runtime.js';
 import { Evidence, repositoryRoot, verifyConfigured } from './evidence.js';
 import { validateConfig } from './config.js';
-import { preflightNativeProfile } from './native.js';
+import { meshRootFor, preflightNativeProfile } from './native.js';
 import { validateDecision, validateDispatch, validateReport } from './schema.js';
 import { incrementCounter, migrateStoredState, STATE_VERSION, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateStoredState } from './contracts.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
@@ -24,7 +24,7 @@ import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonic
  */
 /** @typedef {import('./actor-runtime.js').RuntimeConfig & {version: number, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: string, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, limits: import('./contracts.js').TaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: {maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}, mainReadOnlyDuringTasks: boolean, runtime: {command: string, commandArgs: string[], inheritExtensions: boolean, extraExtensions: string[], extraSkills: string[]}}} PairConfig */
 /** @typedef {{reportId: string, workerId: string, taskId: string, ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} NoticeDetails */
-/** @typedef {{notifyUser?: (message: string, level: 'info'|'warning'|'error') => void, notifyMain?: (message: string, details: NoticeDetails) => void | Promise<void>, promptUser?: import('./actor-runtime.js').RuntimeOptions['promptUser']}} ControllerCallbacks */
+/** @typedef {{notifyUser?: (message: string, level: 'info'|'warning'|'error') => void, notifyMain?: (message: string, details: NoticeDetails) => void | Promise<void>, reportReady?: (notice: import('./contracts.js').StoredNoticeV1) => void, promptUser?: import('./actor-runtime.js').RuntimeOptions['promptUser']}} ControllerCallbacks */
 const TERMINAL = new Set(['completed', 'cancelled']);
 const ENTRY = fileURLToPath(new URL('./extension.js', import.meta.url));
 /** Derived per-step display state for summaries; never persisted and never a lease.
@@ -57,12 +57,17 @@ export class PairController extends EventEmitter {
     this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory;
     this.storageDir = storageDir; this.dir = storageDir || '';
     /** @type {Map<string, PiRuntime>} */ this.handles = new Map();
+    /** Worker-only replacements share one operation; stop/close can still revoke it. @type {Map<string, Promise<WorkerRecord>>} */ this.restarts = new Map();
     /** @type {WeakMap<PiRuntime, RuntimeData>} */ this.runtimeData = new WeakMap();
     /** Synchronous cancellation/intent fences, never runtime lifecycle mirrors. @type {Map<string, number>} */ this.intents = new Map();
     /** @type {Promise<void> | null} */ this.scanPromise = null;
     /** @type {Promise<void> | null} */ this.closePromise = null;
     /** Coordinated fallback containment publications, not a second lifecycle owner. @type {Set<Promise<void>>} */ this.containmentWork = new Set();
     this.serial = new Serial(); this.persistSerial = new Serial(); this.operationAbort = new AbortController(); this.closing = false; this.scanQueued = false; this.scanAgain = false; this.mainObservation = null;
+    /** Volatile logical-activity epoch: bumped on every observed new Main work
+     * (input, non-Pair tool admission, new agent run). Never authority; it only
+     * stales outstanding yields/offers, including consumed ones. */
+    this.activity = 0;
   }
   async init() {
     assert(this.ownerSession && this.ownerSession !== 'undefined', 'A real Main session identity is required');
@@ -81,7 +86,12 @@ export class PairController extends EventEmitter {
         record.status = 'error';
         record.error = 'EXIT_UNCONFIRMED: prior worker generation may still be live. All worker launches and reset are held; explicit offline reconciliation is required.';
       }
-      if (activeTask(record) && ['running', 'awaiting_settle', 'paused'].includes(record.task.status)) {
+      // A paused question/review/blocker is a retained decision wait, not
+      // in-flight implementation: it survives controller replacement as a hold
+      // (with its finalized report and notice) so an explicit resume — not a
+      // fresh lease — restores it. Everything else is interrupted as before.
+      const waitingHold = record.task?.status === 'paused' && ['question', 'review', 'blocked'].includes(String(record.task.previousStatus));
+      if (!waitingHold && activeTask(record) && ['running', 'awaiting_settle', 'paused'].includes(record.task.status)) {
         record.task.status = 'interrupted'; record.task.interruption = 'Controller restarted. Inspect retained reports and changes; no automatic replay is authorized.';
       }
     }
@@ -116,7 +126,10 @@ export class PairController extends EventEmitter {
   }
   summary() {
     return { ownerSession: this.ownerSession, ownerEpoch: this.state?.ownerEpoch || null, directory: this.dir, enabled: this.config.enabled, cacheWarming: this.config.cacheWarming, settingsPending: !!this.pendingConfig,
-      main: this.mainObservation, workers: this.config.workers.map(spec => {
+      main: this.mainObservation,
+      mainPhase: this.state?.mainPhase ? { status: this.state.mainPhase.status, since: this.state.mainPhase.since, ownerSession: this.state.mainPhase.ownerSession, ownerEpoch: this.state.mainPhase.ownerEpoch, revision: this.state.mainPhase.revision ?? 0, current: !!this.phaseEligible() } : null,
+      waitingReports: this.recoveryNotices().length,
+      workers: this.config.workers.map(spec => {
         const r = this.state?.workers?.[spec.id], h = this.handles.get(spec.id), task = r?.task || null;
         return { id: spec.id, model: `${spec.provider}/${spec.model}`, effort: spec.effort, readOnly: spec.readOnly,
           status: h?.permission ? 'permission' : r?.status || 'not_started', pid: h?.pid || null,
@@ -170,7 +183,7 @@ export class PairController extends EventEmitter {
     }
   }
 
-  /** Explicit /pair start boundary only. Never change an active assignment or
+  /** Explicit /pair start or restart boundary only. Never change an active assignment or
    * turn a report/unknown exit into permission to replay work. */
   async reconcileConfig() {
     const pending = this.pendingConfig;
@@ -220,9 +233,10 @@ export class PairController extends EventEmitter {
     return this.state.workers[launch.id] === launch.record && this.intent(launch.id) === launch.intent && this.handles.get(launch.id) === launch.runtime && launch.configHash === this.configHash() && this.runtimeCurrent(launch.runtime, null);
   }
   /** Reservation only: never starts a runtime or waits for RPC. Caller holds serial.
-   * @param {string} id @param {boolean} [continuing] @returns {Promise<Launch>}
+   * @param {string} id @param {boolean} [continuing] @param {boolean} [restarting] @returns {Promise<Launch>}
    */
-  async reserveStart(id, continuing = false) {
+  async reserveStart(id, continuing = false, restarting = false) {
+    assert(restarting || !this.restarts.has(id), 'Worker restart is in progress; wait before starting or assigning work');
     assert(!this.closing && (this.config.enabled || (continuing && activeTask(this.state.workers[id]))), 'Pair is closing or disabled');
     assert(continuing || !this.pendingConfig, 'Saved runtime settings are pending. Finish/cancel the task, then run /pair start before new work.');
     const intent = this.intent(id), config = clone(this.config), configHash = this.configHash(config), spec = clone(this.workerSpec(id));
@@ -267,7 +281,9 @@ export class PairController extends EventEmitter {
       assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked before runtime construction');
       await this.writeAuthority(id, 'paused');
       assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked before runtime construction');
-      await Promise.all(['sessions', 'inbox', 'archive'].map(name => mkdirPrivate(path.join(dir, name))));
+      // The private Fabric mesh namespace is created before spawn; existing
+      // shared mesh state is never copied or migrated into it.
+      await Promise.all(['sessions', 'inbox', 'archive', 'fabric/mesh'].map(name => mkdirPrivate(path.join(dir, name))));
       assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked before runtime construction');
       const nonce = uid('instance');
       const args = [...config.runtime.commandArgs, '--mode', 'rpc', '--provider', spec.provider, '--model', spec.model, '--session-dir', path.join(dir, 'sessions'), '--session', r.sessionFile];
@@ -275,7 +291,9 @@ export class PairController extends EventEmitter {
       for (const extension of new Set([...(config.runtime.inheritExtensions ? this.sources : []), ...config.runtime.extraExtensions, ENTRY])) args.push('-e', extension);
       for (const skill of config.runtime.extraSkills) args.push('--skill', skill);
       const runtime = new PiRuntime({ rpcOptions: { command: config.runtime.command, args, cwd, requestTimeoutMs: config.runtime.requestTimeoutMs, shutdownTimeoutMs: config.runtime.shutdownTimeoutMs,
-        env: { PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: id, PI_FABRIC_PAIR_WORKER_DIR: dir, PI_FABRIC_PAIR_OWNER: this.ownerSession, PI_FABRIC_PAIR_OWNER_EPOCH: String(this.state.ownerEpoch), PI_FABRIC_PAIR_WORKER_GENERATION: String(r.workerGeneration), PI_FABRIC_PAIR_NONCE: nonce, PI_FABRIC_PAIR_PARENT_PID: String(process.pid) } },
+        // Explicit child environment overrides any inherited PI_FABRIC_MESH_ROOT;
+        // Main's process.env and PI_FABRIC_PROJECT_ROOT are never mutated here.
+        env: { PI_FABRIC_MESH_ROOT: meshRootFor(dir), PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: id, PI_FABRIC_PAIR_WORKER_DIR: dir, PI_FABRIC_PAIR_OWNER: this.ownerSession, PI_FABRIC_PAIR_OWNER_EPOCH: String(this.state.ownerEpoch), PI_FABRIC_PAIR_WORKER_GENERATION: String(r.workerGeneration), PI_FABRIC_PAIR_NONCE: nonce, PI_FABRIC_PAIR_PARENT_PID: String(process.pid) } },
         rpcFactory: this.rpcFactory, ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch, workerId: id, workerGeneration: r.workerGeneration, nonce, dir, cwd,
         sessionFile: r.sessionFile, sessionId: r.sessionId, freshSession, config, spec, entryPath: ENTRY,
         promptUser: (workerId, event, options) => this.callbacks.promptUser?.(workerId, event, options) || Promise.resolve({ cancelled: true }),
@@ -325,6 +343,7 @@ export class PairController extends EventEmitter {
   }
   /** Safe config rebind closes the old generation; no hot setters. @param {string} id */
   async start(id) {
+    assert(!this.restarts.has(id), 'Worker restart is in progress');
     await this.reconcileConfig();
     const old = await this.transaction(() => {
       const h = this.handles.get(id), r = this.state.workers[id];
@@ -344,6 +363,38 @@ export class PairController extends EventEmitter {
     }
     const launch = await this.transaction(() => this.reserveStart(id));
     return this.startReserved(launch);
+  }
+  /** Replace only the worker process, retaining history and task evidence. No
+   * activation is granted: interrupted work requires an explicit resume.
+   * @param {string} id @returns {Promise<WorkerRecord>}
+   */
+  async restart(id) {
+    const existing = this.restarts.get(id);
+    if (existing) return existing;
+    safeId(id, 'workerId');
+    const requested = this.pendingConfig || this.config;
+    const spec = requested.workers.find(worker => worker.id === id);
+    assert(!this.closing && requested.enabled, 'Pair is closing or disabled');
+    assert(spec, `Unknown worker ${id}. Configure it in /pair settings.`);
+    assert(spec.provider && spec.model, 'Choose the worker provider/model in /pair settings first');
+    assert(!this.pendingConfig || !Object.values(this.state.workers).some(activeTask), 'Saved runtime settings are pending until all tasks finish or are cancelled. Existing authorization is unchanged.');
+    const record = this.state.workers[id];
+    assert(!record || (spec.cwd || this.cwd) === (record.bound.cwd || this.cwd), 'Changing workspace requires an explicit reset after the task is finished/cancelled');
+    this.revoke(id, 'Worker restart requested');
+    const intent = this.intent(id);
+    const replacement = (async () => {
+      await this.stopReserved(id, intent);
+      assert(!this.closing && this.intent(id) === intent, 'Worker restart was superseded');
+      await this.reconcileConfig();
+      const launch = await this.transaction(() => {
+        assert(!this.closing && this.intent(id) === intent && !this.handles.has(id), 'Worker restart was superseded');
+        return this.reserveStart(id, false, true);
+      });
+      return this.startReserved(launch);
+    })();
+    this.restarts.set(id, replacement);
+    try { return await replacement; }
+    finally { this.restarts.delete(id); }
   }
   /** @param {string} id @param {import('./contracts.js').AuthorityPhase} phase */
   async writeAuthority(id, phase) {
@@ -380,6 +431,16 @@ export class PairController extends EventEmitter {
         startedAt: Date.now(), updatedAt: Date.now(), revisions: 0, turns: 0, usage: null, baseSnapshotRef: path.join(this.dir, 'tasks', taskId, 'base-pending.json'), pendingReport: null, report: null, decisions: {}, lastDecision: null };
       r.task = task;
       this.state.requests[input.requestId] = { hash, taskId, workerId: r.id, acceptedAt: Date.now(), status: task.status };
+      // Retained read-only work-order scope for post-compaction restoration on the
+      // worker: a bounded copy of the originally granted task scope (objective and
+      // context), identity-bound to taskId+planRevision. It is a reference for
+      // restoration only — never a new grant, and never an authority change.
+      await mkdirPrivate(this.workerDir(input.workerId));
+      await atomicJSON(path.join(this.workerDir(input.workerId), 'work-order.json'),
+        { version: 1, taskId, planRevision: task.planRevision, objective: task.objective, context: bounded(task.context, 24000), constraints: task.constraints, writtenAt: Date.now() });
+      // Dispatch leaves Main's explicit logical phase open: finalized reports stay
+      // in the durable inbox without automatically waking this Main model.
+      this.setPhase('open');
       const work = this.reserveWork(launch, task); // synchronous, before first await after publishing task identity
       await this.persist();
       return { work };
@@ -435,13 +496,26 @@ export class PairController extends EventEmitter {
     });
     if (control) await this.contain(control, 'Activation failed', true);
   }
-  /** Exactly one runtime activation, outside serial. @param {Work} work @param {string} message @returns {Promise<boolean>} */
-  async activate(work, message) {
+  /** Exactly one runtime activation, outside serial. The optional guard runs AFTER
+   * the final readiness wait (prepareActivation) and immediately before renewed
+   * running authority is written, so the caller can revalidate source/context
+   * against everything the wait may have changed. The optional branch carries a
+   * cheap SYNCHRONOUS fence through transaction admission, running-intent
+   * persistence, authority publication and the runtime pre-prompt write guard:
+   * navigation observed at any point holds the renewal without sending work.
+   * @param {Work} work @param {string} message
+   * @param {{guard?: () => Promise<void>, branch?: number}} [options] @returns {Promise<boolean>} */
+  async activate(work, message, options = {}) {
+    const { guard, branch } = options;
+    const branchCurrent = () => branch === undefined || (this.state.branch ?? 0) === branch;
+    const stale = () => new Error('BRANCH_STALE: the conversation branch changed during activation; renewed running authority is held and no work was sent. Reconcile on the current branch before renewing.');
     try {
       this.requireWork(work);
       const ready = await work.runtime.prepareActivation(work.activation); this.requireWork(work);
+      if (guard) { await guard(); this.requireWork(work); }
       const granted = await this.transaction(async () => {
         this.requireWork(work);
+        if (!branchCurrent()) throw stale();
         const t = work.task, r = work.record;
         this.consumeObservations(work.id, r, work.runtime);
         const reached = limitExceeded(t, t.limits);
@@ -454,12 +528,14 @@ export class PairController extends EventEmitter {
         // Intent is persisted before the authorizing file. No inference until both succeed.
         t.status = 'running'; t.updatedAt = Date.now(); t.dispatchSettleSequence = work.runtime.settledSequence; r.status = 'working';
         await this.persist(); this.requireWork(work);
+        if (!branchCurrent()) throw stale();
         await this.writeAuthority(work.id, 'running'); this.requireWork(work);
         return true;
       });
       if (!granted) return false;
       this.requireWork(work);
-      await work.runtime.activate(work.activation, message);
+      if (!branchCurrent()) throw stale();
+      await work.runtime.activate(work.activation, message, branch === undefined ? undefined : branchCurrent);
       await this.transaction(async () => {
         if (!this.workCurrent(work)) return; // report/stop/cancel may legitimately precede ACK
         work.record.lastExchange = { direction: 'main→worker', kind: 'instruction accepted', at: Date.now() };
@@ -741,7 +817,12 @@ export class PairController extends EventEmitter {
       const r = control.record, evidence = this.evidence, checksDir = path.join(this.dir, 'checks', t.id, incoming.reportId);
       const verificationSnapshot = await evidence.capture(r.repoRoot); check();
       const signal = AbortSignal.any([this.operationAbort.signal, abort.signal]);
-      const verification = ['checkpoint', 'final_review'].includes(incoming.payload.kind) ? await verifyConfigured(t.verification, r.repoRoot, checksDir, signal) : [];
+      // Each configured check is bound to the checkpointed source identity; drift
+      // between or during checks (including mutation-then-restoration) fails the
+      // whole verification instead of manufacturing evidence for another source.
+      const verification = ['checkpoint', 'final_review'].includes(incoming.payload.kind)
+        ? await verifyConfigured(t.verification, r.repoRoot, checksDir, signal, { expectedHash: verificationSnapshot.hash, captureSource: async () => (await evidence.capture(r.repoRoot)).hash })
+        : [];
       check();
       const snapshot = await evidence.capture(r.repoRoot); check();
       assert(snapshot.hash === verificationSnapshot.hash, 'Verification changed the workspace; review changes and submit a fresh report.');
@@ -761,7 +842,12 @@ export class PairController extends EventEmitter {
         const notice = { reportId: incoming.reportId, workerId: id, taskId: t.id, ownerEpoch: this.state.ownerEpoch, workerGeneration: r.workerGeneration, attemptId: t.attemptId, deliveryOperationId: uid('delivery'), status: 'pending', createdAt: Date.now() };
         this.state.notices[incoming.reportId] = notice; await this.persist(); return notice;
       });
-      if (!this.closing && this.controlCurrent(control)) await this.deliverNotice(notice);
+      // No automatic Main wakeup: the finalized report stays in the durable inbox
+      // for explicit pair_yield/boundary/manual delivery. Streaming, idle and
+      // settlement observations alone never change the Main phase.
+      if (!this.closing && this.controlCurrent(control)) {
+        try { this.callbacks.reportReady?.(notice); } catch (error) { console.error(`Pair report-ready notification failed: ${briefError(error)}`); }
+      }
     } catch (error) {
       const held = await this.transaction(async () => current() ? this.interrupt(id, `Checkpoint could not be frozen: ${briefError(error)}`) : null);
       if (held) { await this.contain(held, 'Checkpoint failure', true); this.notifyUser(`Pair: ${briefError(error)}`, 'error'); }
@@ -779,7 +865,7 @@ export class PairController extends EventEmitter {
   async deliverNotice(notice) {
     const delivery = await this.transaction(async () => {
       const r = this.record(notice.workerId);
-      if (this.closing || r.task?.report?.reportId !== notice.reportId || !['pending', 'delivery_failed'].includes(notice.status)) return null;
+      if (this.closing || r.task?.report?.reportId !== notice.reportId || !['pending', 'offered', 'delivered', 'delivery_failed'].includes(notice.status)) return null;
       const control = this.control(r.id);
       notice.status = 'delivery_pending'; await this.persist();
       if (!this.controlCurrent(control) || this.closing) return null;
@@ -795,7 +881,7 @@ export class PairController extends EventEmitter {
     await this.transaction(async () => {
       if (!this.controlCurrent(delivery.control) || notice.status !== 'delivery_pending') return;
       if (failure) { notice.status = 'delivery_failed'; notice.error = briefError(failure); this.notifyUser('A report is saved but could not reach Main. Use /pair inbox.', 'warning'); }
-      else { notice.status = 'delivered'; notice.deliveredAt = Date.now(); }
+      else { notice.status = 'offered'; notice.offeredAt = Date.now(); notice.channel = 'manual'; }
       await this.persist();
     });
   }
@@ -809,6 +895,197 @@ export class PairController extends EventEmitter {
     if (redeliver) for (const notice of notices) await this.deliverNotice(notice);
     return notices;
   }
+  /** Explicit, nonauthorizing Main phase marker; eligible only for the exact
+   * binding that recorded it (reload/rebind raises ownerEpoch and leaves the
+   * retained marker readable but inert). A missing marker never implies yield.
+   * @returns {import('./contracts.js').StoredMainPhaseV1 | null} */
+  phaseEligible() {
+    const phase = this.state.mainPhase;
+    return phase && phase.ownerSession === this.ownerSession && phase.ownerEpoch === this.state.ownerEpoch ? phase : null;
+  }
+  /** Durable phase transition; never a lease, grant or worker authority. The
+   * revision is a real monotonic phase token (ownerEpoch alone is not one);
+   * runToken binds a yield to the exact Main agent run that recorded it, and
+   * armed records whether an empty yield may receive ONE future automatic
+   * boundary offer — a yield that already returned results consumes it.
+   * @param {'open' | 'yielded'} status @param {string | null} [runToken] @param {boolean} [armed] @param {number} [activity] */
+  setPhase(status, runToken = null, armed = false, activity = this.activity) {
+    const previous = this.state.mainPhase;
+    this.state.mainPhase = { status, since: Date.now(), ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch,
+      revision: incrementCounter(previous?.revision ?? 0, 'state.mainPhase.revision'), runToken: status === 'yielded' ? runToken : null,
+      armed: status === 'yielded' ? armed === true : false, activity };
+  }
+  /** Exact permit snapshot used to fence one delivery cycle across awaits. */
+  phasePermit() {
+    const phase = this.state.mainPhase;
+    return phase ? { status: phase.status, revision: phase.revision ?? 0, runToken: phase.runToken ?? null, armed: phase.armed === true, activity: phase.activity ?? 0, ownerSession: phase.ownerSession, ownerEpoch: phase.ownerEpoch } : null;
+  }
+  /** Observation-only logical-activity epoch bump plus yield revocation. New
+   * user input (including same-run steering/follow-ups), non-Pair tool
+   * admission or a new agent run is new Main work and supersedes any
+   * outstanding yield or in-flight offer — even one whose phase was already
+   * consumed open. Never blocks, consumes or transforms input; queues are
+   * untouched. @returns {boolean} whether a yield was revoked */
+  noteActivity() { this.activity++; return this.revokeYield(); }
+  /** Observation-only branch change: tree navigation durably bumps the persisted
+   * conversation-branch counter (normal turns, settlement and compaction never
+   * bump it), invalidates unused yields/offers, and makes decisions resting on a
+   * previous branch's inspection stale until the current context re-inspects.
+   * Never cancels, blocks or rewrites navigation. @returns {boolean} */
+  noteBranchChange() {
+    this.state.branch = incrementCounter(this.state.branch ?? 0, 'state.branch');
+    const revoked = this.noteActivity();
+    this.persist().catch(error => this.notifyUser(`Pair branch persistence failed: ${briefError(error)}`, 'error'));
+    return revoked;
+  }
+  /** Observation-only revocation: new accepted Main work reopens the phase
+   * synchronously in memory. Never consumes or transforms user input and never
+   * touches queues, sessions or the agent loop. @returns {boolean} */
+  revokeYield() {
+    const phase = this.phaseEligible();
+    if (!phase || phase.status !== 'yielded') return false;
+    this.setPhase('open');
+    this.persist().catch(error => this.notifyUser(`Pair phase persistence failed: ${briefError(error)}`, 'error'));
+    return true;
+  }
+  /** Every visible explicit-recovery obligation: retained reports no channel
+   * has confirmed acknowledged — pending, offered, legacy delivered, failed or
+   * in-flight manual deliveries, without observedAt. Legacy-uncertain receipts
+   * are never silently hidden from status, and are never auto-delivered.
+   * @returns {import('./contracts.js').StoredNoticeV1[]} */
+  recoveryNotices() {
+    return Object.values(this.state.notices).filter(n => !['resolved', 'superseded'].includes(n.status) && n.observedAt === undefined);
+  }
+  /** Explicitly retrievable reports (pair_yield//pair yield): recovery
+   * obligations excluding in-flight manual deliveries. Repeat reads return
+   * the same stable IDs; idempotence is not destructive read-once semantics.
+   * @returns {import('./contracts.js').StoredNoticeV1[]} */
+  retrievableNotices() {
+    return this.recoveryNotices().filter(n => n.status !== 'delivery_pending');
+  }
+  /** Automatic boundary-offer eligibility ONLY: reports never offered by any
+   * channel. Explicitly offered/legacy-uncertain receipts stay visible and
+   * retrievable, but never automatically replay merely because they are
+   * unacknowledged or a prior hook dropped them.
+   * @returns {import('./contracts.js').StoredNoticeV1[]} */
+  autoOfferNotices() {
+    return Object.values(this.state.notices).filter(n => n.status === 'pending' && n.observedAt === undefined);
+  }
+  /** Single-unresolved-report invariant, mechanically enforced at retrieval:
+   * V1 allows one unresolved assignment, so more than one recoverable report
+   * is an unsupported profile, never an unbounded batch to stream. */
+  assertSingleUnacknowledged() {
+    assert(this.retrievableNotices().length <= 1, 'UNSUPPORTED_PROFILE: Fabric Pair V1 allows one unresolved report; acknowledge or resolve the retained report first.');
+  }
+  /** Compact, non-authoritative review summary for explicit Main retrieval.
+   * Preserves the exact bounded question text, step identity and completion
+   * semantics, and worker-reported decision items, so distinct questions are
+   * never lost to compaction; full evidence stays behind pair_inspect.
+   * @param {WorkerRecord} r */
+  compactReport(r) {
+    const t = r.task, report = t?.report; assert(t && report, 'No finalized report to summarize');
+    return { ownerEpoch: this.state.ownerEpoch, workerGeneration: r.workerGeneration, attemptId: t.attemptId, workerId: r.id, taskId: t.id, planRevision: t.planRevision, reportId: report.reportId,
+      kind: report.payload.kind, summary: report.payload.summary, stepId: report.payload.stepId, stepComplete: report.payload.stepComplete ?? null,
+      ...(report.payload.question !== undefined ? { question: bounded(report.payload.question, 4000) } : {}),
+      ...(Array.isArray(report.payload.decisions) && report.payload.decisions.length ? { workerDecisions: report.payload.decisions } : {}),
+      checkpointHash: report.checkpoint.checkpointHash,
+      changedFiles: report.checkpoint.changed.slice(0, 20), changedFileCount: report.checkpoint.changed.length,
+      independentlyRunChecks: report.checkpoint.verification.map(v => ({ name: v.name, passed: v.passed })),
+      evidenceDirectory: report.checkpoint.path, inspectedAt: report.inspectedAt || null, workerBudgetNotice: limitExceeded(t, t.limits),
+      requirement: 'Inspect the immutable checkpoint with pair_inspect before approval (this acknowledges receipt); reply with pair_decide using these exact IDs. This summary is not evidence by itself.' };
+  }
+  /** Explicit Main yield (pair_yield): returns every unacknowledged report in
+   * the tool result — repeat reads return the same stable report IDs; offers are
+   * receipts of delivery attempts, never confirmed comprehension — and records
+   * the yielded phase bound to the current Main agent run.
+   * @param {string | null} [runToken] Identity of the yielding Main agent run. */
+  async yieldMain(runToken = null) {
+    // Capture the logical activity epoch BEFORE any await: user input admitted
+    // after this call — even before the queued yield transaction executes —
+    // supersedes the stale request; the permit never adopts the newer epoch.
+    const activity = this.activity;
+    return this.transaction(async () => {
+      assert(!this.closing, 'Pair is closing');
+      this.assertSingleUnacknowledged();
+      const ready = this.retrievableNotices();
+      for (const notice of ready) { notice.status = 'offered'; notice.offeredAt = Date.now(); notice.channel = 'tool-result'; }
+      // A yield that returned results consumes the automatic delivery permission
+      // for this cycle; only an empty yield arms one future boundary offer.
+      this.setPhase('yielded', runToken, ready.length === 0, activity);
+      await this.persist();
+      return { phase: 'yielded', reports: ready.map(notice => this.compactReport(this.record(notice.workerId))) };
+    });
+  }
+  /** Human-commanded yield (/pair yield): record the explicit yield, then
+   * re-offer unacknowledged reports through the manual sendMessage channel
+   * (fire-and-forget; never a confirmed delivery).
+   * @returns {Promise<import('./contracts.js').StoredNoticeV1[]>} */
+  async yieldManual() {
+    const ready = await this.transaction(async () => {
+      assert(!this.closing, 'Pair is closing');
+      this.assertSingleUnacknowledged();
+      const ready = this.retrievableNotices();
+      this.setPhase('yielded', null, ready.length === 0);
+      await this.persist();
+      return ready;
+    });
+    for (const notice of ready) await this.deliverNotice(notice);
+    return ready;
+  }
+  /** One bounded settlement-boundary offer, eligible only for the exact permit
+   * of an explicit yield recorded by this binding and this agent run. Reopens
+   * the phase (new revision) so one armed empty yield buys one delivery cycle;
+   * the caller verifies the consumed-offer token after the persist await. A
+   * dropped offer stays offered-but-unacknowledged and explicitly retrievable.
+   * @param {{status: string, revision: number, runToken: string | null, armed: boolean, activity: number, ownerSession: string, ownerEpoch: number} | null} permit
+   * @returns {Promise<{drafts: {message: string, details: NoticeDetails}[], token: {consumedRevision: number, activity: number, runToken: string, ownerEpoch: number, reportIds: string[]}} | null>} */
+  async boundaryOffer(permit) {
+    return this.transaction(async () => {
+      assert(!this.closing, 'Pair is closing');
+      const phase = this.phaseEligible();
+      if (!phase || phase.status !== 'yielded' || permit === null) return null;
+      // Only an armed empty yield may receive one automatic offer; a yield that
+      // already returned results consumed the delivery permission for this cycle.
+      if (!permit.armed || phase.armed !== true) return null;
+      // The permit must still name the CURRENT logical activity epoch: input or
+      // non-Pair work admitted after the yield (even before its transaction ran)
+      // supersedes the stale request.
+      if (permit.activity !== this.activity) return null;
+      if (permit.status !== 'yielded' || permit.revision !== (phase.revision ?? 0) || permit.runToken === null || permit.runToken !== (phase.runToken ?? null)
+        || permit.activity !== (phase.activity ?? 0) || permit.ownerSession !== phase.ownerSession || permit.ownerEpoch !== phase.ownerEpoch) return null;
+      const ready = this.autoOfferNotices();
+      if (!ready.length) return null;
+      this.assertSingleUnacknowledged();
+      const drafts = ready.map(notice => {
+        const r = this.record(notice.workerId);
+        assert(r.task?.report?.reportId === notice.reportId, 'Notice no longer matches its retained report');
+        notice.status = 'offered'; notice.offeredAt = Date.now(); notice.channel = 'boundary';
+        return { message: this.reportMessage(r), details: { reportId: notice.reportId, workerId: r.id, taskId: r.task.id, ownerEpoch: notice.ownerEpoch, workerGeneration: notice.workerGeneration, attemptId: notice.attemptId, deliveryOperationId: notice.deliveryOperationId } };
+      });
+      this.setPhase('open');
+      const token = { consumedRevision: this.state.mainPhase?.revision ?? 0, activity: this.activity, runToken: permit.runToken, ownerEpoch: this.state.ownerEpoch, reportIds: ready.map(notice => notice.reportId) };
+      await this.persist();
+      return { drafts, token };
+    });
+  }
+  /** Exact consumed-offer verification immediately before returning drafts: the
+   * logical activity epoch, run identity, binding epoch, enabled config, phase
+   * revision and every correlated report must still be current. New input or
+   * non-Pair work, cancellation/resolution, disable, close/rebind or any phase
+   * change stales the offer; a dropped offer stays retrievable, never replayed.
+   * @param {{consumedRevision: number, activity: number, runToken: string, ownerEpoch: number, reportIds: string[]} | null} token
+   * @param {string} runToken @returns {boolean} */
+  offerCurrent(token, runToken) {
+    if (this.closing || !this.config.enabled || !token) return false;
+    if (this.state.ownerEpoch !== token.ownerEpoch || this.activity !== token.activity || token.runToken !== runToken) return false;
+    const phase = this.state.mainPhase;
+    if (!phase || (phase.revision ?? 0) !== token.consumedRevision) return false;
+    return token.reportIds.every(reportId => {
+      const notice = this.state.notices[reportId];
+      return !!notice && notice.status === 'offered' && notice.observedAt === undefined
+        && this.state.workers[notice.workerId]?.task?.report?.reportId === reportId;
+    });
+  }
   /** @param {import('./schema.js').DecisionPayload} input */
   async decide(input) {
     validateDecision(input); input = clone(input);
@@ -820,11 +1097,20 @@ export class PairController extends EventEmitter {
       const hash = digest(input), old = t.decisions[input.reportId];
       if (old) { assert(old.hash === hash, 'A different decision already resolved this report'); return { duplicate: { taskId: t.id, status: t.status, duplicate: true } }; }
       assert(['question', 'review', 'blocked'].includes(t.status) && t.report?.reportId === input.reportId, 'No matching report awaits a decision');
-      return { control: this.control(r.id), task: t, report: t.report, hash, configHash: this.configHash(), attemptId: t.attemptId, leaseId: t.leaseId };
+      // Branch/context fencing: an inspection pinned on a previous conversation
+      // branch is stale; the current context must re-inspect to reconcile.
+      const notice = this.state.notices[input.reportId], branch = this.state.branch ?? 0;
+      // Missing/legacy branch metadata establishes current-context authority only
+      // while no navigation has ever advanced the branch counter — it never
+      // implies a current-context inspection after navigation.
+      const observed = notice?.observedBranch ?? 0;
+      assert(notice === undefined || observed === branch,
+        'BRANCH_STALE: the conversation branch changed since this report was last inspected; pair_inspect the retained checkpoint again before deciding');
+      return { control: this.control(r.id), task: t, report: t.report, hash, configHash: this.configHash(), attemptId: t.attemptId, leaseId: t.leaseId, branch };
     });
     if (reservation.duplicate) return reservation.duplicate;
     const { control, task: t, report, hash } = reservation; assert(control && t && report, 'Missing decision reservation');
-    const check = () => assert(!this.closing && this.controlCurrent(control) && this.configHash() === reservation.configHash && control.record.task === t && t.report === report && t.attemptId === reservation.attemptId && t.leaseId === reservation.leaseId && ['question', 'review', 'blocked'].includes(t.status), 'Decision was superseded');
+    const check = () => assert(!this.closing && this.controlCurrent(control) && this.configHash() === reservation.configHash && control.record.task === t && t.report === report && t.attemptId === reservation.attemptId && t.leaseId === reservation.leaseId && (this.state.branch ?? 0) === reservation.branch && ['question', 'review', 'blocked'].includes(t.status), 'Decision was superseded');
     if (input.action === 'approve') {
       assert(t.status === 'review' && report.inspectedAt, 'Inspect the current review checkpoint before approval');
       assert(input.checkpointHash === report.checkpoint.checkpointHash, 'Approval hash does not match the report');
@@ -836,6 +1122,8 @@ export class PairController extends EventEmitter {
       check(); const r = control.record;
       if (input.action === 'cancel') {
         t.decisions[input.reportId] = { hash, action: 'cancel', at: Date.now() };
+        // A decision is explicit Main activity: later reports wait for a fresh yield.
+        if (this.state.mainPhase) this.setPhase('open');
         return { cancel: await this.cancelUnlocked(r.id, input.feedback) };
       }
       if (input.action === 'answer') assert(report.payload.kind === 'question', 'Only question reports accept answer');
@@ -848,6 +1136,8 @@ export class PairController extends EventEmitter {
         ...(input.action === 'approve' ? { action: input.action, checkpointHash: input.checkpointHash } : { action: input.action, checkpointHash: input.checkpointHash || null }) };
       t.decisions[input.reportId] = decision; t.lastDecision = { action: input.action, feedback: input.feedback, reportId: input.reportId };
       if (this.state.notices[input.reportId]) this.state.notices[input.reportId].status = 'resolved';
+      // A decision is explicit Main activity: later reports wait for a fresh yield.
+      if (this.state.mainPhase) this.setPhase('open');
       if (input.action === 'revise') t.revisions++;
       if (input.action === 'approve') {
         t.baseSnapshotRef = report.snapshotRef;
@@ -869,7 +1159,17 @@ export class PairController extends EventEmitter {
       const work = next.work;
       try {
         await this.startReserved(work); this.requireWork(work);
-        const sent = await this.activate(work, `${this.workMessage(t)}\nMain decision for report ${input.reportId}: ${input.action}\n${input.feedback}`);
+        // The guard revalidates source AND branch AFTER activation's final readiness
+        // wait (prepareActivation), immediately before renewed running authority is
+        // written or any prompt is sent. No atomic exclusion of external writers is
+        // claimed — this is a fresh capture compared against the decision evidence.
+        const sent = await this.activate(work, `${this.workMessage(t)}\nMain decision for report ${input.reportId}: ${input.action}\n${input.feedback}`, {
+          branch: reservation.branch,
+          guard: async () => {
+            const renewed = await this.evidence.capture(work.record.repoRoot);
+            assert(renewed.hash === report.checkpoint.checkpointHash, 'STALE_CHECKPOINT: the workspace changed between the decision and renewed running authority; request a fresh review');
+            assert((this.state.branch ?? 0) === reservation.branch, 'BRANCH_STALE: the conversation branch changed during the decision; re-inspect before deciding');
+          } });
         await this.transaction(async () => {
           if (!this.workCurrent(work) || !next.decision) return;
           next.decision.delivery = sent ? 'accepted' : 'not_sent_budget'; await this.persist();
@@ -881,7 +1181,13 @@ export class PairController extends EventEmitter {
   }
   /** @param {string} id @param {string} [reportId] @param {string} [file] */
   async inspect(id, reportId, file) {
+    // A2: capture the conversation branch BEFORE the first await. The queued
+    // admission transaction and every asynchronous evidence read are fenced
+    // against it, so an inspection that crosses navigation can never pin or
+    // acknowledge the newer branch; a fresh explicit inspection reconciles.
+    const branch = this.state.branch ?? 0;
     const reserved = await this.transaction(() => {
+      assert((this.state.branch ?? 0) === branch, 'BRANCH_STALE: the conversation branch changed before this inspection; re-inspect on the current branch');
       const r = this.record(id), report = r.task?.report;
       assert(report && (!reportId || report.reportId === reportId), 'No matching current checkpoint; archived evidence remains in Pair state');
       return { control: this.control(id), report };
@@ -889,7 +1195,14 @@ export class PairController extends EventEmitter {
     const evidence = await this.evidence.inspect(reserved.report.checkpoint.path, file);
     await this.transaction(async () => {
       assert(this.controlCurrent(reserved.control) && reserved.control.record.task?.report === reserved.report, 'Checkpoint changed while inspecting');
-      reserved.report.inspectedAt = Date.now(); await this.persist();
+      assert((this.state.branch ?? 0) === branch, 'BRANCH_STALE: the conversation branch changed while inspecting; re-inspect on the current branch to reconcile');
+      reserved.report.inspectedAt = Date.now();
+      // A1: pin the ACTUAL current report even when the optional reportId is omitted.
+      const notice = this.state.notices[reportId || reserved.report.reportId];
+      if (notice && notice.observedAt === undefined) notice.observedAt = Date.now(); // explicit Main read, not comprehension
+      // Pin the branch this inspection was actually read on (captured above), never a newer one.
+      if (notice && notice.observedAt !== undefined) notice.observedBranch = branch;
+      await this.persist();
     });
     return evidence;
   }
@@ -917,13 +1230,13 @@ export class PairController extends EventEmitter {
     if (!control.runtime) return;
     const data = this.runtimeData.get(control.runtime);
     let failure = null;
-    try { if (stop) await control.runtime.abortAndStop(reason); else await control.runtime.abortCurrent(reason); }
+    try { if (!control.runtime.closed) { if (stop) await control.runtime.abortAndStop(reason); else await control.runtime.abortCurrent(reason); } }
     catch (error) { failure = error; }
     try { await this.transaction(async () => {
       if (!this.controlCurrent(control)) return;
       if (failure || control.runtime?.closed) {
         control.record.status = 'error';
-        control.record.error = failure ? `EXIT_UNCONFIRMED: ${briefError(failure)}. Stop/reconcile before reusing this generation.` : `${reason}; process exited. Explicit stop is required before reuse.`;
+        control.record.error = failure ? `EXIT_UNCONFIRMED: ${briefError(failure)}. Stop/reconcile before reusing this generation.` : `${control.record.error ? `${briefError(control.record.error)}; ` : ''}${reason}; process exited. Explicit stop is required before reuse.`;
         await this.persist();
       }
     }); } finally { if (data) data.pendingControls--; }
@@ -937,7 +1250,12 @@ export class PairController extends EventEmitter {
   /** Durable only, called inside serial. @param {string} id @param {string} reason @returns {Promise<Control>} */
   async pauseUnlocked(id, reason) {
     const r = this.record(id); assert(activeTask(r), 'No active task to pause');
-    r.task.previousStatus = r.task.status; r.task.status = 'paused'; r.task.interruption = reason;
+    // Re-pausing an existing hold preserves the ORIGINAL waiting predecessor: a
+    // second pause must never mask a question/review/blocker obligation with
+    // 'paused', which would let resume rotate a fresh lease and supersede the
+    // retained notice instead of restoring the decision wait.
+    if (r.task.status !== 'paused') r.task.previousStatus = r.task.status;
+    r.task.status = 'paused'; r.task.interruption = reason;
     if (r.status !== 'error' && r.status !== 'stopped') r.status = 'paused';
     const control = this.reserveControl(id); return this.publishControl(control, 'paused');
   }
@@ -951,12 +1269,30 @@ export class PairController extends EventEmitter {
   }
   /** @param {string} id */
   async resume(id) {
-    const work = await this.transaction(async () => {
+    const outcome = await this.transaction(async () => {
       const r = this.record(id), t = r.task;
       assert(t && ['paused', 'interrupted'].includes(t.status), 'Only paused/interrupted tasks can resume');
+      // A paused question/review/blocker restores WAITING, not a fresh lease: the
+      // retained report, its notice and the original attempt/lease survive
+      // pause/resume/reload, and no new implementation lease (attempt rotation,
+      // recovery prompt or activation) is issued. The next pair_decide owns any
+      // continuation. Policy/budget amendment does not apply: nothing is re-granted.
+      if (t.report && !t.pendingReport && ['question', 'review', 'blocked'].includes(String(t.previousStatus))) {
+        const restored = t.previousStatus;
+        assert(restored === 'question' || restored === 'review' || restored === 'blocked', 'Resume restoration requires a waiting predecessor status');
+        delete t.previousStatus; delete t.interruption;
+        t.status = restored;
+        if (r.status !== 'error' && r.status !== 'stopped') r.status = restored;
+        r.error = null;
+        // Durable restore only: no containment publication, no process lifecycle.
+        await this.writeAuthority(id, 'waiting');
+        await this.persist();
+        return { waitingRestored: { taskId: t.id, status: t.status }, work: null };
+      }
       const launch = await this.reserveStart(id, true);
       assert(this.launchCurrent(launch) && r.task === t && ['paused', 'interrupted'].includes(t.status), 'Resume was superseded');
-      // Legacy budget amendment/reset behavior remains; lifetime budgeting belongs to AR-03/04.
+      // Legacy budget amendment/reset behavior remains (explicit existing
+      // amendment semantics); lifetime budgeting belongs to AR-03/04.
       t.limits = clone(this.config.limits); t.policy = clone(this.config.supervision);
       if (t.limits.maxReportedCostUsd !== null) assert((t.usage?.reportedCost || 0) < t.limits.maxReportedCostUsd, 'Raise the reported cost budget before resuming');
       if (t.limits.maxOutputTokens !== null) assert((t.usage?.output || 0) < t.limits.maxOutputTokens, 'Raise the output-token budget before resuming');
@@ -971,8 +1307,10 @@ export class PairController extends EventEmitter {
       }
       this.rotateAttempt(t); t.leaseId = uid('lease'); t.turns = 0; t.startedAt = Date.now(); t.status = 'interrupted'; r.error = null;
       const work = this.reserveWork(launch, t);
-      await this.persist(); return work;
+      await this.persist(); return { waitingRestored: null, work };
     });
+    if (outcome.waitingRestored) return outcome.waitingRestored;
+    const work = outcome.work;
     try { await this.startReserved(work); this.requireWork(work); await this.prepareBase(work); this.requireWork(work); await this.activate(work, `${this.workMessage(work.task)}\nRECOVERY: the human explicitly resumed this task. Inspect existing changes and tool outcomes BEFORE doing more work. Do not replay previous mutations blindly. Resume the authorized step or ask a question.`); }
     catch (error) { await this.activationFailed(work, error); throw error; }
     return { taskId: work.task.id, status: work.task.status };

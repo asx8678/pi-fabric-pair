@@ -67,9 +67,11 @@ export function minutesLabel(ms) {
   const seconds = Math.round(ms / 1000);
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
 }
-/** Raw task telemetry — elapsed time and accumulated model turns — without limit
- * ratios or thresholds; the former per-step turn and task-duration limits are
- * removed and no longer color-escalate.
+/** Compatibility helper for raw task telemetry — elapsed time and accumulated
+ * model turns — without limit ratios or thresholds. Elapsed time and turn counts
+ * are no longer displayed anywhere: indicator() and statusText() never call this.
+ * The former per-step turn and task-duration limits are removed and never
+ * color-escalate; startedAt/turns remain raw internal counters.
  * @param {{startedAt?: number, turns?: number}} task
  * @param {(color: IndicatorColor, text: string) => string} paint @param {number} [now]
  * @returns {string[]} */
@@ -98,12 +100,34 @@ export function flowArrow(status) {
   if (['question', 'review', 'blocked', 'permission'].includes(status)) return '←';
   return '';
 }
+/** Average measured assistant streaming throughput for the worker row: summed
+ * provider-reported output tokens over summed message_start→message_end seconds.
+ * message_start fires when the provider response begins streaming, so
+ * pre-response request/prefill latency is excluded along with tool execution
+ * and idle gaps; unusable samples never touch the aggregate. Unavailable is
+ * explicit, never a fabricated zero.
+ * @param {{tokens?: unknown, seconds?: unknown} | null | undefined} speed
+ * @returns {string} */
+export function speedLabel(speed) {
+  const tokens = speed?.tokens, seconds = speed?.seconds;
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0
+    || typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return 'avg — tok/s';
+  return `avg ${(tokens / seconds).toFixed(1)} tok/s`;
+}
+/** Read the optional current-telemetry streaming-throughput aggregate from a worker
+ * observation; historical/legacy observations have none and stay unavailable.
+ * @param {PairSummary['workers'][number]['observation']} observation
+ * @returns {{tokens?: unknown, seconds?: unknown} | null | undefined} */
+export function observedSpeed(observation) {
+  return observation && typeof observation === 'object' && 'speed' in observation
+    ? /** @type {{tokens?: unknown, seconds?: unknown} | null | undefined} */ (observation.speed) : undefined;
+}
 /** Without a theme the plain glyph line is returned; with one, each actor token is
  * painted. A flow arrow precedes each worker token: `M● → W◉` while that worker
  * holds the assigned step, `M● ← W◐` while its summary is with Main. While a worker
- * is active, its dot blinks on a two-second heartbeat and an age badge counts up
- * since its last real event; past PULSE_MAX_AGE_MS the blink stops, and past
- * STALE_AGE_MS the badge turns into a stale marker.
+ * is active, its dot blinks on a two-second heartbeat; past PULSE_MAX_AGE_MS the
+ * blink stops, and past STALE_AGE_MS a plain error-colored `stale` marker appears.
+ * No elapsed task time, turn count or numeric activity age is ever displayed.
  * @param {PairSummary} summary @param {boolean} mainBusy
  * @param {{fg(color: IndicatorColor, text: string): string}} [theme]
  * @param {number} [now]
@@ -116,14 +140,15 @@ export function indicator(summary, mainBusy, theme, now = Date.now()) {
     const color = statusColor(w.status);
     const label = `${summary.workers.length === 1 ? 'W' : `W${i + 1}`}${symbol(w.status)}`;
     const arrow = flowArrow(w.status);
-    if (!['working', 'settling', 'starting'].includes(w.status)) return arrow ? `${paint(color, arrow)} ${paint(color, label)}` : paint(color, label);
+    const speed = paint('muted', speedLabel(observedSpeed(w.observation)));
+    if (!['working', 'settling', 'starting'].includes(w.status)) return arrow ? `${paint(color, arrow)} ${paint(color, label)} ${speed}` : `${paint(color, label)} ${speed}`;
     const age = activityAge(w, now);
     const pulsing = age <= PULSE_MAX_AGE_MS;
     const dotColor = pulsing && Math.floor(now / 2000) % 2 === 1 ? 'dim' : color;
     const token = arrow ? `${paint(color, arrow)} ${paint(dotColor, label)}` : paint(dotColor, label);
-    const badges = [paint(age >= STALE_AGE_MS ? 'error' : pulsing ? 'muted' : 'warning', age >= STALE_AGE_MS ? `stale ${ageLabel(age)}` : ageLabel(age))];
+    const badges = [speed];
+    if (age >= STALE_AGE_MS) badges.push(paint('error', 'stale'));
     if (typeof w.observation?.currentTool === 'string' && w.observation.currentTool) badges.push(paint('muted', w.observation.currentTool.slice(0, 40)));
-    badges.push(...budgetBadges(w.task || {}, paint, now));
     if (typeof w.task?.reportedCost === 'number' && w.task.reportedCost > 0) badges.push(paint('muted', `$${w.task.reportedCost.toFixed(4)}`));
     const percent = w.observation?.context?.percent;
     if (typeof percent === 'number' && percent > 75) badges.push(paint(percent > 90 ? 'error' : 'warning', `ctx ${Math.round(percent)}%`));
@@ -166,6 +191,11 @@ export function stepColor(state) {
   if (state === 'review' || state === 'held') return 'warning';
   return 'dim';
 }
+/** Row prefix for one plan step: completed steps are labeled explicitly so a
+ * lone checkmark is never ambiguous; every other state keeps its bare symbol.
+ * stepSymbol itself stays unchanged as public API.
+ * @param {StepState} state @returns {string} */
+function stepPrefix(state) { return state === 'done' ? `complete ${stepSymbol(state)}` : stepSymbol(state); }
 /** Per-step completion view of the first worker's active plan; plain text without a
  * theme (for /pair status) and painted with one (for the status-bar widget).
  * @param {PairSummary} summary
@@ -178,43 +208,56 @@ export function taskListLines(summary, theme, maxSteps = 7) {
   /** @param {IndicatorColor} color @param {string} text @returns {string} */
   const paint = (color, text) => (theme ? theme.fg(color, text) : text);
   const list = worker.task.stepList;
-  const lines = list.slice(0, maxSteps).map((step, i) => paint(stepColor(step.state), `${stepSymbol(step.state)} ${i + 1}. ${step.title}`));
+  const lines = list.slice(0, maxSteps).map((step, i) => paint(stepColor(step.state), `${stepPrefix(step.state)} ${i + 1}. ${step.title}`));
   if (list.length > maxSteps) lines.push(paint('dim', `+ ${list.length - maxSteps} more`));
   return lines;
 }
-/** Last measured request only, never cumulative usage or a residency estimate.
- * Legacy zero-input diagnostics may still have an age but no cache-read share.
- * @param {unknown} value @param {number} now @returns {string} */
-function lastCacheRead(value, now) {
+/** Last measured request share only, never cumulative usage or a residency
+ * estimate. The sample timestamp remains validated and retained internally for
+ * staleness handling and boundary resets, but no age timer is displayed beside
+ * the percentage. Legacy zero-input diagnostics keep an explicit unknown share.
+ * @param {unknown} value @returns {string} */
+function lastCacheRead(value) {
   const usage = validateUsageObservation(value, 'Last cache-read usage');
   if (!usage) return 'unknown';
-  const percent = usage.cacheRatio === null ? 'unknown' : `${(100 * usage.cacheRatio).toFixed(1)}%`;
-  return `${percent} ${ageLabel(Math.max(0, now - usage.observedAt))} ago`;
+  return usage.cacheRatio === null ? 'unknown' : `${(100 * usage.cacheRatio).toFixed(1)}%`;
 }
 /** Stable role labels follow the activity line and configured worker order.
  * Cache values are neutral observations, not success/error thresholds.
  * Unknown shares are omitted; labels are assigned before filtering.
  * @param {PairSummary} summary
  * @param {{fg(color: IndicatorColor, text: string): string}} theme
- * @param {number} now @returns {string | null} */
-function cacheReadLine(summary, theme, now) {
+ * @returns {string | null} */
+function cacheReadLine(summary, theme) {
   const actors = [{ label: 'M', usage: summary.main?.lastUsage ?? null },
     ...summary.workers.map((w, i) => ({ label: summary.workers.length === 1 ? 'W' : `W${i + 1}`, usage: w.observation?.lastUsage ?? null }))]
     .flatMap(({ label, usage }) => {
       const observed = validateUsageObservation(usage, 'Last cache-read usage');
-      return observed?.cacheRatio == null ? [] : [`${label} ${lastCacheRead(observed, now)}`];
+      return observed?.cacheRatio == null ? [] : [`${label} ${lastCacheRead(observed)}`];
     });
   return actors.length === 0 ? null : theme.fg('dim', 'Cache read (last): ') + actors.map(actor => theme.fg('muted', actor)).join(theme.fg('dim', ' · '));
 }
-/** Status-bar component: activity, last-request cache observations, and, while a
- * plan is active, its step list. Lines truncate, never wrap.
+/** Retained-report waiting status: finalized reports no delivery channel has
+ * offered yet. UI only; never a model turn or a phase change.
+ * @param {PairSummary} summary
+ * @param {{fg(color: IndicatorColor, text: string): string}} [theme]
+ * @returns {string | null} */
+function waitingLine(summary, theme) {
+  const waiting = summary.waitingReports || 0;
+  if (!waiting) return null;
+  const text = `◐ ${waiting} pair report${waiting === 1 ? '' : 's'} waiting — pair_yield to review · pair_inspect acknowledges · /pair inbox`;
+  return theme ? theme.fg('warning', text) : text;
+}
+/** Status-bar component: activity, waiting reports, last-request cache
+ * observations, and, while a plan is active, its step list. Lines truncate, never wrap.
  * @param {PairSummary} summary @param {boolean} mainBusy
  * @param {{fg(color: IndicatorColor, text: string): string}} theme
  * @param {number} [now]
  * @returns {import('@earendil-works/pi-tui').Component} */
 export function indicatorWidget(summary, mainBusy, theme, now = Date.now()) {
-  const cache = cacheReadLine(summary, theme, now);
-  const lines = [indicator(summary, mainBusy, theme, now), ...(cache === null ? [] : [cache]), ...taskListLines(summary, theme)];
+  const cache = cacheReadLine(summary, theme);
+  const waiting = waitingLine(summary, theme);
+  const lines = [indicator(summary, mainBusy, theme, now), ...(waiting === null ? [] : [waiting]), ...(cache === null ? [] : [cache]), ...taskListLines(summary, theme)];
   return {
     render(width) { const span = Math.max(0, width - 2); return lines.map(line => width > 0 ? ' ' + truncateToWidth(line, span) : ''); },
     invalidate() {},
@@ -222,38 +265,41 @@ export function indicatorWidget(summary, mainBusy, theme, now = Date.now()) {
 }
 /** @param {PairSummary} summary @param {Readonly<Awaited<ReturnType<typeof import('./native.js').nativeSettings>>> | null} [native] @param {number} [now] @returns {string} */
 export function statusText(summary, native = null, now = Date.now()) {
-  const lines = ['FABRIC PAIR', '', `Main: ${summary.main?.model || 'native /model'} · ${summary.main?.busy ? 'working' : 'ready'}`, `Owner session: ${summary.ownerSession}`, ''];
+  const lines = ['FABRIC PAIR', '', `Main: ${summary.main?.model || 'native /model'} · ${summary.main?.busy ? 'working' : 'ready'}`, `Owner session: ${summary.ownerSession}`];
+  if (summary.mainPhase) lines.push(`Main phase: ${summary.mainPhase.status} (explicit, non-authorizing)${summary.mainPhase.current ? '' : ' · stale binding: reports stay retained'}`);
+  if ((summary.waitingReports || 0) > 0) lines.push(`Waiting reports: ${summary.waitingReports} unacknowledged (pending or offered, never confirmed delivered) — Main pair_yield to review · pair_inspect/pair_decide acknowledges · human /pair yield or /pair inbox. No automatic idle wakeup.`);
+  lines.push('');
   if (summary.main?.context) {
     const c = contextUsage(summary.main.context);
     assert(c, 'Invalid Main context observation');
     lines.push(`Main context: ${c.tokens ?? 'unknown'} / ${c.contextWindow ?? 'unknown'} tokens`);
   }
   lines.push(`Pair scoped warming policy: ${summary.cacheWarming || 'off'} (explicit opt-in; native safety windows unchanged)`, `Main scoped warming: ${warmingLabel(summary.main?.warming)}`);
-  lines.push(`Main last observed cache read: ${lastCacheRead(summary.main?.lastUsage ?? null, now)}`);
+  lines.push(`Main last observed cache read: ${lastCacheRead(summary.main?.lastUsage ?? null)}`);
   lines.push('');
   for (const w of summary.workers) {
     lines.push(`${w.id}: ${w.status} · ${w.model} · effort ${w.effort}`, `  PID: ${w.pid || 'not running'} · session: ${w.sessionId || 'not created'}`, `  Workspace: ${w.cwd}`);
     if (w.task) lines.push(`  ${w.task.id} · ${w.task.status} · step ${w.task.step}/${w.task.steps} · revisions ${w.task.revisions}`, `  ${w.task.objective}`);
-    if (w.task && ['working', 'settling', 'starting'].includes(w.status)) { const age = activityAge(w, now); lines.push(`  Activity: ${ageLabel(age)} since the last worker event${age >= STALE_AGE_MS ? ' — STALE: inspect the transcript or cancel' : ''}`); }
-    if (w.task && typeof w.task.startedAt === 'number' && typeof w.task.turns === 'number') lines.push(`  Telemetry: ${minutesLabel(Math.max(0, now - w.task.startedAt))} elapsed · ${w.task.turns} turns`);
+    if (w.task && ['working', 'settling', 'starting'].includes(w.status) && activityAge(w, now) >= STALE_AGE_MS) lines.push('  STALE: no recent worker activity; inspect the transcript or cancel');
     if (Array.isArray(w.task?.stepList) && w.task.stepList.length > 0) {
       const bar = progressBar(w.task.stepList.filter(step => step.state === 'done').length, w.task.stepList.length);
       lines.push(`  progress ${'■'.repeat(bar.filled)}${'□'.repeat(bar.empty)} ${bar.label} (${bar.percent}%)`);
-      for (let i = 0; i < w.task.stepList.length; i++) { const step = w.task.stepList[i]; lines.push(`    ${stepSymbol(step.state)} ${i + 1}. ${step.title}`); }
+      for (let i = 0; i < w.task.stepList.length; i++) { const step = w.task.stepList[i]; lines.push(`    ${stepPrefix(step.state)} ${i + 1}. ${step.title}`); }
     }
     const obs = w.observation;
     if (obs?.currentTool) lines.push(`  Tool: ${obs.currentTool}`);
     if (obs?.context) lines.push(`  Context: ${obs.context.tokens ?? 'unknown'} / ${obs.context.contextWindow ?? 'unknown'} tokens${obs.context.percent == null ? '' : ` (${obs.context.percent.toFixed(1)}%)`}${obs.compacting ? ' · compacting' : ''}`);
     lines.push(`  Last reported scoped warming: ${warmingLabel(obs && 'warming' in obs ? obs.warming : undefined)}`);
-    lines.push(`  Last observed cache read: ${lastCacheRead(obs?.lastUsage ?? null, now)}`);
+    lines.push(`  Last observed cache read: ${lastCacheRead(obs?.lastUsage ?? null)}`);
     if (w.usage) lines.push(`  Inference only: ${w.usage.requests} responses · reported $${w.usage.reportedCost.toFixed(4)} · ${w.usage.unknownCostRequests} responses with unknown price`);
+    lines.push(`  Speed: ${speedLabel(observedSpeed(w.observation))} (average streaming throughput; weighted output tokens/second)`);
     if (w.lastExchange) lines.push(`  Last exchange: ${w.lastExchange.direction} · ${w.lastExchange.kind}`);
     if (w.pendingConfiguration) lines.push('  Settings change pending: applied before the next new task while this worker is idle.');
     if (w.error) lines.push(`  ATTENTION: ${w.error}`);
     lines.push('');
   }
   if (native) lines.push(`Native warming policy: ${native.cacheWarming} (persisted base policy; scoped leases/other owners may differ)`, '');
-  lines.push('● ready  ◉ working  ◐ waiting  ○ retained/stopped  ! attention', 'widget colors: main working accent · worker working success · waiting warning · attention error · idle muted', 'widget arrows: → plan/task heading to worker · ← summary/question back with Main', 'cache read (last): M Main · W/W1/W2 configured workers in order · cacheRead/(input+cacheRead+cacheWrite) for the last measured request, not task totals · zero-input events do not replace a measured sample · unknown means no measurement · age is observation age, not provider TTL or cache residency', 'plan steps: ✔ done · ▶ in progress · ◐ in review · ⏸ held · ○ not started · ■/□ progress (approved/total)', 'worker liveness: age badge counts up since the last worker event · heartbeat blink stops after 2m silence · stale after 5m', 'widget badges: current tool while running · raw elapsed/turn telemetry (no limit ratios) · task cost · ctx pressure above 75% · one stale toast per silent episode', '', summary.cacheNote, '', `Local state and evidence: ${summary.directory}`);
+  lines.push('● ready  ◉ working  ◐ waiting  ○ retained/stopped  ! attention', 'widget colors: main working accent · worker working success · waiting warning · attention error · idle muted', 'widget badges: retained pair reports show a waiting line until explicitly offered', 'widget arrows: → plan/task heading to worker · ← summary/question back with Main', 'cache read (last): M Main · W/W1/W2 configured workers in order · cacheRead/(input+cacheRead+cacheWrite) for the last measured request, not task totals · zero-input events do not replace a measured sample · unknown means no measurement', 'plan steps: complete ✔ done · ▶ in progress · ◐ in review · ⏸ held · ○ not started · ■/□ progress (approved/total)', 'worker liveness: heartbeat blink stops after 2m silence · stale marked after 5m without a visible timer', 'widget badges: current tool while running · avg streaming throughput (weighted output tokens/second, pre-response request latency excluded, unavailable is explicit) · task cost · ctx pressure above 75% · one stale toast per silent episode', '', summary.cacheNote, '', `Local state and evidence: ${summary.directory}`);
   return lines.map(s => cleanText(s, 20000)).join('\n');
 }
 /** @param {UIContext} ctx @param {string} title @param {string} text @returns {Promise<void>} */
@@ -393,8 +439,6 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
       { id: 7, label: `Workspace: ${w.cwd || '(Main workspace)'}` },
       { id: 9, label: `Revision limit: ${draft.supervision.maxRevisions}` },
       { id: 10, label: `Summary detail: ${draft.supervision.summaryDetail}` },
-      { id: 13, label: `Reported inference budget (USD): ${draft.limits.maxReportedCostUsd ?? 'none'}` },
-      { id: 15, label: `Preserved slot limit (V1 live limit: 1): ${draft.maxWorkers}` },
       { id: 16, label: 'Add worker' },
       { id: 17, label: `Verification commands: ${draft.verification.commands.length} (human-owned)` },
       ...(options.migrate ? [{ id: 22, label: 'Review/migrate selected scope…' }] : []),
@@ -437,13 +481,7 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
         accepts: value => Number.isInteger(value) && value >= 0 && value <= 20, expected: 'enter an integer from 0 to 20.'
       });
       else if (index === 10) draft.supervision.summaryDetail = await selectValue(ctx.ui, 'Worker summary detail', ['minimal', 'normal', 'detailed']) || draft.supervision.summaryDetail;
-      else if (index === 13) draft.limits.maxReportedCostUsd = await numberInput(ctx, 'Inference-only reported USD budget (excludes native warming/unknown prices)', draft.limits.maxReportedCostUsd, {
-        optional: true, accepts: value => value > 0, expected: 'enter a finite USD amount greater than 0, or none/off to disable.'
-      });
       else if (index === 14) draft.indicator = await selectValue(ctx.ui, 'Indicator (rendering only)', ['minimal', 'off']) || draft.indicator;
-      else if (index === 15) draft.maxWorkers = await numberInput(ctx, 'Preserved slot limit (V1 activates one)', draft.maxWorkers, {
-        accepts: value => Number.isInteger(value) && value >= 1 && value <= 8, expected: 'enter an integer from 1 to 8.'
-      });
       else if (index === 16) {
         const id = await ctx.ui.input('New worker ID (letters, digits, hyphens, underscores)');
         if (id) { draft.workers.push({ id, provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }); selected = id; }

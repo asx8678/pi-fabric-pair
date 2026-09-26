@@ -15,12 +15,12 @@ const summary = (main, workers = []) => ({ main, workers, ownerSession: 'owner',
 const cacheRow = (s, theme = plain, at = now) => indicatorWidget(s, false, theme, at).render(1000)[1]?.trim();
 
 for (const [name, observed, expected] of [
-  ['zero percent', usage(100, 0), '0.0% 5s ago'],
-  ['fractional share including cache writes', usage(1, 1, 1), '33.3% 5s ago'],
-  ['full cache read', usage(0, 100), '100.0% 5s ago'],
-  ['old observation', usage(10, 10, 0, now - 3_661_000), '50.0% 61m 1s ago'],
-  ['zero timestamp is still an observation', usage(0, 10, 0, 0), '100.0% 166m 40s ago'],
-  ['future timestamp clamps elapsed age', usage(10, 0, 0, now + 1000), '0.0% 0s ago']
+  ['zero percent', usage(100, 0), '0.0%'],
+  ['fractional share including cache writes', usage(1, 1, 1), '33.3%'],
+  ['full cache read', usage(0, 100), '100.0%'],
+  ['old observation keeps the same share', usage(10, 10, 0, now - 3_661_000), '50.0%'],
+  ['zero timestamp is still an observation', usage(0, 10, 0, 0), '100.0%'],
+  ['future timestamp leaves the share unchanged', usage(10, 0, 0, now + 1000), '0.0%']
 ]) {
   test(`widget and status show last-request ${name} consistently`, () => {
     const s = summary({ lastUsage: observed }, [worker('worker', observed)]);
@@ -29,18 +29,19 @@ for (const [name, observed, expected] of [
     assert.ok(text.includes(`Main last observed cache read: ${expected}\n`));
     assert.ok(text.includes(`  Last observed cache read: ${expected}\n`));
     assert.match(text, /cacheRead\/\(input\+cacheRead\+cacheWrite\).*last measured request, not task totals/);
-    assert.match(text, /age is observation age, not provider TTL or cache residency/);
+    assert.doesNotMatch(text, /ago|observation age/, 'status carries no age beside the share');
+    assert.doesNotMatch(cacheRow(s), /ago/, 'the widget row shows no age timer');
   });
 }
 
 for (const [name, observed, diagnostic] of [
   ['null observation', null, 'unknown'],
   ['undefined observation', undefined, 'unknown'],
-  ['zero-input observation with null ratio', usage(0, 0), 'unknown 5s ago']
+  ['zero-input observation with null ratio', usage(0, 0), 'unknown']
 ]) {
   test(`widget omits ${name} without hiding status diagnostics or activity`, () => {
     const s = summary({ lastUsage: observed }, [worker('worker', observed)]);
-    assert.deepEqual(indicatorWidget(s, false, plain, now).render(1000), [' M● W●']);
+    assert.deepEqual(indicatorWidget(s, false, plain, now).render(1000), [' M● W● avg — tok/s']);
     assert.equal(cacheRow(s), undefined, 'no cache row or blank spacer');
     const text = statusText(s, null, now);
     assert.ok(text.includes(`Main last observed cache read: ${diagnostic}\n`));
@@ -50,7 +51,7 @@ for (const [name, observed, diagnostic] of [
 
 test('missing usage fields and absent Main/worker observations leave only activity', () => {
   for (const s of [summary({}, [{ ...worker('worker'), observation: {} }]), { workers: [{ id: 'worker', status: 'ready' }] }, summary(null, [{ ...worker('worker'), observation: null }])]) {
-    assert.deepEqual(indicatorWidget(s, false, plain, now).render(1000), [' M● W●']);
+    assert.deepEqual(indicatorWidget(s, false, plain, now).render(1000), [' M● W● avg — tok/s']);
   }
 });
 
@@ -58,16 +59,16 @@ test('no workers renders only Main activity and its known cache share if present
   for (const main of [null, undefined, {}, { lastUsage: usage(0, 0) }]) {
     assert.deepEqual(indicatorWidget(summary(main), false, plain, now).render(1000), [' M●']);
   }
-  assert.equal(cacheRow(summary({ lastUsage: usage(10, 0) })), 'Cache read (last): M 0.0% 5s ago');
+  assert.equal(cacheRow(summary({ lastUsage: usage(10, 0) })), 'Cache read (last): M 0.0%');
 });
 
 test('idle, review and not-started workers remain ordered and cumulative usage is never substituted', () => {
   const workers = [worker('z-last-alphabetically', usage(10, 0), 'ready'), worker('a-first-alphabetically', usage(0, 10), 'review'), { ...worker('new', null, 'not_started'), observation: null, usage: { requests: 10, reportedCost: 0, unknownCostRequests: 0, cacheRatio: 1 } }];
   const s = summary(null, workers);
-  assert.equal(cacheRow(s), 'Cache read (last): W1 0.0% 5s ago · W2 100.0% 5s ago');
+  assert.equal(cacheRow(s), 'Cache read (last): W1 0.0% · W2 100.0%');
   const lines = indicatorWidget(s, false, plain, now).render(1000);
   assert.equal(lines.length, 2, 'known cache shares remain visible without a plan');
-  assert.match(lines[0], /M● W1● ← W2◐ W3○/);
+  assert.match(lines[0], /M● W1● avg — tok\/s ← W2◐ avg — tok\/s W3○ avg — tok\/s/);
   const text = statusText(s, null, now);
   assert.ok(text.indexOf('z-last-alphabetically:') < text.indexOf('a-first-alphabetically:'));
   assert.ok(text.includes('new: not_started'));
@@ -77,15 +78,15 @@ test('idle, review and not-started workers remain ordered and cumulative usage i
 test('mixed-known actors keep configured labels and order across gaps and clearing transitions', () => {
   const workers = [worker('first', null), worker('z-second', usage(10, 0)), worker('third', usage(0, 0)), worker('a-fourth', usage(0, 10))];
   const s = summary({ lastUsage: usage(10, 10) }, workers);
-  assert.equal(cacheRow(s), 'Cache read (last): M 50.0% 5s ago · W2 0.0% 5s ago · W4 100.0% 5s ago');
+  assert.equal(cacheRow(s), 'Cache read (last): M 50.0% · W2 0.0% · W4 100.0%');
   s.main.lastUsage = null;
   workers[3].observation.lastUsage = undefined;
-  assert.equal(cacheRow(s), 'Cache read (last): W2 0.0% 5s ago', 'one remaining worker is not renamed W or W1');
+  assert.equal(cacheRow(s), 'Cache read (last): W2 0.0%', 'one remaining worker is not renamed W or W1');
   workers[1].observation.lastUsage = usage(0, 0);
-  assert.deepEqual(indicatorWidget(s, false, plain, now).render(1000), [' M● W1● W2● W3● W4●']);
+  assert.deepEqual(indicatorWidget(s, false, plain, now).render(1000), [' M● W1● avg — tok/s W2● avg — tok/s W3● avg — tok/s W4● avg — tok/s']);
   s.main.lastUsage = usage(10, 0);
-  assert.equal(cacheRow(s), 'Cache read (last): M 0.0% 5s ago');
-  assert.equal(cacheRow(summary(null, [worker('only', usage(0, 10))])), 'Cache read (last): W 100.0% 5s ago');
+  assert.equal(cacheRow(s), 'Cache read (last): M 0.0%');
+  assert.equal(cacheRow(summary(null, [worker('only', usage(0, 10))])), 'Cache read (last): W 100.0%');
 });
 
 test('cache row is neutral and ANSI/theme-aware without disturbing activity or task progress', () => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { nativeSettings, nativeProfileBlockers, preflightNativeProfile, checkReadiness } from '../src/native.js';
+import { meshRootFor, nativeSettings, nativeProfileBlockers, preflightNativeProfile, checkReadiness } from '../src/native.js';
 
 const valid = { executor: { shellHangMs: 0 }, agents: { maxDepth: 0 }, prewalk: { enabled: false } };
 async function fixture(run) {
@@ -37,10 +37,33 @@ test('project precedence and worker trust are explicit; Main trust is not borrow
 
 test('worker readiness shares aggregate checks and is still authoritative', () => {
   const model = { provider: 'test', id: 'model' }, cwd = '/isolated/worker', sessionFile = '/isolated/session.jsonl';
-  const probe = { protocol: 1, cwd, sessionId: 'session', sessionFile, model, thinkingLevel: 'low', capabilities: { fabric: true, fovea: true, pairReport: true }, native: { fabricShellHangMs: null, fabricAgentMaxDepth: 5, prewalkDisabled: false } };
+  const probe = { protocol: 1, cwd, sessionId: 'session', sessionFile, meshRoot: '/isolated/mesh', model, thinkingLevel: 'low', capabilities: { fabric: true, fovea: true, pairReport: true }, native: { fabricShellHangMs: null, fabricAgentMaxDepth: 5, prewalkDisabled: false } };
   const state = { sessionId: 'session', sessionFile, model, thinkingLevel: 'low', autoCompactionEnabled: true };
-  assert.throws(() => checkReadiness(probe, state, { requirements: { fabric: true, fovea: true, prewalkDisabled: true, autoCompaction: true } }, { ...model, model: model.id, effort: 'low', readOnly: false }, cwd), error => {
+  assert.throws(() => checkReadiness(probe, state, { requirements: { fabric: true, fovea: true, prewalkDisabled: true, autoCompaction: true } }, { ...model, model: model.id, effort: 'low', readOnly: false }, cwd, '/isolated/mesh'), error => {
     for (const key of ['shellHangMs = 0', 'maxDepth = 0', 'prewalk.enabled = false']) assert.ok(error.message.includes(key));
     return true;
   });
+});
+
+test('meshRootFor derives a stable absolute private root per worker directory', () => {
+  const first = meshRootFor('/pair/state/workers/first'), second = meshRootFor('/pair/state/workers/second');
+  assert.equal(first, '/pair/state/workers/first/fabric/mesh');
+  assert.equal(second, '/pair/state/workers/second/fabric/mesh');
+  assert.notEqual(first, second, 'separate worker directories get separate private namespaces');
+  assert.equal(meshRootFor('/pair/state/workers/first'), first, 'the root is stable across repeated derivations');
+  assert.throws(() => meshRootFor('relative/workers/first'), /absolute/);
+});
+
+test('readiness requires the exact Pair-owned private mesh root observation', () => {
+  const model = { provider: 'test', id: 'model' }, cwd = '/isolated/worker', sessionFile = '/isolated/session.jsonl', root = '/pair/state/workers/worker/fabric/mesh';
+  const state = { sessionId: 'session', sessionFile, model, thinkingLevel: 'low', autoCompactionEnabled: true };
+  const config = { requirements: { fabric: false, fovea: false, prewalkDisabled: false, autoCompaction: true } };
+  const worker = { ...model, model: model.id, effort: 'low', readOnly: false };
+  const probe = { protocol: 1, cwd, sessionId: 'session', sessionFile, meshRoot: root, model, thinkingLevel: 'low', capabilities: { fabric: false, fovea: false, pairReport: true }, native: { fabricShellHangMs: 0, fabricAgentMaxDepth: 0, prewalkDisabled: false } };
+  checkReadiness(probe, state, config, worker, cwd, root);
+  assert.throws(() => checkReadiness({ ...probe, meshRoot: '/elsewhere/fabric/mesh' }, state, config, worker, cwd, root), /private mesh root/);
+  assert.throws(() => checkReadiness({ ...probe, meshRoot: null }, state, config, worker, cwd, root), /private mesh root/);
+  assert.throws(() => checkReadiness({ ...probe, meshRoot: 'relative/fabric/mesh' }, state, config, worker, cwd, root), /private mesh root/);
+  const { meshRoot: absent, ...withoutObservation } = probe;
+  assert.throws(() => checkReadiness(withoutObservation, state, config, worker, cwd, root), /private mesh root/);
 });

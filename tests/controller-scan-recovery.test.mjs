@@ -87,6 +87,45 @@ async function runScan(controller) {
   for (const job of jobs) await job();
 }
 
+test('cancel after confirmed process exit releases the task without masking the original runtime fault', async () => {
+  const { controller, task, record, runtime, workerDir, base } = await fixture();
+  try {
+    const originalError = 'Unexpected session initialization entry';
+    const sessionBefore = await fs.readFile(record.sessionFile, 'utf8');
+    record.error = originalError;
+    runtime.closed = true;
+    let aborts = 0;
+    runtime.abortCurrent = async () => { aborts++; throw new Error('Worker is closed'); };
+    await controller.cancel('worker', 'Cancel interrupted assignment for repair');
+    assert.equal(aborts, 0, 'confirmed exit needs no RPC abort');
+    assert.equal(task.status, 'cancelled');
+    assert.equal(record.status, 'error', 'reuse still requires an explicit stop');
+    assert.ok(record.error.startsWith(originalError), 'containment must retain the actual failure cause');
+    assert.match(record.error, /Explicit stop is required before reuse/);
+    assert.equal(record.workerGeneration, 1);
+    assert.equal(record.sessionId, 'sess-scan-1');
+    assert.equal(await fs.readFile(record.sessionFile, 'utf8'), sessionBefore);
+    assert.equal(controller.runtimeData.get(runtime).pendingControls, 0);
+    const authority = JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8'));
+    assert.equal(authority.phase, 'paused');
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('cancel still holds an unconfirmed live process when abort fails', async () => {
+  const { controller, task, record, runtime, workerDir, base } = await fixture();
+  try {
+    runtime.abortCurrent = async () => { throw new Error('abort was not acknowledged'); };
+    await assert.rejects(controller.cancel('worker', 'Cancel live assignment'), /abort was not acknowledged/);
+    assert.equal(task.status, 'cancelled');
+    assert.equal(runtime.closed, false);
+    assert.equal(record.status, 'error');
+    assert.match(record.error, /EXIT_UNCONFIRMED.*abort was not acknowledged/);
+    assert.equal(controller.handles.get('worker'), runtime);
+    assert.equal(controller.runtimeData.get(runtime).pendingControls, 0);
+    assert.equal(JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8')).phase, 'paused');
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
 test('scan accepts a retained inbox report and freezes the review checkpoint', async () => {
   const { controller, task, record, runtime, workerDir, mainNotices, userNotices, base } = await fixture();
   try {
@@ -97,7 +136,14 @@ test('scan accepts a retained inbox report and freezes the review checkpoint', a
     assert.equal(task.report?.reportId, report.reportId);
     assert.match(task.report?.checkpoint?.checkpointHash || '', /^[a-f0-9]{64}$/, 'immutable checkpoint hash must be frozen');
     assert.ok(controller.state.notices[report.reportId], 'a stored notice must exist for the report');
-    assert.ok(mainNotices.some(message => message.includes(report.reportId)), 'Main must have received the report delivery');
+    assert.equal(controller.state.notices[report.reportId].status, 'pending', 'the finalized report is retained, not auto-delivered');
+    assert.equal(mainNotices.length, 0, 'finalizing a report never automatically wakes Main');
+    const yielded = await controller.yieldMain();
+    assert.ok(yielded.reports.some(item => item.reportId === report.reportId), 'explicit yield retrieves the ready compact report');
+    assert.equal(controller.state.notices[report.reportId].channel, 'tool-result');
+    assert.equal(controller.summary().waitingReports, 1, 'an offer is not a confirmed delivery: the report stays waiting');
+    await controller.inspect('worker', report.reportId);
+    assert.equal(controller.summary().waitingReports, 0, 'an explicit pair_inspect read acknowledges the report');
     assert.equal(record.status, 'review');
     assert.equal(record.lastExchange?.direction, 'worker→main');
     const inbox = await fs.readdir(path.join(workerDir, 'inbox'));

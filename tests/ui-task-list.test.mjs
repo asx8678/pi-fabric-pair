@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { STALE_AGE_MS, activityAge, ageLabel, budgetBadges, indicator, indicatorWidget, minutesLabel, progressBar, staleWorkers, stepColor, stepSymbol, taskListLines } from '../src/ui.js';
+import { STALE_AGE_MS, activityAge, ageLabel, budgetBadges, indicator, indicatorWidget, minutesLabel, progressBar, staleWorkers, statusText, stepColor, stepSymbol, taskListLines } from '../src/ui.js';
 
 const wrap = { accent: 36, success: 32, warning: 33, error: 31, muted: 90, dim: 2 };
 const theme = { fg: (color, text) => '\x1b[' + wrap[color] + 'm' + text + '\x1b[0m' };
@@ -28,6 +28,60 @@ test('taskListLines renders per-step states and stays empty without a plan', () 
   assert.ok(lines[0].includes('✔ 1. Create marker'));
   assert.ok(lines[1].includes('▶ 2. Harden bridge'));
   assert.ok(lines[2].includes('○ 3. Wire UI'));
+});
+
+const statusSummary = (steps, status = 'retained') => ({ main: null, workers: [{ id: 'worker', status, model: 'provider/model', effort: 'low', cwd: '/project', pid: null, sessionId: null,
+  task: { id: 'task-1', status: 'done', step: 1, steps: 3, revisions: 0, objective: 'Finish the plan', stepList: steps } }],
+  ownerSession: 'owner', directory: '/state', cacheNote: 'Cache observations describe past requests.' });
+
+test('completed steps read complete ✔ N. title exactly; other states keep bare symbols', () => {
+  const steps = [
+    { id: 's1', title: 'Create marker', state: 'done' },
+    { id: 's2', title: 'Harden bridge', state: 'active' },
+    { id: 's3', title: 'Wire UI', state: 'todo' },
+    { id: 's4', title: 'Await review', state: 'review' },
+    { id: 's5', title: 'On hold', state: 'held' },
+  ];
+  assert.deepEqual(taskListLines(summary(steps)), [
+    'complete ✔ 1. Create marker', '▶ 2. Harden bridge', '○ 3. Wire UI', '◐ 4. Await review', '⏸ 5. On hold'
+  ]);
+  assert.equal(taskListLines(summary(steps), theme)[0], theme.fg('success', 'complete ✔ 1. Create marker'), 'the whole completed row keeps the success color');
+  assert.equal(stepSymbol('done'), '✔', 'stepSymbol return values are unchanged');
+});
+
+test('status rows use the same complete prefix, including for a completed retained task', () => {
+  const steps = [
+    { id: 's1', title: 'Create marker', state: 'done' },
+    { id: 's2', title: 'Harden bridge', state: 'active' },
+  ];
+  const text = statusText(statusSummary(steps), null, 0);
+  assert.ok(text.includes('    complete ✔ 1. Create marker\n'), 'status rows use the same complete prefix');
+  assert.ok(text.includes('    ▶ 2. Harden bridge\n'));
+  assert.ok(!/complete [▶◐⏸○]/.test(text), 'non-done states are never labeled complete');
+});
+
+test('/pair status hides elapsed/turn/age telemetry but keeps a plain stale warning', () => {
+  const active = (at) => ({ main: null, workers: [{ id: 'worker', status: 'working', model: 'provider/model', effort: 'low', cwd: '/project', pid: null, sessionId: null,
+    observation: { at, lastUsage: { input: 10, cacheRead: 10, cacheWrite: 0, totalInput: 20, output: 5, cacheRatio: 0.5, cost: null, observedAt: at } },
+    task: { id: 'task-1', status: 'running', step: 1, steps: 2, revisions: 0, objective: 'Finish the plan', startedAt: 1000, turns: 42, reportedCost: 0.5, stepList: [{ id: 's1', title: 'One', state: 'done' }] } }],
+    ownerSession: 'owner', directory: '/state', cacheNote: 'Cache observations describe past requests.' });
+  const fresh = statusText(active(5000), null, 6000);
+  assert.ok(!fresh.includes('Telemetry'), 'no elapsed/turn telemetry row');
+  assert.ok(!fresh.includes('Activity:'), 'no numeric activity-age row');
+  assert.doesNotMatch(fresh, /ago|turns|elapsed/, 'no displayed age or counters');
+  assert.ok(fresh.includes('  Last observed cache read: 50.0%\n'), 'the cache share stays visible');
+  assert.ok(!fresh.includes('STALE'), 'a fresh worker shows no stale warning');
+  const stale = statusText(active(1000), null, 500000);
+  const staleLine = stale.split('\n').find(line => line.includes('STALE'));
+  assert.ok(staleLine && !/\d/.test(staleLine), 'a plain stale warning remains and carries no elapsed number');
+  assert.ok(!stale.includes(' ago') && !stale.includes('turns') && !stale.includes('elapsed'), 'no age, turn-count or elapsed text anywhere');
+});
+
+test('long completed titles keep the prefix while truncating within the widget width', () => {
+  const s = summary([{ id: 's1', title: 'A very long completed step title that will never fit into a narrow status bar', state: 'done' }], { step: 1, steps: 1, status: 'running' });
+  const lines = indicatorWidget(s, false, theme).render(40);
+  assert.ok(lines[1].includes('complete ✔ 1.'), 'the complete prefix survives truncation');
+  for (const line of lines) assert.ok(visibleWidth(line) <= 40, 'widget lines must not exceed the render width');
 });
 
 test('long plans collapse past the widget cap with a +N more line', () => {
@@ -71,18 +125,20 @@ test('ageLabel formats seconds then minutes', () => {
   assert.equal(ageLabel(65000), '1m 5s');
 });
 
-test('working worker shows a live age badge with heartbeat blink and stale marker', () => {
+test('working worker keeps the heartbeat blink and a plain stale marker without timers', () => {
   const working = (at) => ({ workers: [{ id: 'worker', status: 'working', observation: { at } }], main: null });
   const oddPhase = indicator(working(1000), false, theme, 3000);
   assert.ok(oddPhase.includes('\x1b[2mW◉'), 'odd heartbeat phase dims the working dot');
   const evenPhase = indicator(working(1000), false, theme, 1000);
   assert.ok(evenPhase.includes('\x1b[32mW◉'), 'even phase keeps the state color');
-  assert.ok(evenPhase.includes('\x1b[90m0s'), 'fresh badge is muted and counts from zero');
+  assert.doesNotMatch(indicator(working(1000), false, undefined, 1000), /\b\d+[sm]\b/, 'fresh activity shows no numeric age');
   const quiet = indicator(working(1000), false, theme, 200000);
-  assert.ok(quiet.includes('\x1b[33m'), 'silence past the pulse window turns warning');
-  assert.ok(!quiet.includes('stale'));
+  assert.ok(!quiet.includes('stale'), 'silence past the pulse window only stops the blink');
+  assert.ok(!quiet.includes('\x1b[33m'), 'no warning badge without a number to show');
+  assert.doesNotMatch(indicator(working(1000), false, undefined, 200000), /\b\d+[sm]\b/, 'no numeric age appears while quiet');
   const stale = indicator(working(1000), false, theme, 400000);
   assert.ok(stale.includes('stale') && stale.includes('\x1b[31m'), 'hard silence becomes an error-colored stale marker');
+  assert.ok(!/\b\d+[sm]\b|ago/.test(indicator(working(1000), false, undefined, 400000)), 'the stale marker carries no elapsed duration');
   const idle = indicator({ workers: [{ id: 'worker', status: 'ready' }], main: null }, false, theme, 400000);
   assert.ok(!idle.includes('stale'), 'no liveness badge without active work');
 });
@@ -115,7 +171,7 @@ test('staleWorkers lists only silent active workers for one-shot alerting', () =
   assert.deepEqual(staleWorkers({ workers: [{ id: 'd', status: 'working' }], main: null }, 500000), [], 'no events yet reads as fresh, never stale');
 });
 
-test('budget badges show raw elapsed/turn telemetry without limit ratios or thresholds', () => {
+test('budgetBadges stays a compatibility helper and never reaches the widget line', () => {
   assert.equal(minutesLabel(0), '0s');
   assert.equal(minutesLabel(42000), '42s');
   assert.equal(minutesLabel(65000), '1m');
@@ -127,8 +183,8 @@ test('budget badges show raw elapsed/turn telemetry without limit ratios or thre
   assert.deepEqual(hot, ['muted:25m', 'muted:999999 turns'], 'once-enforced counts never escalate color');
   assert.deepEqual(budgetBadges({}, paint, 1000), [], 'no telemetry without task data');
   assert.deepEqual(budgetBadges({ timeoutMs: 1800000, turnLimit: 40 }, paint, 1000), [], 'removed limit fields alone render nothing');
-  const withWorker = indicator({ workers: [{ id: 'worker', status: 'working', observation: { at: 1000 }, task: { startedAt: 1000, turns: 3 } }], main: null }, false, theme, 6000);
-  assert.ok(withWorker.includes('5s') && withWorker.includes('3 turns'), 'raw telemetry appears in the widget line');
+  const withWorker = indicator({ workers: [{ id: 'worker', status: 'working', observation: { at: 1000 }, task: { startedAt: 1000, turns: 3 } }], main: null }, false, undefined, 6000);
+  assert.doesNotMatch(withWorker, /turns|\b\d+[sm]\b/, 'elapsed time and turn counts are no longer displayed');
 });
 
 test('indicator appends the painted progress bar only while a plan exists', () => {

@@ -32,8 +32,11 @@ handling, and bounded stream parsing. This is not a new wire protocol or gRPC.
 6. Controller validates the decoded report envelope before reading identities, then checks the incarnation nonce, owner session/epoch, worker slot/generation, session, task attempt/lease, plan revision, step, payload schema, and payload hash.
 7. Controller waits for the native settled event, runs preconfigured checks, and
    freezes/rechecks a source snapshot. It does not review a moving checkpoint.
-8. Main gets a compact custom follow-up in its current conversation. No entire
-   worker transcript is copied into Main.
+8. The finalized report waits in Pair's durable inbox. Main retrieves it
+   explicitly with `pair_yield`; the single exception is one report armed by an
+   empty yield, delivered once at the current run's settlement boundary. No
+   entire worker transcript is copied into Main, and no automatic idle wakeup
+   exists.
 9. Main retrieves immutable evidence, then answers, approves, revises or cancels
    through the decision tool. Approval binds to the snapshot hash and requires the
    live source snapshot still to match.
@@ -163,8 +166,38 @@ The plugin does not infer GPU residency, guarantee next-request hits, or run its
 own cache warmer. Soft limits stop further task execution when observations show
 a threshold, but cannot provide a provider-enforced total spend ceiling.
 
-## Delivery and security limits
+## Handoff: durable inbox, phases and branch fencing
 
+Reports finalize into a durable inbox of notices; no automatic model wakeup
+exists. Delivery channels are explicit: `pair_yield` returns compact reports in
+the tool result; an armed empty yield grants exactly one settlement-boundary
+entry injection (public `agent_before_settle` entries/continue) fenced by the
+exact permit; humans redeliver via `/pair yield` and `/pair inbox`.
+
+Receipts are truthful: notices record `offeredAt`/`channel` per attempt and
+`observedAt`/`observedBranch` for explicit reads; legacy `delivered` is
+readable while new attempts record `offered` (never `delivered` as confirmed
+delivery), and explicit re-offer or resolution may update those notices. The
+persisted `mainPhase` (status, monotonic revision, run
+token, armed flag, activity epoch, owner binding) is non-authorizing: it only
+channels delivery, and a missing or stale phase never implies readiness.
+
+A volatile logical activity epoch is bumped on user input, non-Pair tool
+admission and new agent runs; a persisted branch counter is bumped only by tree
+navigation. Inspections capture and re-verify the branch across their awaits;
+decisions and renewals are fenced against both, synchronously through the
+activation transaction, authority publication and the RPC pre-prompt write
+guard. Contained renewals interrupt the task and overwrite authority to a hold
+without sending work.
+
+Dispatch writes a bounded, identity-bound `work-order.json` beside the authority
+file: a read-only retained copy of the granted objective/context. The worker
+restores it (plus the final-only remaining plan) in the task-state packet after
+compaction, validating identity and omitting mismatched or malformed
+references; it is never a new grant and never changes the authority document.
+`agentDir` follows the public native tilde semantics (`~`, `~/...`).
+
+## Delivery and security limits
 Report notification is at-least-once recoverable, not exactly-once. Persisted IDs
 and idempotent decisions prevent duplicate advancement. A crash between enqueue
 and persistence can require manual `/pair inbox` redelivery. Reports are treated

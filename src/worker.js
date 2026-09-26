@@ -1,10 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { atomicJSON, assert, digest, inside, mkdirPrivate, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
+import { atomicJSON, assert, bounded, digest, inside, mkdirPrivate, plain, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
 import { reportSchema, validateReport } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
 import { gateTool, isDirectMutation, nativeSettings, probeNative, requestsDetachedEffect, toolName } from './native.js';
-import { selectLastMeasuredUsage } from './metrics.js';
+import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
 import { ScopedCacheWarming } from './warming.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionAPI} ExtensionAPI */
@@ -41,17 +41,41 @@ Call pair_report by itself, not in parallel with other work. After reporting, st
 Report concise changes and reasons, affected paths, and honestly labeled test evidence. Your claim that tests pass is not independently verified evidence.
 Do not deploy, push, commit, remove history, access unrelated secrets, or run destructive operations without the human's normal permission. Do not mutate Pair's coordination files. This is workflow control, not a sandbox.`;
 
-/** @param {Authority | null} authority @param {ReportEnvelope | null} report @returns {string} */
-function statePacket(authority, report) {
+/** Read-only retained work-order scope, written by the controller at dispatch:
+ * a bounded reference copy of the originally granted task scope for
+ * post-compaction restoration. Identity-bound to the exact task and plan
+ * revision; never a new grant and never an authority change. */
+/** @typedef {{version: 1, taskId: string, planRevision: number, objective: string, context: string, constraints: string[], writtenAt: number}} WorkOrderRef */
+/** @param {Authority | null} authority @param {ReportEnvelope | null} report @param {WorkOrderRef | null} [order] @returns {string} */
+function statePacket(authority, report, order) {
   if (!authority?.task) return 'No implementation lease is active. Remain idle until the Pair controller assigns work.';
   const t = authority.task;
+  // Scope restoration is inference-free: only an identity-matching reference is
+  // used, and only the originally granted context plus the final-only remaining
+  // plan are restored (per-step mode keeps authorizing one step at a time).
+  const scope = order && order.taskId === t.id && order.planRevision === t.planRevision
+    ? { originalObjective: order.objective, originalContext: bounded(order.context, 24000),
+        ...(t.policy.mode === 'final-only' ? { remainingPlan: t.steps.slice(t.stepIndex) } : {}) }
+    : {};
   return JSON.stringify({ type: 'fabric-pair.task-state', ownerEpoch: authority.ownerEpoch, workerGeneration: authority.workerGeneration,
     taskId: t.id, planRevision: t.planRevision, attemptId: t.attemptId, attemptNumber: t.attemptNumber,
     phase: authority.phase, leaseId: authority.leaseId, objective: t.objective,
     constraints: t.constraints, authorizedStep: t.steps[t.stepIndex],
     supervision: t.policy.mode, mayCompleteRemainingPlan: t.policy.mode === 'final-only',
     lastDecision: t.lastDecision || null, submittedReportId: report?.reportId || null,
+    ...scope,
     instruction: authority.phase === 'running' && !report ? 'Execute only the authorized scope.' : 'Wait; do not execute additional work.' });
+}
+/** Validate a retained work-order reference without ever adopting a mismatched
+ * or malformed one: conservative omission, never inference.
+ * @param {unknown} raw @returns {WorkOrderRef | null} */
+function validateWorkOrder(raw) {
+  if (raw === null || !plain(raw)) return null;
+  const { version, taskId, planRevision, objective, context, constraints, writtenAt } = raw;
+  if (version !== 1 || typeof taskId !== 'string' || typeof objective !== 'string' || typeof context !== 'string') return null;
+  if (typeof planRevision !== 'number' || !Number.isInteger(planRevision) || planRevision < 1) return null;
+  if (!Array.isArray(constraints) || !constraints.every(entry => typeof entry === 'string')) return null;
+  return { version: 1, taskId, planRevision, objective, context, constraints, writtenAt: typeof writtenAt === 'number' ? writtenAt : 0 };
 }
 
 /** Worker role: public Pi hooks + a private local outbox; it never starts children.
@@ -66,17 +90,33 @@ export function registerWorker(pi, env = process.env) {
   const dir = candidateDir; // Keep the validated string type inside hoisted async helpers.
   const gateFile = path.join(dir, 'authority.json');
   const latchFile = path.join(dir, 'latch.json');
+  const workOrderFile = path.join(dir, 'work-order.json');
   const reportSerial = new Serial(), telemetrySerial = new Serial();
   /** @type {ExtensionContext | undefined} */
   let ctxRef;
   /** @type {Authority | null} */
   let authority = null;
+  /** @type {WorkOrderRef | null} Read-only retained scope reference; null when absent/mismatched. */
+  let workOrder = null;
   /** @type {ReportEnvelope | null} */
   let report = null;
   /** @type {string | null} */
   let currentTool = null;
+  /** Display sample: the last measured request. Retained with its original
+   * observedAt across compaction and model changes (a new session starts from
+   * unknown); only a real measurement, including a 0% miss, replaces it. */
   /** @type {import('./observations.js').UsageObservation | null} */
   let lastUsage = null;
+  /** Measured average streaming throughput for this worker session and model:
+   * summed provider-reported output tokens over summed message_start→message_end
+   * seconds. Pi emits message_start only once the provider response begins
+   * streaming, so pre-response request/prefill latency is excluded; tool
+   * execution and idle gaps are never counted. Cleared at session/model
+   * boundaries so different sessions or models are never mixed. */
+  /** @type {{tokens: number, seconds: number} | null} */
+  let speed = null;
+  /** @type {number | null} Monotonic message_start mark of the pending assistant response. */
+  let speedStart = null;
   const warming = new ScopedCacheWarming();
   let warmingSession = '', warmingBinding = 0, warmingCheck = 0;
   const releaseWarming = () => { warmingCheck++; warming.release(); };
@@ -125,6 +165,10 @@ export function registerWorker(pi, env = process.env) {
     try {
     const next = validateAuthority(await readJSON(gateFile, null), { ownerSession, ownerEpoch, workerId, workerGeneration });
     authority = next;
+    // Read-only scope reference; absence, mismatch or a malformed file is
+    // conservative omission and must never weaken authority-file validation
+    // or break the hook. Raw invalid JSON is omitted, not fatal.
+    try { workOrder = validateWorkOrder(await readJSON(workOrderFile, null)); } catch { workOrder = null; }
     /** @type {unknown} */
     const rawLatch = await readJSON(latchFile, null);
     const latch = rawLatch === null ? null : validateLatch(rawLatch);
@@ -176,7 +220,7 @@ export function registerWorker(pi, env = process.env) {
       /** @type {import('./contracts.js').StoredTelemetryV1} */
       const packet = {
         version: PROTOCOL, nonce, ownerSession, ownerEpoch, workerId, workerGeneration, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
-        context: contextUsage(ctx) || null, currentTool, lastUsage, compacting, detachedEffect, warming: warming.snapshot(),
+        context: contextUsage(ctx) || null, currentTool, lastUsage, compacting, detachedEffect, warming: warming.snapshot(), speed,
         phase: report ? 'waiting' : authority?.phase || 'idle', model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
         at: Date.now()
       };
@@ -191,7 +235,11 @@ export function registerWorker(pi, env = process.env) {
       isProjectTrusted: () => ctx.isProjectTrusted?.() === true,
       getContextUsage: () => contextUsage(ctx)
     });
-    await atomicJSON(path.join(dir, 'probe.json'), { ...status, nonce, workerId, ownerSession, ownerEpoch, workerGeneration });
+    // Truthful live launch-environment observation: report exactly the mesh root
+    // this worker process inherited, even when a launcher dropped or replaced it.
+    // Environment readback is not a proof of Fabric store health or an OS sandbox.
+    const meshRoot = process.env.PI_FABRIC_MESH_ROOT ?? null;
+    await atomicJSON(path.join(dir, 'probe.json'), { ...status, meshRoot, nonce, workerId, ownerSession, ownerEpoch, workerGeneration });
     await telemetry(ctx);
   }
   /** @param {ExtensionContext} ctx @returns {boolean} */
@@ -258,7 +306,7 @@ export function registerWorker(pi, env = process.env) {
   });
   pi.on('session_start', async (_event, ctx) => {
     releaseWarming(); warmingSession = ctx.sessionManager.getSessionId(); warmingBinding++;
-    ctxRef = ctx; stopped = parentDead; lastUsage = null;
+    ctxRef = ctx; stopped = parentDead; lastUsage = null; speed = null; speedStart = null;
     if (parentDead) { ctx.abort(); ctx.shutdown(); return; }
     await mkdirPrivate(dir); await load(); await probe(ctx);
     clearInterval(parentTimer);
@@ -275,7 +323,7 @@ export function registerWorker(pi, env = process.env) {
     assert(!waiting() && authority && authority.task, 'PAIR_WAIT: the worker is retained but has no active implementation lease');
     assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
     return { systemPrompt: `${event.systemPrompt}\n\n${WORKER_GUIDE}`, message: {
-      customType: 'fabric-pair.task-state', content: statePacket(authority, report), display: false,
+      customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false,
       details: { ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: authority.task.attemptId, planRevision: authority.task.planRevision }
     } };
   });
@@ -327,7 +375,15 @@ export function registerWorker(pi, env = process.env) {
   });
   pi.on('tool_execution_start', async (event, ctx) => { currentTool = event.toolName; await telemetry(ctx); });
   pi.on('tool_execution_end', async (_event, ctx) => { currentTool = null; await telemetry(ctx); });
+  pi.on('message_start', async event => {
+    // A start whose end never arrives (aborted/incomplete generation) is discarded by the next start.
+    if (event.message?.role === 'assistant') speedStart = performance.now();
+  });
   pi.on('message_end', async (event, ctx) => {
+    if (event.message?.role === 'assistant') {
+      speed = addSpeedSample(speed, speedStart, performance.now(), event.message.usage);
+      speedStart = null;
+    }
     if (event.message?.role === 'assistant' && event.message.usage) { lastUsage = selectLastMeasuredUsage(lastUsage, event.message.usage); await telemetry(ctx); }
   });
   pi.on('cache_warming_decision', async (_event, ctx) => {
@@ -335,17 +391,17 @@ export function registerWorker(pi, env = process.env) {
     // Never override native economics with warm, nor stop another owner's lease.
     // Native validates the effective mode again after this awaited hook.
   });
-  pi.on('session_before_compact', async (_event, ctx) => { compacting = true; releaseWarming(); lastUsage = null; await telemetry(ctx); });
+  pi.on('session_before_compact', async (_event, ctx) => { compacting = true; releaseWarming(); speedStart = null; await telemetry(ctx); });
   pi.on('session_compact', async (_event, ctx) => {
     compacting = false; await load();
     // Restore bounded coordination state, not the transcript; never trigger a paid turn just to restore state.
-    pi.sendMessage({ customType: 'fabric-pair.task-state', content: statePacket(authority, report), display: false }, { deliverAs: 'nextTurn', triggerTurn: false });
+    pi.sendMessage({ customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false }, { deliverAs: 'nextTurn', triggerTurn: false });
     await telemetry(ctx);
   });
   pi.on('session_compact_failed', async (_event, ctx) => { compacting = false; await reconcileWarming(ctx); await telemetry(ctx); });
   pi.on('agent_before_settle', async (_event, ctx) => { if (waiting()) ctx.abort(); });
   pi.on('agent_settled', async (_event, ctx) => { currentTool = null; await reconcileWarming(ctx); await telemetry(ctx); });
-  pi.on('model_select', async (_event, ctx) => { releaseWarming(); lastUsage = null; await reconcileWarming(ctx); await telemetry(ctx); });
+  pi.on('model_select', async (_event, ctx) => { releaseWarming(); speed = null; speedStart = null; await reconcileWarming(ctx); await telemetry(ctx); });
   pi.on('session_shutdown', async () => {
     stopped = true; releaseWarming(); clearInterval(parentTimer); process.removeListener('disconnect', parentGone); await reportSerial.drain(); await telemetrySerial.drain();
   });

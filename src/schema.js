@@ -48,6 +48,7 @@ export const decisionSchema = object({
 }, ['workerId', 'taskId', 'reportId', 'action', 'feedback']);
 export const inspectSchema = object({ workerId: string('Worker ID', 80), reportId: string('Report ID; omit for latest', 80), file: string('Optional changed path to read from immutable evidence', 1024) }, ['workerId']);
 export const statusSchema = object({}, []);
+export const yieldSchema = object({}, []);
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isObject(value) { return plain(value); }
 /** @param {unknown} value @returns {value is unknown[]} */

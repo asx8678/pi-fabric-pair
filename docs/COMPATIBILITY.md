@@ -1,8 +1,12 @@
 # Compatibility and inspected upstream contracts
 
-## Current supervised MVP observation
+## Historical supervised MVP observation (predates the handoff changes)
 
-The current public Controller/PiRuntime/PiRpc/Worker path was exercised on **Pi 0.87.1, Fabric 0.96.3, Fovea 0.31.1, Node 24 and macOS**. A disposable Git workspace and private temporary agent directory used an OpenAI-compatible deterministic loopback model, with no real provider credentials or paid inference.
+**Current native qualification: NOT RUN.** The observation below predates the
+report-delivery, phase/branch-fencing and retained-scope changes; it is
+retained as historical evidence and does not qualify this checkout.
+
+The historical public Controller/PiRuntime/PiRpc/Worker path was exercised on **Pi 0.87.1, Fabric 0.96.3, Fovea 0.31.1, Node 24 and macOS**. A disposable Git workspace and private temporary agent directory used an OpenAI-compatible deterministic loopback model, with no real provider credentials or paid inference.
 
 Observed: real extension loading/readiness, foreground-only gate rejection of monitoring/background aliases, question/answer, worker file writes, report/immutable inspection, revision and next-step/final approval in one retained session, duplicate requests/decisions, rejection of uninspected/wrong-hash/stale approvals, cancellation of an active model stream, and confirmed worker exit on stop. The report-settlement and detached-effect fixes also received an independent scoped CLEAR source review.
 
@@ -130,8 +134,38 @@ Target: Node >=24, because Fabric 0.93.0 requires it. The current working-tree c
 
 The profile exercised by the five native scenarios is explicitly enabled and uses one writer with persisted sessions; this is not full V1 profile qualification. Its restrictions include `prewalk.enabled:false`, `executor.shellHangMs:0`, and `agents.maxDepth:0`. Explicit background shells and read-only workers with generic Fabric are rejected. Windows/Linux native operation, Bun-compiled Pi, specific live providers, custom extension combinations, terminal input/rendering, and provider cache warming still need profile-specific verification.
 
-## Upgrade checklist
+## Stored-state compatibility: handoff and branch fencing
 
+Persisted state gained optional, conservatively recovered fields; all older
+shapes remain readable and non-authorizing:
+
+- `state.mainPhase` — optional `{status: open|yielded, since, ownerSession,
+  ownerEpoch, revision?, runToken?, armed?, activity?}`. Interim records
+  without `revision`/`runToken`/`armed`/`activity` stay readable but are never
+  boundary-eligible. A stale owner binding (reload/rebind) leaves the phase
+  inert; a missing phase never implies yield.
+- `state.branch` — optional monotonic conversation-branch counter, advanced
+  only by tree navigation. Absence is the initial/default counter value; it
+  does not prove that navigation never occurred before branch tracking existed.
+- Notice receipts — optional `offeredAt`, `channel`
+  (`tool-result|boundary|manual`), `observedAt`, `observedBranch`. Legacy
+  `delivered` statuses stay readable; NEW delivery attempts record `offered`
+  and never write `delivered` as confirmed delivery, though explicit re-offer
+  or pair_decide resolution may update those notices' status. Legacy receipts
+  without branch metadata authorize only while the branch counter is still at
+  its initial value.
+- `work-order.json` (worker directory) — versioned read-only scope reference
+  written at dispatch. Missing, mismatched or malformed files are omitted
+  conservatively; `authority.json` validation is unchanged and still strict.
+- Paused question/review/blocker holds survive controller reload and repeated
+  pauses; `resume` restores the waiting decision without rotating a lease.
+  Older interrupted/mid-implementation recovery semantics are unchanged.
+
+These behaviors are covered by the offline suite only; native qualification of
+them is NOT RUN, and a Pair package loaded into a running session may differ
+from the checkout source.
+
+## Upgrade checklist
 Record installed versions and any patches. Follow `TESTING.md`: inspect source,
 run the retained compiler/package checks, and do not recreate tests or probes.
 Tool capture, settlement, permissions, compaction, Fovea continuation and session

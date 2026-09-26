@@ -64,8 +64,13 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 /** @typedef {'running' | 'awaiting_settle' | 'question' | 'blocked' | 'review' | 'paused' | 'interrupted' | 'completed' | 'cancelled'} TaskStatus */
 /** @typedef {'stopped' | 'starting' | 'ready' | 'working' | 'settling' | 'question' | 'blocked' | 'review' | 'paused' | 'attention' | 'error' | 'running' | 'awaiting_settle' | 'interrupted'} WorkerStatus */
 /** @typedef {{hash: string, taskId: string, workerId: string, acceptedAt: number, status: string}} StoredRequestV1 */
-/** @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, error?: string}} HistoricalNoticeV1 */
+/** Delivery receipts are truthful offers, never confirmed comprehension: offeredAt/channel name the channel that received the report; observedAt records an explicit Main read. Legacy 'delivered' remains readable but is never newly written (sendMessage is fire-and-forget).
+ * observedBranch pins the persisted conversation-branch counter the report was last inspected on; a decision on a different branch is stale and needs fresh inspection.
+ * @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual', observedAt?: number, observedBranch?: number, error?: string}} HistoricalNoticeV1 */
 /** @typedef {HistoricalNoticeV1 & {ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} StoredNoticeV1 */
+/** Explicit, nonauthorizing Main logical-phase marker. It only channels report delivery after an explicit yield; it never grants worker or Main authority, and a missing marker never implies readiness or yield. revision is a real monotonic phase token; runToken binds a yield to the exact Main agent run that recorded it.
+ * The armed flag records whether an empty yield may receive one future automatic boundary offer; activity is the logical activity epoch captured with the yield.
+ * @typedef {{status: 'open' | 'yielded', since: number, ownerSession: string, ownerEpoch: number, revision?: number, runToken?: string | null, armed?: boolean, activity?: number}} StoredMainPhaseV1 */
 /** @typedef {{id: string, status: string, file: string}} StoredHistoryV1 */
 /** @typedef {{direction: 'main→worker' | 'worker→main', kind: string, at: number}} StoredExchangeV1 */
 /** @typedef {{reportId: string, reason: string, at: number}} StoredStaleReportV1 */
@@ -74,13 +79,16 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
  */
 /** @typedef {{provider: string, id: string}} StoredModel */
 /** @typedef {{toolCallId: string, toolName: string, pid: number | null, detectedAt: number}} StoredDetachedEffectV1 */
+/** Measured assistant generation-speed aggregate published with current telemetry. */
+/** @typedef {{tokens: number, seconds: number}} StoredSpeedV1 */
 /** @typedef {{version: 1, nonce: string, workerId: string, pid: number, sessionId: string, context: StoredContextUsage | null, currentTool: string | null, lastUsage: UsageObservation | null, compacting: boolean, detachedEffect: StoredDetachedEffectV1 | null, phase: AuthorityPhase, model: StoredModel | null, at: number}} HistoricalTelemetryV1 */
-/** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number, warming?: import('./warming.js').WarmingObservation}} StoredTelemetryV1 */
+/** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number, warming?: import('./warming.js').WarmingObservation, speed?: StoredSpeedV1 | null}} StoredTelemetryV1 */
 /** @typedef {{agentDir: string, piCompaction: unknown, cacheWarming: unknown, fabricCompaction: unknown, fabricShellHangMs: number | null, fabricAgentMaxDepth: number | null, prewalkDisabled: boolean, prewalkConfigured: boolean, note: string}} StoredNativeSettings */
 /** sessionFile is omitted by JSON serialization when Pi has no session file (Pi SessionManager API).
  * @typedef {{protocol: 1, pairVersion: string, pid: number, cwd: string, trusted: boolean, sessionId: string, sessionFile?: string, model: (StoredModel & {contextWindow: number}) | null, thinkingLevel: Effort | 'max' | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}, sourcePaths: string[], context: StoredContextUsage | null, native: StoredNativeSettings, checkedAt: number, scope: string, nonce: string, workerId: string, ownerSession: string}} HistoricalProbeV1
  */
-/** @typedef {HistoricalProbeV1 & {ownerEpoch: number, workerGeneration: number}} StoredProbeV1 */
+/** meshRoot is the live private-mesh environment observation; probes retained before the field existed may lack it.
+ * @typedef {HistoricalProbeV1 & {ownerEpoch: number, workerGeneration: number, meshRoot?: string}} StoredProbeV1 */
 /** Exact 7583104 envelope omissions; this is not a partially-filled current envelope.
  * @typedef {Omit<ReportEnvelope, 'ownerEpoch' | 'workerGeneration' | 'attemptId' | 'attemptNumber'>} HistoricalReportEnvelopeV1
  */
@@ -98,8 +106,9 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 /** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null}} StoredWorkerFieldsV1 */
 /** @typedef {StoredWorkerFieldsV1 & {workerGeneration: number, task: StoredTaskV1 | null}} StoredWorkerV1 */
 /** @typedef {StoredWorkerFieldsV1 & {task: HistoricalTaskV1 | null}} HistoricalWorkerV1 */
-/** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, cwd: string, workers: Record<string, StoredWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, StoredNoticeV1>}} StoredStateV1 */
-/** @typedef {{version: 1, ownerSession: string, cwd: string, workers: Record<string, HistoricalWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, HistoricalNoticeV1>}} HistoricalStateV1 */
+/** state.branch is a persisted monotonic conversation-branch counter (normal turns and compaction never bump it); it only fences stale branch decisions, never authorizes anything.
+ * @typedef {{version: 1, ownerSession: string, ownerEpoch: number, cwd: string, workers: Record<string, StoredWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, StoredNoticeV1>, mainPhase?: StoredMainPhaseV1, branch?: number}} StoredStateV1 */
+/** @typedef {{version: 1, ownerSession: string, cwd: string, workers: Record<string, HistoricalWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, HistoricalNoticeV1>, mainPhase?: StoredMainPhaseV1, branch?: number}} HistoricalStateV1 */
 /** @typedef {'invalid-field' | 'missing-required-field' | 'mixed-identity' | 'partial-policy-layout' | 'hash-mismatch' | 'inconsistent-reference' | 'unsupported-version' | 'unsupported-shape' | 'unsupported-policy'} StoredIssueCode */
 /** @typedef {{code: StoredIssueCode, path: string, message: string}} StoredIssue */
 /** @typedef {{path: string, policyLayout: 'pre-deferred-policy' | 'current-policy', alias: 'final' | 'strict' | null}} StoredTaskLayout */
@@ -393,12 +402,19 @@ function diagnosticHistorical(record, label, kind, facts) {
   facts.reconciliationReasons.push({ code: 'diagnostic-provenance-unchecked', path: label });
   return historical;
 }
+/** Measured assistant generation-speed aggregate; a weighted sum (tokens/seconds), never an average of rates.
+ * @param {unknown} value @param {string} label */
+function checkSpeed(value, label) {
+  const speed = object(value, label); keys(speed, ['tokens', 'seconds'], label);
+  for (const key of ['tokens', 'seconds']) invariant(typeof speed[key] === 'number' && Number.isFinite(speed[key]) && speed[key] > 0, `${label}.${key} must be a positive finite number`, `${label}.${key}`);
+}
 /** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @param {ProfileFacts} facts */
 function checkTelemetry(value, label, workerId, ownerSession, facts) {
   if (value === null) return;
   const record = object(value, label), historical = diagnosticHistorical(record, label, 'telemetry', facts);
-  keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration', 'warming'])], label);
+  keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration', 'warming', 'speed'])], label);
   if (!historical && Object.hasOwn(record, 'warming')) validateWarmingObservation(record.warming);
+  if (!historical && Object.hasOwn(record, 'speed') && record.speed !== null) checkSpeed(record.speed, `${label}.speed`);
   knownVersion(required(record, 'version', label), `${label}.version`, 1);
   text(required(record, 'nonce', label), `${label}.nonce`, 10000); text(required(record, 'sessionId', label), `${label}.sessionId`, 10000);
   reference(id(required(record, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Telemetry targets a different worker');
@@ -490,10 +506,17 @@ function checkNativeSettings(value, label) {
 function checkProbe(value, label, workerId, ownerSession, facts) {
   if (value === null) return;
   const probe = object(value, label), historical = diagnosticHistorical(probe, label, 'probe', facts);
-  keys(probe, ['protocol', 'pairVersion', 'pid', 'cwd', 'trusted', 'sessionId', 'sessionFile', 'model', 'thinkingLevel', 'capabilities', 'versions', 'sourcePaths', 'context', 'native', 'checkedAt', 'scope', 'nonce', 'workerId', 'ownerSession', ...(historical ? [] : ['ownerEpoch', 'workerGeneration'])], label);
+  keys(probe, ['protocol', 'pairVersion', 'pid', 'cwd', 'trusted', 'sessionId', 'sessionFile', 'meshRoot', 'model', 'thinkingLevel', 'capabilities', 'versions', 'sourcePaths', 'context', 'native', 'checkedAt', 'scope', 'nonce', 'workerId', 'ownerSession', ...(historical ? [] : ['ownerEpoch', 'workerGeneration'])], label);
   knownVersion(required(probe, 'protocol', label), `${label}.protocol`, 1); integer(required(probe, 'pid', label), `${label}.pid`, 1);
   for (const key of ['pairVersion', 'cwd', 'sessionId', 'scope', 'nonce']) text(required(probe, key, label), `${label}.${key}`, 10000);
   if (Object.hasOwn(probe, 'sessionFile')) text(probe.sessionFile, `${label}.sessionFile`, 10000);
+  // Live probes always carry the private mesh root observation; retained probes
+  // written before this field existed may legitimately lack it. Presence must
+  // still be well formed; live readiness additionally requires an exact match.
+  if (Object.hasOwn(probe, 'meshRoot')) {
+    const meshRoot = text(required(probe, 'meshRoot', label), `${label}.meshRoot`, 10000);
+    invariant(path.isAbsolute(meshRoot), `${label}.meshRoot must be an absolute path`, `${label}.meshRoot`);
+  }
   reference(id(required(probe, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Probe targets a different worker');
   reference(text(required(probe, 'ownerSession', label), `${label}.ownerSession`, 10000) === ownerSession, `${label}.ownerSession`, 'Probe belongs to a different stored owner');
   if (!historical) for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(probe, key, label), `${label}.${key}`, 1);
@@ -684,15 +707,38 @@ function checkRequest(value, label) {
 /** @param {unknown} value @param {string} label @param {string} reportId @param {boolean} historical */
 function checkNotice(value, label, reportId, historical) {
   const notice = object(value, label);
-  keys(notice, ['reportId', 'workerId', 'taskId', 'status', 'createdAt', 'deliveredAt', 'error', ...(historical ? [] : ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'])], label);
+  keys(notice, ['reportId', 'workerId', 'taskId', 'status', 'createdAt', 'deliveredAt', 'error', 'offeredAt', 'channel', 'observedAt', 'observedBranch', ...(historical ? [] : ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'])], label);
   reference(id(required(notice, 'reportId', label), `${label}.reportId`) === reportId, `${label}.reportId`, 'Notice identity differs from its map key');
   for (const key of ['workerId', 'taskId', ...(historical ? [] : ['attemptId', 'deliveryOperationId'])]) id(required(notice, key, label), `${label}.${key}`);
   if (!historical) for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(notice, key, label), `${label}.${key}`, 1);
-  choice(required(notice, 'status', label), ['pending', 'delivery_pending', 'delivered', 'delivery_failed', 'resolved', 'superseded'], `${label}.status`);
+  choice(required(notice, 'status', label), ['pending', 'delivery_pending', 'offered', 'delivered', 'delivery_failed', 'resolved', 'superseded'], `${label}.status`);
   integer(required(notice, 'createdAt', label), `${label}.createdAt`);
-  // Both survive subsequent status changes; delivered is not an observation receipt.
+  // Receipts survive subsequent status changes; no status is an observation receipt.
   if (Object.hasOwn(notice, 'deliveredAt')) integer(notice.deliveredAt, `${label}.deliveredAt`);
   if (Object.hasOwn(notice, 'error')) text(notice.error, `${label}.error`, 2000);
+  // Offer receipts name the delivery channel that received the report; observedAt
+  // records an explicit Main read. Neither confirms the model comprehended it.
+  if (Object.hasOwn(notice, 'offeredAt')) integer(notice.offeredAt, `${label}.offeredAt`);
+  if (Object.hasOwn(notice, 'channel')) choice(notice.channel, ['tool-result', 'boundary', 'manual'], `${label}.channel`);
+  if (Object.hasOwn(notice, 'observedAt')) integer(notice.observedAt, `${label}.observedAt`);
+  // The branch the report was last inspected on; only fences stale decisions.
+  if (Object.hasOwn(notice, 'observedBranch')) integer(notice.observedBranch, `${label}.observedBranch`, 0);
+}
+/** Explicit Main-phase marker: readable in current and legacy profiles, never authorizing.
+ * @param {unknown} value @param {string} label */
+function checkMainPhase(value, label) {
+  const phase = object(value, label);
+  keys(phase, ['status', 'since', 'ownerSession', 'ownerEpoch', 'revision', 'runToken', 'armed', 'activity'], label);
+  choice(required(phase, 'status', label), ['open', 'yielded'], `${label}.status`);
+  integer(required(phase, 'since', label), `${label}.since`);
+  text(required(phase, 'ownerSession', label), `${label}.ownerSession`, 10000);
+  integer(required(phase, 'ownerEpoch', label), `${label}.ownerEpoch`, 1);
+  // Interim-shape compatibility: absent revision/runToken stays readable but is
+  // recovered conservatively (never boundary-eligible), never authorizing.
+  if (Object.hasOwn(phase, 'revision')) integer(phase.revision, `${label}.revision`, 0);
+  if (Object.hasOwn(phase, 'runToken') && phase.runToken !== null) text(phase.runToken, `${label}.runToken`, 200);
+  if (Object.hasOwn(phase, 'armed')) bool(phase.armed, `${label}.armed`);
+  if (Object.hasOwn(phase, 'activity')) integer(phase.activity, `${label}.activity`, 0);
 }
 /** Cross-check only retained identities. No filesystem checks or obligations inferred from absence.
  * @param {JSONObject} state @param {boolean} historical
@@ -781,7 +827,7 @@ function checkRetainedReferences(state, historical) {
 }
 /** @param {unknown} value @param {boolean} historical @param {ProfileFacts} facts */
 function checkStoredStateProfile(value, historical, facts) {
-  const state = object(value, 'state'); keys(state, ['version', 'ownerSession', 'cwd', 'workers', 'requests', 'notices', ...(historical ? [] : ['ownerEpoch'])], 'state');
+  const state = object(value, 'state'); keys(state, ['version', 'ownerSession', 'cwd', 'workers', 'requests', 'notices', 'mainPhase', 'branch', ...(historical ? [] : ['ownerEpoch'])], 'state');
   integer(required(state, 'version', 'state'), 'state.version', STATE_VERSION, STATE_VERSION);
   const ownerSession = text(required(state, 'ownerSession', 'state'), 'state.ownerSession', 10000); text(required(state, 'cwd', 'state'), 'state.cwd', 10000);
   if (!historical) integer(required(state, 'ownerEpoch', 'state'), 'state.ownerEpoch');
@@ -791,6 +837,10 @@ function checkStoredStateProfile(value, historical, facts) {
   for (const [requestId, request] of Object.entries(requests)) checkRequest(request, `state.requests.${id(requestId, 'state.requests key')}`);
   const notices = object(required(state, 'notices', 'state'), 'state.notices');
   for (const [reportId, notice] of Object.entries(notices)) checkNotice(notice, `state.notices.${reportId}`, id(reportId, 'state.notices key'), historical);
+  // Optional in every profile: absent legacy/current data never implies yield.
+  if (Object.hasOwn(state, 'mainPhase')) checkMainPhase(state.mainPhase, 'state.mainPhase');
+  // Persisted conversation-branch counter: readable in every profile, never authorizing.
+  if (Object.hasOwn(state, 'branch')) integer(state.branch, 'state.branch', 0);
   checkRetainedReferences(state, historical);
   if (historical) for (const diagnostic of facts.diagnosticLayouts) {
     if (diagnostic.profile === 'current') facts.unsupported.push({ code: 'unsupported-shape', path: diagnostic.path, message: 'No proven pre-identity producer supplied current diagnostic identities' });

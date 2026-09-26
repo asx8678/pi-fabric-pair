@@ -93,7 +93,14 @@ async function workspaceEntry(root, name) {
     let ancestor;
     try { ancestor = await fs.lstat(cursor); }
     catch (error) { if (plain(error) && error.code === 'ENOENT') return { absolute, missing: true }; throw error; }
-    assert(ancestor.isDirectory() && !ancestor.isSymbolicLink(), `Unsafe symlink or non-directory ancestor in evidence path: ${name}`);
+    if (ancestor.isSymbolicLink() || !ancestor.isDirectory()) {
+      // A symlink ancestor could point outside the workspace and is never
+      // followed, and other special types stay fail-closed. An ordinary file
+      // ancestor means a former parent directory was replaced by a file, so
+      // every Git-listed descendant beneath it is simply gone.
+      assert(ancestor.isFile(), `Unsafe symlink or non-directory ancestor in evidence path: ${name}`);
+      return { absolute, missing: true };
+    }
   }
   let stat;
   try { stat = await fs.lstat(absolute); }
@@ -136,6 +143,32 @@ async function readEvidenceBytes(file, maxBytes) {
   } finally { await handle.close(); }
 }
 
+/** Modes of every indexed path, from NUL-delimited `git ls-files --stage`
+ * (`<mode> <object> <stage>\t<path>` records). `-z` keeps spaces, tabs and
+ * newlines inside paths intact, and an unresolved merge repeats a path across
+ * stages 1-3, so every record for a path is retained. Git gitlinks (submodules
+ * and embedded repositories) are identified by index mode 160000 here, never
+ * by lstat.isDirectory alone: a directory at a path whose index modes are only
+ * ordinary file/symlink modes is an unstaged replacement, not a repository.
+ * @param {string} root @returns {Promise<Map<string, Set<string>>>}
+ */
+async function indexModes(root) {
+  const listing = await git(root, ['ls-files', '-z', '--stage']);
+  /** @type {Map<string, Set<string>>} */
+  const modes = new Map();
+  for (const record of listing.split('\0')) {
+    if (!record) continue;
+    const tab = record.indexOf('\t');
+    assert(tab > 0, 'Malformed Git index record');
+    const name = record.slice(tab + 1);
+    const fields = record.slice(0, tab).split(' ');
+    assert(name && fields.length === 3 && /^[0-7]{6}$/.test(fields[0]) && /^[0-9a-f]{40,64}$/.test(fields[1]) && /^\d+$/.test(fields[2]), `Malformed Git index record: ${bounded(record, 200)}`);
+    let set = modes.get(name);
+    if (!set) modes.set(name, set = new Set());
+    set.add(fields[0]);
+  }
+  return modes;
+}
 export class Evidence {
   /** @param {string} baseDir @param {import('./config.js').EvidenceConfig} limits */
   constructor(baseDir, limits) { this.baseDir = baseDir; this.blobs = path.join(baseDir, 'blobs'); this.limits = limits; }
@@ -144,6 +177,7 @@ export class Evidence {
     root = await canonical(root); await mkdirPrivate(this.blobs);
     const names = [...new Set((await git(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])).split('\0').filter(Boolean))].sort();
     assert(names.length <= this.limits.maxFiles, 'Workspace exceeds evidence.maxFiles; narrow the working tree or increase the reviewed limit');
+    const indexed = await indexModes(root);
     const headResult = await runCommand('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root });
     const head = headResult.code === 0 ? headResult.stdout.trim() : null;
     let total = 0;
@@ -153,7 +187,26 @@ export class Evidence {
       const entry = await workspaceEntry(root, name);
       if (entry.missing) { entries.push({ path: name, kind: 'missing', sha: null, size: 0, executable: false }); continue; }
       const { absolute, stat } = entry;
-      assert(!stat.isDirectory(), `Git submodule/directory ${name} requires its own Pair workspace; review evidence does not silently skip it`);
+      if (stat.isDirectory()) {
+        // A directory at an enumerated Git path is either a nested repository
+        // — an indexed gitlink (mode 160000), an untracked embedded repository
+        // that Git itself reports as a directory name, or a tracked path whose
+        // replacement directory carries its own repository metadata — or an
+        // ordinary tracked file/symlink whose path was replaced by a plain
+        // directory without staging. Repositories fail closed: index modes prove
+        // only the former entry type, and Git does not enumerate a nested
+        // repository occupying a tracked path, so its contents would otherwise
+        // be silently omitted. A .git directory, gitfile or symlink marker is
+        // therefore rejected without following it or recursing into the
+        // directory, while a replaced ordinary path stays missing and Git
+        // enumerates its permitted nonignored descendants separately.
+        const modes = indexed.get(name);
+        assert(modes && !modes.has('160000'), `Git submodule/directory ${name} requires its own Pair workspace; review evidence does not silently skip it`);
+        const marker = await fs.lstat(path.join(absolute, '.git')).catch(error => { if (plain(error) && error.code === 'ENOENT') return null; throw error; });
+        assert(!marker, `Git submodule/directory ${name} requires its own Pair workspace; review evidence does not silently skip it`);
+        entries.push({ path: name, kind: 'missing', sha: null, size: 0, executable: false });
+        continue;
+      }
       assert(stat.isFile() || stat.isSymbolicLink(), `Unsupported file type: ${name}`);
       if (stat.isSymbolicLink()) {
         const bytes = Buffer.from(await fs.readlink(absolute));
@@ -310,20 +363,45 @@ export class Evidence {
     return { checkpointHash: manifest.checkpointHash, baseHash: manifest.baseHash, changed: manifest.changed, verification: manifest.verification, patchTruncated: manifest.patchTruncated, patch: bounded(patch.toString('utf8'), 60000), localArtifact: artifact };
   }
 }
-/** @param {import('./contracts.js').VerificationPolicy} config @param {string} cwd @param {string} artifactDir
- * @param {AbortSignal} [signal] @returns {Promise<import('./contracts.js').VerificationResult[]>}
+/** Per-command source identity: every configured check is bound to the exact
+ * workspace state it ran against. A mutation between checks — even a
+ * mutation-then-restoration — cannot create passing evidence for a different
+ * source: each command's before/after source hash must equal the batch's
+ * expected checkpointed hash, and the hashes are retained in the check
+ * artifacts. The VerificationResult wire contract is unchanged.
+ *
+ * Documented limitation: these are ENDPOINT snapshots around each command. A
+ * transient within-command mutation that is fully restored before the command
+ * exits is not isolated — no file watcher, index or scheduler is claimed, and
+ * no atomic exclusion of external writers is attempted. Continuation authority
+ * is separately revalidated against a fresh capture after the final readiness
+ * wait (see PairController.decide).
+ * @param {import('./contracts.js').VerificationPolicy} config @param {string} cwd @param {string} artifactDir
+ * @param {AbortSignal} [signal] @param {{expectedHash?: string, captureSource?: () => Promise<string>}} [identity]
+ * @returns {Promise<import('./contracts.js').VerificationResult[]>}
  */
-export async function verifyConfigured(config, cwd, artifactDir, signal) {
+export async function verifyConfigured(config, cwd, artifactDir, signal, identity = {}) {
   await mkdirPrivate(artifactDir);
   /** @type {import('./contracts.js').VerificationResult[]} */
   const results = [];
   for (const [i, check] of config.commands.entries()) {
+    /** Source identity before the check: drift from the checkpointed evidence
+     * (including external mutation between commands) fails the whole verification. */
+    let sourceHash = null;
+    if (identity.captureSource) {
+      sourceHash = await identity.captureSource();
+      if (identity.expectedHash) assert(sourceHash === identity.expectedHash, `VERIFICATION_SOURCE_DRIFT: check ${check.name} ran against a different workspace state than the checkpointed evidence`);
+    }
     /** @type {VerificationCommandResult} */
     let result;
     try { result = await runCommand(check.command, check.args, { cwd, timeoutMs: config.timeoutMs, maxBytes: 1024 * 1024, signal }); }
     catch (e) { result = { code: null, stderr: String(e), stdout: '', timedOut: false, truncated: false }; }
+    if (identity.captureSource) {
+      const afterHash = await identity.captureSource();
+      assert(afterHash === sourceHash, `VERIFICATION_SOURCE_DRIFT: the workspace changed while running check ${check.name}`);
+    }
     const evidencePath = path.join(artifactDir, `check-${i + 1}.json`);
-    await atomicJSON(evidencePath, { name: check.name, command: check.command, args: check.args, ...result, at: Date.now() });
+    await atomicJSON(evidencePath, { name: check.name, command: check.command, args: check.args, ...(sourceHash === null ? {} : { sourceHash }), ...result, at: Date.now() });
     results.push({ name: check.name, source: 'controller-configured', passed: result.code === 0 && !result.timedOut && !result.aborted, code: result.code, timedOut: !!result.timedOut, output: bounded((result.stdout || '') + '\n' + (result.stderr || ''), 6000), artifact: evidencePath });
     if (signal?.aborted) break;
   }

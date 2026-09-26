@@ -118,6 +118,110 @@ test('enabled autostart without a model is a setup hint, not an error loop', () 
   assert.equal(f.notices[0].level, 'info'); assert.equal(f.spawns(), 0);
 }, { project: { version: 2, enabled: true, autoStart: true } }));
 
+test('reload rereads scoped settings and indicator while retaining the Main binding without autostart', () => fixture(async f => {
+  const controller = f.controller, model = f.ctx.model, epoch = controller.state.ownerEpoch;
+  const next = { version: 2, enabled: true, autoStart: true, workers: [{ id: 'worker', provider: 'fixture', model: 'new-worker', effort: 'high', cwd: null, readOnly: false }] };
+  const bytes = JSON.stringify(next); await fs.writeFile(f.files.project, bytes);
+  await fs.writeFile(f.files.global, JSON.stringify({ version: 2, limits: { maxReportsPerTask: 75 } }));
+  await fs.writeFile(f.files.ui, JSON.stringify({ indicator: 'off' }));
+  await f.command('reload');
+  assert.equal(f.getController(), controller); assert.equal(controller.state.ownerEpoch, epoch);
+  assert.equal(f.ctx.model, model); assert.equal(controller.config.workers[0].model, 'new-worker');
+  assert.equal(controller.config.limits.maxReportsPerTask, 75); assert.equal(controller.config.indicator, 'off');
+  assert.equal(controller.closing, false); assert.equal(f.spawns(), 0); assert.deepEqual(f.messages, []);
+  assert.equal(await fs.readFile(f.files.project, 'utf8'), bytes, 'reload is read-only');
+  assert.match(f.notices.at(-1).message, /configuration reloaded/);
+}));
+
+test('invalid configuration cannot escape the command boundary or replace valid settings, and reload can recover', () => fixture(async f => {
+  const before = structuredClone(f.controller.config), epoch = f.controller.state.ownerEpoch;
+  for (const bytes of ['{broken', JSON.stringify({ version: 2, unexpected: true })]) {
+    await fs.writeFile(f.files.project, bytes);
+    await assert.doesNotReject(f.command('reload'));
+    assert.equal(f.notices.at(-1).level, 'error'); assert.deepEqual(f.controller.config, before);
+    await assert.doesNotReject(f.command('restart worker'));
+    assert.equal(f.notices.at(-1).level, 'error'); assert.deepEqual(f.controller.config, before);
+    assert.equal(f.spawns(), 0); assert.equal(f.controller.closing, false);
+  }
+  await fs.writeFile(f.files.project, JSON.stringify({ version: 2, autoStart: false, limits: { maxReportsPerTask: 60 } }));
+  await f.command('reload');
+  assert.equal(f.controller.config.limits.maxReportsPerTask, 60);
+  assert.equal(f.controller.state.ownerEpoch, epoch); assert.equal(f.notices.at(-1).level, 'info');
+}));
+
+test('reload preserves active authorization and stages the worker model without a replacement', () => fixture(async f => {
+  const active = await activeWarmingFixture(f);
+  try {
+    const before = JSON.stringify(active.task), hash = f.controller.configHash(), intent = f.controller.intent('worker');
+    const authority = await fs.readFile(path.join(f.controller.workerDir('worker'), 'authority.json'), 'utf8');
+    await fs.writeFile(f.files.project, JSON.stringify({ version: 2, enabled: true, autoStart: true, workers: [{ id: 'worker', provider: 'fixture', model: 'changed', effort: 'low', cwd: null, readOnly: false }] }));
+    await f.command('reload');
+    assert.equal(f.controller.configHash(), hash); assert.equal(f.controller.intent('worker'), intent);
+    assert.equal(JSON.stringify(active.task), before); assert.equal(f.controller.pendingConfig.workers[0].model, 'changed');
+    assert.equal(await fs.readFile(path.join(f.controller.workerDir('worker'), 'authority.json'), 'utf8'), authority);
+    assert.match(f.notices.at(-1).message, /staged/); assert.equal(f.spawns(), 0);
+    await f.command('restart worker');
+    assert.match(f.notices.at(-1).message, /pending until all tasks/);
+    assert.equal(JSON.stringify(active.task), before); assert.equal(f.controller.intent('worker'), intent);
+  } finally { active.clear(); }
+}, { project: { version: 2, enabled: true, autoStart: false } }));
+
+test('reload ignores untrusted project edits', () => fixture(async f => {
+  await fs.writeFile(f.files.project, '{invalid untrusted settings');
+  await fs.writeFile(f.files.global, JSON.stringify({ version: 2, autoStart: false, limits: { maxReportsPerTask: 63 } }));
+  await f.command('reload');
+  assert.equal(f.controller.config.limits.maxReportsPerTask, 63); assert.equal(f.notices.at(-1).level, 'info');
+}, { trusted: false }));
+
+for (const dashboard of [false, true]) test(`worker restart ${dashboard ? 'dashboard' : 'command'} loads disk settings and reports failures without shutting down Main`, () => fixture(async f => {
+  const model = f.ctx.model, epoch = f.controller.state.ownerEpoch, calls = [];
+  await fs.writeFile(f.files.project, JSON.stringify({ version: 2, enabled: true, autoStart: false, workers: [{ id: 'new-worker', provider: 'fixture', model: 'new-model', effort: 'low', cwd: null, readOnly: false }] }));
+  let fail = true;
+  f.controller.restart = async id => {
+    calls.push(id); assert.equal(f.controller.config.workers[0].model, 'new-model');
+    if (fail) throw Error('Worker model unavailable');
+    return { task: { status: 'interrupted' } };
+  };
+  const restart = async () => { if (dashboard) f.actions.push('Restart default worker'); await f.command(dashboard ? '' : 'restart'); };
+  await assert.doesNotReject(restart());
+  assert.equal(f.notices.at(-1).level, 'error'); assert.match(f.notices.at(-1).message, /Worker model unavailable/);
+  assert.equal(f.controller.closing, false); assert.equal(f.ctx.model, model); assert.equal(f.controller.state.ownerEpoch, epoch);
+  fail = false; await restart();
+  assert.deepEqual(calls, ['new-worker', 'new-worker']); assert.equal(f.notices.at(-1).level, 'info');
+  assert.match(f.notices.at(-1).message, /started.*no model turn.*Work remains held/);
+  assert.deepEqual(f.messages, []);
+}));
+
+test('dashboard exposes reload and rejects bad arguments without runtime work', () => fixture(async f => {
+  f.actions.push('Reload configuration'); await f.command('');
+  assert.match(f.notices.at(-1).message, /configuration reloaded/);
+  await f.command('reload worker'); assert.match(f.notices.at(-1).message, /Use \/pair reload/);
+  await f.command('restart worker extra'); assert.match(f.notices.at(-1).message, /Use \/pair restart/);
+  assert.equal(f.spawns(), 0);
+}));
+
+test('stop during a restart configuration read prevents a later launch', () => fixture(async f => {
+  let restarts = 0; f.controller.restart = async () => { restarts++; };
+  const update = f.controller.updateConfig.bind(f.controller);
+  f.controller.updateConfig = async config => { await update(config); await f.controller.stop('worker'); };
+  await f.command('restart worker');
+  assert.equal(restarts, 0); assert.match(f.notices.at(-1).message, /restart was superseded/);
+  assert.equal(f.controller.closing, false);
+}));
+
+test('a restart cannot cross a Main session change while reloading settings', () => fixture(async f => {
+  let restarts = 0, rebinding;
+  f.controller.restart = async () => { restarts++; };
+  const update = f.controller.updateConfig.bind(f.controller);
+  f.controller.updateConfig = async config => {
+    await update(config); f.ctx.sessionManager.getSessionId = () => 'next-main-session';
+    rebinding = f.events.get('session_start')({}, f.ctx);
+  };
+  await f.command('restart worker'); await rebinding;
+  assert.equal(restarts, 0); assert.match(f.notices.at(-1).message, /Main session changed/);
+  assert.notEqual(f.getController(), f.controller); assert.equal(f.getController().ownerSession, 'next-main-session');
+}));
+
 test('public Main usage events update the widget, clear stale context observations, and respect indicator off without inference', () => fixture(async f => {
   const theme = { fg: (_color, text) => text };
   const lines = () => {
@@ -138,19 +242,20 @@ test('public Main usage events update the widget, clear stale context observatio
   assert.ok(f.widgets.length > beforeUsage, 'message_end refreshes the widget through the controller change event');
   assert.equal(f.controller.summary().main.lastUsage.cacheRatio, 0.25);
   assert.equal(f.controller.summary().main.lastUsage.totalInput, 100);
-  assert.match(row(), /^ Cache read \(last\): M 25\.0% 0s ago$/);
+  assert.match(row(), /^ Cache read \(last\): M 25\.0%$/);
+  assert.doesNotMatch(row(), /ago/, 'no age timer beside the cache share');
   assert.equal(lines()[0], activityOnly[0], 'cache observations do not alter activity');
   emit('agent_start'); emit('agent_settled');
-  assert.match(row(), /M 25\.0% 0s ago/, 'idle Main retains the last request');
+  assert.match(row(), /M 25\.0%/, 'idle Main retains the last request');
   emit('message_end', { message: { role: 'user' } });
-  assert.match(row(), /M 25\.0% 0s ago/, 'non-assistant messages do not replace usage');
+  assert.match(row(), /M 25\.0%/, 'non-assistant messages do not replace usage');
   response({ input: 20, cacheRead: 0, cacheWrite: 0 });
-  assert.match(row(), /M 0\.0% 0s ago/, 'new request replaces, not accumulates with, prior usage');
+  assert.match(row(), /M 0\.0%/, 'new request replaces, not accumulates with, prior usage');
   emit('model_select');
   assert.equal(f.controller.summary().main.lastUsage, null);
   assert.deepEqual(lines(), activityOnly, 'clearing Main usage removes the row without a spacer');
   response({ input: 0, cacheRead: 20, cacheWrite: 0 });
-  assert.match(row(), /M 100\.0% 0s ago/);
+  assert.match(row(), /M 100\.0%/);
   emit('session_compact');
   assert.equal(f.controller.summary().main.lastUsage, null);
   assert.deepEqual(lines(), activityOnly, 'clearing Main usage removes the row without a spacer');
@@ -162,7 +267,7 @@ test('public Main usage events update the widget, clear stale context observatio
   response({ input: 30, cacheRead: 10, cacheWrite: 0 });
   assert.equal(f.widgets.at(-1).component, undefined, 'usage cannot re-enable the indicator');
   await f.command('indicator minimal');
-  assert.match(row(), /M 25\.0% 0s ago/);
+  assert.match(row(), /M 25\.0%/);
   assert.equal(f.spawns(), 0);
   assert.deepEqual(f.messages, [], 'display events do not request turns or send warming prompts');
 }, { mode: 'tui' }));
