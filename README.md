@@ -2,7 +2,7 @@
 
 **Keep your Main conversation. Give implementation a persistent worker. Review each handoff.**
 
-![Steampunk Main and Worker engines with eight exposed pistons compressing steam, spinning flywheels, and illustrative last-request cache-read gauges showing 99% and 100%.](docs/assets/pi-fabric-pair-cache-pistons.png)
+![Main and Worker steam engines with four massive pistons compressing glowing steam, dark silhouettes, and illustrative last-request cache-read gauges showing 99% and 100%.](docs/assets/pi-fabric-pair-cache-pressure.png)
 
 *Illustrative readings: each role has its own history and active context. The
 gauges show cache-read share from a past request, not current cache fullness.*

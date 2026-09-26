@@ -1,10 +1,47 @@
 # README artwork
 
+## High-pressure cache engines
+
+Asset: `pi-fabric-pair-cache-pressure.png`
+
+Current README hero, edited with built-in image generation from the earlier
+piston illustration. Four oversized pistons, tightly compressed glowing steam,
+dark silhouettes, and green gauges convey formidable but positive power with
+less visual clutter. Main's 99% and Worker's 100% are illustrative last-request
+cache-read shares, not measured or guaranteed performance.
+Resolution: 1672 x 941 pixels.
+
+### Generation prompt
+
+```text
+Use case: style-transfer
+Asset type: GitHub README hero illustration for pi-fabric-pair.
+Input image: edit the supplied Main/Worker steam-piston artwork.
+
+User's requested changes: LESS DETAIL, MUCH HIGHER VISIBLE PRESSURE ON THE PISTONS, SCARY BUT POSITIVE. Preserve the Main/Worker subject and the exact 99% and 100% cache readings.
+
+Radically simplify the image into bold, stylized industrial concept art with a strong poster silhouette. Exactly two massive steampunk engines, MAIN on the left and WORKER on the right. Two enormous pistons per engine, four total, with thick heavy rods and broad pressure-cylinder shapes. Make these few huge shapes dominate the frame. Remove the crowded factory, scaffolding, tiny valves, fine wiring, repetitive small rivets and decorative machinery. Use a nearly empty charcoal backdrop with a few sweeping shapes of steam and generous negative space. Broad painterly shading, crisp major edges, very little microtexture. Clearly an illustration, not intricate photorealism.
+
+Make the force unmistakable: glass cutaways reveal the massive piston crowns pushed almost all the way toward the cylinder heads, squeezing the steam into extremely narrow, intensely glowing bands. The compressed steam is dense brilliant mint-white, visibly packed tight above each piston crown. Heavy rods and braces look solid and loaded. Concentrated powerful steam jets shoot from a few controlled relief vents. Strong converging forms, compressed shapes, and short stylized force lines convey tremendous pressure. Do not simply fill tall cylinders with loose vapor.
+
+Mood: a formidable, slightly frightening powerhouse working FOR you. Looming low angle, deep almost-black shadows, heavy monolithic forms, dramatic rim light, exhilarating contained strength. Positive cues are steady mint-green gauge arcs, warm bronze edges, confident stable construction and a hopeful luminous core. No evil faces, eyes, monsters, red alarms, cracked glass, breakage, explosions or destruction.
+
+Each engine has one simple oversized readable gauge:
+LEFT exact text: "MAIN", "CACHE READ", "99%".
+RIGHT exact text: "WORKER", "CACHE READ", "100%".
+Needles sit at the maximum green end. Gauge design is clean and chunky with only a few major ticks. These example cache-read percentages are not pressure units or live telemetry.
+At the top, a simple unornamented title: "PI FABRIC PAIR".
+At the bottom, one small readable line: "ILLUSTRATIVE CACHE READINGS - LAST REQUEST".
+No other words.
+
+Restrained palette: charcoal black, aged bronze, warm amber edges, luminous mint-green compressed steam. Fewer colors, larger forms, stronger contrast than the input. Focus on compression, scale and the two gauges. Keep the two machines visually separate. Wide landscape approximately 16:9.
+```
+
 ## Piston-driven cache engines
 
 Asset: `pi-fabric-pair-cache-pistons.png`
 
-Current README hero, created with built-in image generation by redesigning the
+Earlier README hero, created with built-in image generation by redesigning the
 earlier steampunk illustration. Exposed pistons compress steam in two independent
 Main and Worker engines. Main's 99% and Worker's 100% are illustrative last-request
 cache-read shares, not measured or guaranteed performance.
