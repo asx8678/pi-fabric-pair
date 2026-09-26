@@ -1,4 +1,4 @@
-import { Input, SelectList, matchesKey, truncateToWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
+import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { assert, briefError, cleanText, clone } from './util.js';
 import { INDICATORS, validateConfig } from './config.js';
 import { validateUsageObservation } from './observations.js';
@@ -112,10 +112,21 @@ export function costLabel(cost) {
   if (cost >= 0.1) return `$${cost.toFixed(2)}`;
   return cost >= 0.001 ? `$${cost.toFixed(3)}` : '<$0.001';
 }
-/** The next thing a person can do for a worker that is not running, if any.
+/** Whether a worker has a provider and model chosen; the summary joins them as `provider/model`.
+ * @param {PairSummary['workers'][number]} worker @returns {boolean} */
+function hasModel(worker) { return /^[^/]+\/.+$/.test(worker.model); }
+/** Compact token count: 272000 → 272k, 1500000 → 1.5M.
+ * @param {number | null | undefined} tokens @returns {string} */
+function tokenLabel(tokens) {
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens)) return 'unknown';
+  if (tokens >= 1e6) return `${Number((tokens / 1e6).toFixed(1))}M`;
+  return tokens >= 1000 ? `${Number((tokens / 1000).toFixed(1))}k` : String(tokens);
+}
+/** The next thing a person can do for a worker that is not running, if any. A worker
+ * without a model needs settings before it can start.
  * @param {PairSummary['workers'][number]} worker @returns {string} */
 function nextAction(worker) {
-  if (['stopped', 'not_started'].includes(worker.status) && !worker.pid) return '/pair start';
+  if (['stopped', 'not_started'].includes(worker.status) && !worker.pid) return hasModel(worker) ? '/pair start' : '/pair settings';
   if (['paused', 'interrupted'].includes(worker.status) || ['paused', 'interrupted'].includes(worker.task?.status || '')) return '/pair resume';
   if (['attention', 'error'].includes(worker.status)) return '/pair';
   return '';
@@ -284,100 +295,181 @@ export function planWidget(current, theme) {
     invalidate() {},
   };
 }
-/** Human status view: what needs attention first (each worker's state, task, plan
- * and live activity, then reports waiting for Main and Main itself), followed by
- * identities, warming and accounting under Details, and a short legend.
+/** Human status view in the panel markup (see panelFormat): each worker's state, task,
+ * plan and live activity first, then reports waiting for Main and Main itself, with
+ * identities, warming and accounting under Details and a short legend at the end.
  * @param {PairSummary} summary @param {Readonly<Awaited<ReturnType<typeof import('./native.js').nativeSettings>>> | null} [native] @param {number} [now] @returns {string} */
 export function statusText(summary, native = null, now = Date.now()) {
-  const lines = ['FABRIC PAIR', ''];
+  /** @param {string} key @param {string} value */
+  const row = (key, value) => `  ${key.padEnd(10)}  ${value}`;
+  /** @type {string[]} */ const lines = [];
   for (const w of summary.workers) {
-    lines.push(`Worker ${w.id}: ${w.status === 'permission' ? 'needs permission' : w.status.replace(/_/g, ' ')} · ${w.model} · effort ${w.effort}`);
-    if (w.error) lines.push(`  ATTENTION: ${w.error}`);
-    if (w.task && ['working', 'settling', 'starting'].includes(w.status) && activityAge(w, now) >= STALE_AGE_MS) lines.push('  STALE: no recent worker activity; inspect the transcript or cancel');
+    const active = ['working', 'settling', 'starting'].includes(w.status), obs = w.observation;
+    lines.push(`## Worker · ${w.id}`, row('State', `${symbol(w.status)} ${w.status === 'permission' ? 'needs permission' : w.status.replace(/_/g, ' ')}`),
+      row('Model', hasModel(w) ? `${w.model} · effort ${w.effort}` : 'not chosen yet'));
+    if (w.error) lines.push(`! ${w.error}`);
+    if (w.task && active && activityAge(w, now) >= STALE_AGE_MS) lines.push('! No recent worker activity. Read the transcript or cancel the task.');
     const next = nextAction(w);
-    if (next) lines.push(`  Next: ${next}`);
-    if (w.task) lines.push(`  Task: ${w.task.objective}`, `  ${w.task.id} · ${w.task.status} · step ${w.task.step}/${w.task.steps} · revisions ${w.task.revisions}${typeof w.task.reportedCost === 'number' && w.task.reportedCost > 0 ? ` · ${costLabel(w.task.reportedCost)}` : ''}`);
-    if (Array.isArray(w.task?.stepList) && w.task.stepList.length > 0) {
-      const bar = progressBar(w.task.stepList.filter(step => step.state === 'done').length, w.task.stepList.length);
-      lines.push(`  Progress ${'■'.repeat(bar.filled)}${'□'.repeat(bar.empty)} ${bar.label} approved (${bar.percent}%)`);
-      for (let i = 0; i < w.task.stepList.length; i++) { const step = w.task.stepList[i]; lines.push(`    ${stepPrefix(step.state)} ${i + 1}. ${step.title}`); }
+    if (next) lines.push(row('Next', next === '/pair settings' ? '/pair settings, choose a worker model' : next));
+    if (w.pendingConfiguration) lines.push(row('Settings', 'change pending; applied before the next task'));
+    if (w.task) {
+      const cost = typeof w.task.reportedCost === 'number' && w.task.reportedCost > 0 ? ` · ${costLabel(w.task.reportedCost)}` : '';
+      lines.push('', `## Task · ${w.task.id}`, row('Objective', inline(w.task.objective, 2000)),
+        row('Status', `${w.task.status} · step ${w.task.step} of ${w.task.steps} · ${w.task.revisions} revision${w.task.revisions === 1 ? '' : 's'}${cost}`));
+      if (Array.isArray(w.task.stepList) && w.task.stepList.length > 0) {
+        const bar = progressBar(w.task.stepList.filter(step => step.state === 'done').length, w.task.stepList.length);
+        lines.push(row('Progress', `${'■'.repeat(bar.filled)}${'□'.repeat(bar.empty)} ${bar.label} approved`), '');
+        w.task.stepList.forEach((step, i) => lines.push(`  ${stepPrefix(step.state)} ${i + 1}. ${inline(step.title, 500)}`));
+      }
     }
-    const obs = w.observation;
-    if (obs?.currentTool) lines.push(`  Tool: ${obs.currentTool}`);
-    lines.push(`  Speed: ${speedLabel(observedSpeed(obs))}`);
-    if (obs?.context) lines.push(`  Context: ${obs.context.tokens ?? 'unknown'} / ${obs.context.contextWindow ?? 'unknown'} tokens${obs.context.percent == null ? '' : ` (${obs.context.percent.toFixed(1)}%)`}${obs.compacting ? ' · compacting' : ''}`);
-    lines.push(`  Last cache read: ${lastCacheRead(obs?.lastUsage ?? null)}`);
-    if (w.pendingConfiguration) lines.push('  Settings change pending: applied before the next new task while this worker is idle.');
+    const speed = speedLabel(observedSpeed(obs));
+    if (active || obs?.currentTool || obs?.context || !speed.includes('—')) {
+      lines.push('', '## Activity');
+      if (obs?.currentTool) lines.push(row('Tool', inline(obs.currentTool, 200)));
+      if (active || !speed.includes('—')) lines.push(row('Speed', speed.replace(/^avg /, '')));
+      if (obs?.context) lines.push(row('Context', `${tokenLabel(obs.context.tokens)} of ${tokenLabel(obs.context.contextWindow)} tokens${obs.context.percent == null ? '' : ` (${obs.context.percent.toFixed(0)}%)`}${obs.compacting ? ' · compacting' : ''}`));
+      lines.push(row('Cache', `last read ${lastCacheRead(obs?.lastUsage ?? null)}`));
+    }
     lines.push('');
   }
   const waiting = summary.waitingReports || 0;
   if (waiting) {
-    const reports = `${waiting} report${waiting === 1 ? '' : 's'} not yet read by Main`;
-    lines.push(summary.autoDeliverReports === false
-      ? `Reports waiting: ${reports}. Automatic delivery is off (autoDeliverReports), so Main calls pair_yield or you run /pair yield or /pair inbox.`
-      : `Reports for Main: ${reports}. Pair delivers each one as a new Main turn as soon as Main is idle; /pair yield delivers now.`,
-    'Main reads a report with pair_inspect or pair_decide.', '');
+    lines.push('## Reports', row('Waiting', `${waiting} report${waiting === 1 ? '' : 's'} not yet read by Main`),
+      summary.autoDeliverReports === false
+        ? '> Automatic delivery is off: Main calls pair_yield, or run /pair yield or /pair inbox.'
+        : '> Each report starts a Main turn as soon as Main is idle; /pair yield delivers now.', '');
   }
-  lines.push(`Main: ${summary.main?.model || 'native /model'} · ${summary.main?.busy ? 'working' : 'ready'}`);
+  lines.push('## Main', row('Model', `${summary.main?.model || 'native /model'} · ${summary.main?.busy ? 'working' : 'ready'}`));
   if (summary.main?.context) {
     const c = contextUsage(summary.main.context);
     assert(c, 'Invalid Main context observation');
-    lines.push(`  Context: ${c.tokens ?? 'unknown'} / ${c.contextWindow ?? 'unknown'} tokens`);
+    lines.push(row('Context', `${tokenLabel(c.tokens)} of ${tokenLabel(c.contextWindow)} tokens`));
   }
-  lines.push(`  Last cache read: ${lastCacheRead(summary.main?.lastUsage ?? null)}`, '');
-  lines.push('Details', `  Owner session: ${summary.ownerSession}`);
-  if (summary.mainPhase) lines.push(`  Main phase: ${summary.mainPhase.status} (explicit, non-authorizing)${summary.mainPhase.current ? '' : ' · stale binding: reports stay retained'}`);
-  lines.push(`  Automatic report delivery: ${summary.autoDeliverReports === false ? 'off' : 'on'}`,
-    `  Pair scoped warming policy: ${summary.cacheWarming || 'off'} (explicit opt-in; native safety windows unchanged)`, `  Main scoped warming: ${warmingLabel(summary.main?.warming)}`);
-  if (native) lines.push(`  Native warming policy: ${native.cacheWarming} (persisted base policy; scoped leases/other owners may differ)`);
+  lines.push(row('Cache', `last read ${lastCacheRead(summary.main?.lastUsage ?? null)}`), '');
+  lines.push('## Details', row('Session', summary.ownerSession));
+  if (summary.mainPhase) lines.push(row('Main phase', `${summary.mainPhase.status} (explicit, non-authorizing)${summary.mainPhase.current ? '' : ' · stale binding: reports stay retained'}`));
+  lines.push(row('Delivery', summary.autoDeliverReports === false ? 'automatic delivery off' : 'automatic delivery on'),
+    row('Warming', `Pair ${summary.cacheWarming || 'off'} (opt-in) · Main ${warmingLabel(summary.main?.warming)}${native ? ` · native ${native.cacheWarming}` : ''}`));
   for (const w of summary.workers) {
     const obs = w.observation;
-    lines.push(`  ${w.id}: PID ${w.pid || 'not running'} · session ${w.sessionId || 'not created'}`, `    Workspace: ${w.cwd}`,
-      `    Last reported scoped warming: ${warmingLabel(obs && 'warming' in obs ? obs.warming : undefined)}`);
-    if (w.usage) lines.push(`    Inference only: ${w.usage.requests} responses · reported $${w.usage.reportedCost.toFixed(4)} · ${w.usage.unknownCostRequests} responses with unknown price`);
-    if (w.lastExchange) lines.push(`    Last exchange: ${w.lastExchange.direction} · ${w.lastExchange.kind}`);
+    lines.push(row(w.id, `PID ${w.pid || 'not running'} · session ${w.sessionId || 'not created'}`), row('Workspace', w.cwd),
+      row('Warming', `worker ${warmingLabel(obs && 'warming' in obs ? obs.warming : undefined)}`));
+    if (w.usage) lines.push(row('Usage', `${w.usage.requests} responses · reported $${w.usage.reportedCost.toFixed(4)} · ${w.usage.unknownCostRequests} with unknown price (inference only)`));
+    if (w.lastExchange) lines.push(row('Exchange', `${w.lastExchange.direction} · ${w.lastExchange.kind}`));
   }
-  lines.push('', 'Legend',
-    '  ● ready  ◉ working  ◐ waiting on Main  ○ stopped or not started  ! needs attention',
-    '  → the work is with the worker  ← a report or question is with Main',
-    '  plan: complete ✔ approved  ▶ in progress  ◐ in review  ⏸ held  ○ not started  ■/□ approved of total',
-    '  heartbeat: the worker dot blinks while active and stops after 2m of silence; "stale" after 5m, with one warning per silent episode',
-    '  cache: cacheRead/(input+cacheRead+cacheWrite) for the last measured request, not task totals; zero-input events do not replace a measurement',
-    '  speed: average streaming output tokens/second (weighted); request latency and tool time are excluded, and unavailable is shown as —',
-    '', summary.cacheNote, '', `Local state and evidence: ${summary.directory}`);
-  return lines.map(s => cleanText(s, 20000)).join('\n');
+  lines.push(row('State dir', summary.directory), '',
+    '## Legend',
+    '> ● ready  ◉ working  ◐ waiting on Main  ○ stopped  ! needs attention',
+    '> → the work is with the worker  ← a report or question is with Main',
+    '> Plan: ✔ approved  ▶ in progress  ◐ in review  ⏸ held  ○ not started',
+    '> Heartbeat: the worker dot blinks while it is active; "stale" after 5 minutes of silence.',
+    '> Cache: cacheRead ÷ (input + cacheRead + cacheWrite) of the last measured request, not task totals.',
+    '> Speed: weighted streaming output tokens per second, excluding request latency and tool time.',
+    `> ${summary.cacheNote}`);
+  return lines.map(line => cleanText(line, 20000)).join('\n');
 }
-/** @typedef {{paint?: (line: string) => IndicatorColor | null, section?: RegExp}} TextViewOptions */
+/** Pi theme colors Pair's panels use; every name exists in the active Pi theme.
+ * @typedef {IndicatorColor | 'border' | 'borderMuted' | 'borderAccent' | 'text' | 'mdHeading'} PanelColor */
+/** @typedef {{fg(color: PanelColor, text: string): string, bold?(text: string): string}} PanelTheme */
+/** Widest panel, so long lines stay readable on wide terminals. */
+const PANEL_MAX_WIDTH = 110;
+/** Overlay placement for every Pair panel: centered, bounded width, most of the height.
+ * Pi resolves this once when the panel opens; pi-tui clamps it if the terminal shrinks.
+ * @param {{terminal?: {columns?: number}} | null | undefined} tui @returns {import('@earendil-works/pi-tui').OverlayOptions} */
+export function panelOptions(tui) {
+  return { width: Math.max(24, Math.min(PANEL_MAX_WIDTH, (tui?.terminal?.columns || 100) - 4)), maxHeight: '90%', anchor: 'center' };
+}
+/** Body lines inside a rounded border: the title sits in the top edge and key hints in
+ * the bottom edge. Every row is padded to the full width, so nothing behind the panel
+ * shows through and its edges are always visible.
+ * @param {string[]} body @param {number} width
+ * @param {{title: string, footer?: string, theme?: PanelTheme | null}} options @returns {string[]} */
+export function frame(body, width, { title, footer = '', theme }) {
+  /** @param {PanelColor} color @param {string} text */
+  const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  const bold = (/** @type {string} */ text) => (theme?.bold ? theme.bold(text) : text);
+  const inner = Math.max(1, width - 4);
+  /** @param {string} left @param {string} right @param {string} label @param {(text: string) => string} style */
+  const edge = (left, right, label, style) => {
+    const text = label ? ` ${truncateToWidth(label, Math.max(1, width - 6), '…')} ` : '';
+    return fg('borderMuted', `${left}─`) + (text ? style(text) : '') + fg('borderMuted', `${'─'.repeat(Math.max(0, width - 3 - visibleWidth(text)))}${right}`);
+  };
+  const rows = body.map(line => {
+    const text = truncateToWidth(line, inner, '');
+    return `${fg('borderMuted', '│')} ${text}${' '.repeat(Math.max(0, inner - visibleWidth(text)))} ${fg('borderMuted', '│')}`;
+  });
+  return [edge('╭', '╮', title, text => fg('accent', bold(text))), ...rows, edge('╰', '╯', footer, text => fg('dim', text))];
+}
+/** Wrap one styled line to `span` columns, continuing under its own indent, after a
+ * leading bullet or step symbol, or under a key/value row's value, never at the left edge.
+ * @param {string} raw plain source line @param {string} styled the same line after styling
+ * @param {number} span @returns {string[]} */
+function wrapHanging(raw, styled, span) {
+  const indent = /^ */.exec(raw)?.[0].length || 0;
+  const marker = /^ *(?:complete ✔|[•✔✖○▶◐⏸!-]|\d+\.) /.exec(raw);
+  // A `Key  value` row (see panelFormat) continues under its value column.
+  const row = indent <= 2 ? /^ *[A-Za-z][\w ./()-]{0,22}? {2,}(?=\S)/.exec(raw) : null;
+  const hang = Math.min(Math.floor(span / 2), marker ? marker[0].length : row ? row[0].length : indent);
+  const lead = /^ */.exec(styled)?.[0].length || 0;
+  // The first row uses the full width after its indent; the rest re-wrap under `hang`.
+  const [first = '', ...rest] = wrapTextWithAnsi(styled.slice(lead), Math.max(10, span - indent));
+  const more = rest.length ? wrapTextWithAnsi(rest.join(' '), Math.max(10, span - hang)) : [];
+  return [' '.repeat(indent) + first, ...more.map(part => ' '.repeat(hang) + part)];
+}
+/** Lightweight markup for Pair's own panel text, readable as plain text too:
+ * `## Heading`; `Key<2+ spaces>value` rows at indent 0 or 2 (dim key); `> note` (dim);
+ * `! warning`; lines starting with a step or check symbol take its color. Lines indented
+ * four or more spaces carry worker or repository text and are never styled.
+ * @param {PanelTheme | null | undefined} theme @returns {(line: string) => string} */
+export function panelFormat(theme) {
+  /** @param {PanelColor} color @param {string} text */
+  const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  return line => {
+    const indent = /^ */.exec(line)?.[0].length || 0, body = line.slice(indent), pad = ' '.repeat(indent);
+    if (indent >= 4 || !body) return line;
+    if (indent === 0 && body.startsWith('## ')) return fg('accent', theme?.bold ? theme.bold(body.slice(3)) : body.slice(3));
+    if (body.startsWith('> ')) return pad + fg('dim', body.slice(2));
+    if (body.startsWith('! ')) return pad + fg('warning', body);
+    const step = /^(complete ✔|✔|✖|▶|◐|⏸|○) /.exec(body);
+    if (step) return pad + fg(step[1] === '✖' ? 'error' : step[1].endsWith('✔') ? 'success' : step[1] === '▶' ? 'accent' : step[1] === '○' ? 'dim' : 'warning', body);
+    const row = /^([A-Za-z][\w ./()-]{0,22}?)( {2,})(\S.*)$/.exec(body);
+    if (row) return pad + fg('dim', row[1] + row[2]) + fg('text', row[3]);
+    return line;
+  };
+}
+/** `panel` styles Pair's own panel markup (panelFormat); `paint` colors whole lines; `format` styles each line.
+ * @typedef {{panel?: boolean, paint?: (line: string) => IndicatorColor | null, format?: (line: string) => string, section?: RegExp}} TextViewOptions */
 /** @typedef {{matches(data: string, id: string): boolean}} KeyMatcher */
-/** Scrollable read-only text body shared by status, transcript, report and diff
- * views. Keys go through the keybinding manager first (so remapped keys work),
+/** Scrollable read-only panel shared by status, inbox, report, diff, transcript, yield and
+ * doctor views: a bordered box with the title on top and position and key hints in the
+ * bottom edge. Keys go through the keybinding manager first (so remapped keys work),
  * with raw sequences and vi-style letters as fallbacks.
  * @param {string[]} raw
- * @param {{title: string, theme?: {fg(color: IndicatorColor, text: string): string} | null, keys?: KeyMatcher | null, rows?: () => number | undefined, close: () => void} & TextViewOptions} options
+ * @param {{title: string, theme?: PanelTheme | null, keys?: KeyMatcher | null, rows?: () => number | undefined, close: () => void} & TextViewOptions} options
  * @returns {{render(width: number): string[], handleInput(data: string): void}} */
-export function createTextView(raw, { title, theme, keys, rows = () => undefined, close, paint, section }) {
+export function createTextView(raw, { title, theme, keys, rows = () => undefined, close, paint, format, section }) {
   let offset = 0, width = 80, message = '', lastQuery = '';
   // Raw line of the last search/section jump. A jump near the end is clamped to the
   // last page, so the top visible line is not where the next search should resume.
   /** @type {number | null} */ let cursor = null;
   /** @type {string | null} */ let query = null;
   /** @type {{width: number, lines: string[], starts: number[]}} */ let cache = { width: -1, lines: [], starts: [] };
-  /** @param {IndicatorColor} color @param {string} text */
+  /** @param {PanelColor} color @param {string} text */
   const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  const styleLine = (/** @type {string} */ line) => { if (format) return format(line); const color = paint?.(line); return color ? fg(color, line) : line; };
   const layout = () => {
     if (cache.width === width) return cache;
     /** @type {string[]} */ const lines = []; /** @type {number[]} */ const starts = [];
-    const span = Math.max(20, width - 2);
+    const span = Math.max(16, width - 4);
     for (const line of raw) {
       starts.push(lines.length);
-      const color = paint?.(line);
       // wrapTextWithAnsi measures display columns, so wide characters never overflow.
-      const wrapped = line ? wrapTextWithAnsi(color ? fg(color, line) : line, span) : [];
-      lines.push(...(wrapped.length ? wrapped : ['']));
+      lines.push(...(line ? wrapHanging(line, styleLine(line), span) : ['']));
     }
     return cache = { width, lines, starts };
   };
-  const page = () => Math.max(5, (rows() || 28) - 8);
+  // Body rows: most of the terminal, minus the two border rows.
+  const page = () => Math.max(3, Math.floor((rows() || 28) * 0.9) - 2);
   const maxOffset = () => Math.max(0, layout().lines.length - page());
   const currentLine = () => { if (cursor !== null) return cursor; const { starts } = layout(); let i = 0; while (i + 1 < starts.length && starts[i + 1] <= offset) i++; return i; };
   /** Jump to the next raw line matching `test`, scanning in `step` direction and wrapping once.
@@ -402,10 +494,11 @@ export function createTextView(raw, { title, theme, keys, rows = () => undefined
     render(w) {
       width = w;
       const { lines } = layout(); offset = Math.min(offset, maxOffset());
-      const hints = ['↑/↓ scroll', 'PgUp/PgDn', 'g/G top/bottom', '/ search', ...(lastQuery ? ['n/N next/prev'] : []), ...(section ? ['[/] prev/next file'] : []), 'Esc close'];
-      const position = `${lines.length ? offset + 1 : 0}–${Math.min(offset + page(), lines.length)} / ${lines.length}`;
-      const footer = query !== null ? fg('accent', `/${query}▏  Enter search · Esc cancel`) : fg('dim', message ? `${position} · ${message}` : position);
-      return [fg('accent', cleanText(title)), fg('dim', hints.join(' · ')), '', ...lines.slice(offset, offset + page()), '', footer].map(line => truncateToWidth(line, w));
+      const scrolls = lines.length > page();
+      const narrow = w < 72, position = scrolls ? [`${offset + 1}–${Math.min(offset + page(), lines.length)} of ${lines.length}`] : [];
+      const footer = query !== null ? `/${query}▏ enter · esc`
+        : [...position, ...(message ? [message] : []), ...(narrow ? [] : [...(scrolls ? ['↑↓ pgup pgdn g/G'] : []), '/ search', ...(lastQuery ? ['n/N'] : []), ...(section ? ['[ ] files'] : [])]), 'esc close'].join(' · ');
+      return frame(lines.slice(offset, offset + page()), w, { title: cleanText(title), footer, theme });
     },
     handleInput(data) {
       if (query !== null) {
@@ -434,13 +527,85 @@ export function createTextView(raw, { title, theme, keys, rows = () => undefined
 /** @param {UIContext} ctx @param {string} title @param {string} text @param {TextViewOptions} [options] @returns {Promise<void>} */
 export async function textView(ctx, title, text, options = {}) {
   if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') { ctx.ui.notify(`${title}\n${cleanText(text, 10000)}`, 'info'); return; }
-  const raw = cleanText(text, 100000).split('\n');
+  const raw = cleanText(text, 100000).replace(/\t/g, '    ').split('\n');
+  /** @type {import('@earendil-works/pi-tui').TUI | null} */ let host = null;
   await ctx.ui.custom((tui, theme, keys, done) => {
-    const view = createTextView(raw, { ...options, title, theme, keys, rows: () => tui.terminal?.rows, close: () => done(undefined) });
+    host = tui;
+    const view = createTextView(raw, { ...options, ...(options.panel ? { format: panelFormat(theme) } : {}), title, theme, keys, rows: () => tui.terminal?.rows, close: () => done(undefined) });
     /** @type {import('@earendil-works/pi-tui').Component} */
     const component = { render: width => view.render(width), handleInput(data) { view.handleInput(data); tui.requestRender?.(); }, invalidate() {} };
     return component;
-  }, { overlay: true });
+  }, { overlay: true, overlayOptions: () => panelOptions(host) });
+}
+/** One row of a Pair menu: a section heading, or a selectable item with an optional
+ * current value (and its color) and a one-line hint shown while it is selected.
+ * @typedef {{section: string} | {id: string, label: string, value?: string, tone?: PanelColor, hint?: string}} MenuEntry */
+/** Interactive bordered menu: section headings, labels in one column and values in
+ * another, the selected row marked with an arrow, and its hint below the list.
+ * @param {MenuEntry[]} entries
+ * @param {{title: string, subtitle?: string[], footer?: string, initial?: string, theme?: PanelTheme | null, keys?: KeyMatcher | null, rows?: () => number | undefined, done: (id: string | undefined) => void}} options
+ * @returns {{render(width: number): string[], handleInput(data: string): void}} */
+export function createMenuView(entries, { title, subtitle = [], footer = '↑↓ move · enter select · esc close', initial, theme, keys, rows = () => undefined, done }) {
+  /** @param {PanelColor} color @param {string} text */
+  const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  const bold = (/** @type {string} */ text) => (theme?.bold ? theme.bold(text) : text);
+  const items = entries.flatMap((entry, index) => ('id' in entry ? [index] : []));
+  let selected = Math.max(0, items.findIndex(index => /** @type {{id: string}} */ (entries[index]).id === initial));
+  const labelWidth = Math.min(30, Math.max(0, ...entries.map(entry => ('id' in entry && entry.value !== undefined ? visibleWidth(entry.label) : 0))));
+  /** @param {string} data @param {string} id @param {...string} fallbacks */
+  const is = (data, id, ...fallbacks) => (keys?.matches(data, id) ?? false) || fallbacks.includes(data);
+  return {
+    render(width) {
+      const inner = Math.max(1, width - 4);
+      /** @type {string[]} */ const body = [];
+      for (const line of subtitle) body.push(fg('dim', line));
+      if (subtitle.length) body.push('');
+      /** @type {number} */ let selectedRow = 0;
+      entries.forEach((entry, index) => {
+        if (!('id' in entry)) { if (body.length && body.at(-1) !== '') body.push(''); body.push(fg('muted', bold(entry.section.toUpperCase()))); return; }
+        const current = items[selected] === index;
+        if (current) selectedRow = body.length;
+        const label = entry.value === undefined ? entry.label : entry.label + ' '.repeat(Math.max(0, labelWidth - visibleWidth(entry.label)));
+        const value = entry.value === undefined ? '' : `  ${fg(entry.tone || 'text', entry.value)}`;
+        body.push(`${current ? fg('accent', '→ ') : '  '}${current ? fg('accent', bold(label)) : label}${value}`);
+      });
+      const hint = 'id' in entries[items[selected]] ? /** @type {{hint?: string}} */ (entries[items[selected]]).hint : undefined;
+      // Keep the selected row visible when the list is taller than the panel.
+      const room = Math.max(3, Math.floor((rows() || 28) * 0.9) - 2 - (hint ? 2 : 0));
+      const start = body.length <= room ? 0 : Math.min(body.length - room, Math.max(0, selectedRow - Math.floor(room / 2)));
+      const visible = body.slice(start, start + room);
+      if (hint) visible.push('', ...wrapTextWithAnsi(fg('dim', hint), inner).slice(0, 2));
+      return frame(visible, width, { title, footer, theme });
+    },
+    handleInput(data) {
+      if (is(data, 'tui.select.cancel', '\x1b', 'q') || matchesKey(data, 'ctrl+c')) done(undefined);
+      else if (is(data, 'tui.select.up', '\x1b[A', 'k')) selected = (selected - 1 + items.length) % items.length;
+      else if (is(data, 'tui.select.down', '\x1b[B', 'j')) selected = (selected + 1) % items.length;
+      else if (is(data, 'tui.select.confirm', '\r', '\n')) done(/** @type {{id: string}} */ (entries[items[selected]]).id);
+    },
+  };
+}
+/** Show a Pair menu and return the chosen item's id, or undefined on Escape. In RPC and
+ * other non-TUI modes it falls back to Pi's standard select dialog with `Label: value`
+ * rows and an explicit close row.
+ * @param {UIContext} ctx @param {MenuEntry[]} entries
+ * @param {{title: string, subtitle?: string[], footer?: string, initial?: string}} options @returns {Promise<string | undefined>} */
+export async function menu(ctx, entries, options) {
+  const items = /** @type {{id: string, label: string, value?: string}[]} */ (entries.filter(entry => 'id' in entry));
+  if (!items.length) return undefined;
+  if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') {
+    const labels = items.map(item => (item.value === undefined ? item.label : `${item.label}: ${item.value}`));
+    const choice = await ctx.ui.select([options.title, ...(options.subtitle || [])].join('\n'), [...labels, 'Close']);
+    return items[labels.indexOf(choice ?? '')]?.id;
+  }
+  /** @type {import('@earendil-works/pi-tui').TUI | null} */ let host = null;
+  return ctx.ui.custom((tui, theme, keys, done) => {
+    host = tui;
+    const view = createMenuView(entries, { ...options, theme, keys, rows: () => tui.terminal?.rows, done });
+    /** @type {import('@earendil-works/pi-tui').Component} */
+    const component = { render: width => view.render(width), handleInput(data) { view.handleInput(data); tui.requestRender?.(); }, invalidate() {} };
+    return component;
+  }, { overlay: true, overlayOptions: () => panelOptions(host) });
 }
 /** Rewrite a stored checkpoint patch for people: real file names instead of Pair's
  * blob-store paths, and added files shown as `+` lines instead of only a hash.
@@ -485,97 +650,150 @@ export function diffLineColor(line) {
 const KIND_LABEL = /** @type {const} */ ({ question: 'Question', checkpoint: 'Checkpoint', blocked: 'Blocker', final_review: 'Final review' });
 /** @param {string} kind @returns {string} */
 export function kindLabel(kind) { return Reflect.get(KIND_LABEL, kind) || kind; }
-/** Human-readable card for one retained report. Controller-captured evidence
- * (changed paths, configured checks) is kept apart from the worker's own claims.
+/** Human-readable card for one retained report, in the panel markup. Controller-captured
+ * evidence (changed paths, configured checks) is kept apart from the worker's own claims,
+ * and worker-written text is indented four spaces so it is never styled.
  * @param {ReportView} view @returns {string[]} */
 export function reportCardLines(view) {
-  const lines = [`${kindLabel(view.kind)} from ${view.workerId} · step ${view.step}/${view.steps} · ${view.reportId}`, `Task: ${view.objective}`, ''];
-  lines.push('Summary', ...view.summary.split('\n').map(line => `  ${line}`), '');
-  if (view.question) lines.push('Question for Main', ...view.question.split('\n').map(line => `  ${line}`), '');
-  lines.push(`Changed files (captured by Pair): ${view.changed.length}`, ...view.changed.slice(0, 40).map(file => `  ${file}`));
-  if (view.changed.length > 40) lines.push(`  + ${view.changed.length - 40} more — see the diff`);
-  lines.push('', 'Verification (run by Pair)');
-  if (!view.verification.length) lines.push('  none configured — no independent checks ran');
+  /** @param {string} key @param {string} value */
+  const row = (key, value) => `  ${key.padEnd(10)}  ${value}`;
+  /** @param {string} text */
+  const quoted = text => text.split('\n').map(line => `    ${line}`);
+  const lines = [row('From', `${view.workerId} · step ${view.step} of ${view.steps}`), row('Task', inline(view.objective, 2000)),
+    row('Report', `${view.reportId} · ${view.acknowledged ? 'read by Main' : 'not yet read by Main'}`),
+    row('Checkpoint', `${view.checkpointHash.slice(0, 12)}${view.patchTruncated ? ' · patch truncated' : ''}`), ''];
+  lines.push('## Summary', ...quoted(view.summary), '');
+  if (view.question) lines.push('## Question for Main', ...quoted(view.question), '');
+  lines.push(`## Changed files · ${view.changed.length} (captured by Pair)`, ...view.changed.slice(0, 40).map(file => `    ${file}`));
+  if (view.changed.length > 40) lines.push(`> ${view.changed.length - 40} more in the diff`);
+  lines.push('', '## Verification (run by Pair)');
+  if (!view.verification.length) lines.push('> None configured, so no independent checks ran.');
   for (const v of view.verification) lines.push(`  ${v.passed ? '✔' : '✖'} ${v.name}${v.passed ? '' : v.timedOut ? ' (timed out)' : ` (exit ${v.code ?? 'unknown'})`}`);
   if (view.workerChecks.length) {
-    lines.push('', 'Worker-reported checks (claims, not verified)');
-    for (const c of view.workerChecks) lines.push(`  ${c.result === 'pass' ? '✔' : c.result === 'fail' ? '✖' : '○'} ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
+    lines.push('', '## Worker-reported checks (claims, not verified)');
+    for (const c of view.workerChecks) lines.push(`  ${c.result === 'pass' ? '✔' : c.result === 'fail' ? '✖' : '○'} ${inline(c.name, 200)}${c.detail ? ` · ${inline(c.detail, 500)}` : ''}`);
   }
-  if (view.decisions.length) lines.push('', 'Worker decisions', ...view.decisions.map(d => `  • ${d}`));
-  lines.push('', `Checkpoint ${view.checkpointHash.slice(0, 12)}${view.patchTruncated ? ' · patch truncated' : ''} · ${view.acknowledged ? 'read by Main' : 'not yet read by Main'}`);
+  if (view.decisions.length) lines.push('', '## Worker decisions', ...view.decisions.flatMap(d => quoted(`• ${d}`)));
   return lines;
 }
-/** @param {string} line @returns {IndicatorColor | null} */
-export function reportLineColor(line) {
-  if (/^ {2}✔/.test(line)) return 'success';
-  if (/^ {2}✖/.test(line)) return 'error';
-  if (/^[A-Z]/.test(line) && !line.startsWith('Task:')) return 'accent';
-  return null;
-}
-/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more' | 'back' | 'close', workerId?: string}} DashboardItem */
-/** One-line dashboard header: each worker's state, step and cost, then waiting reports.
- * @param {PairSummary} summary @returns {string} */
+/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more', workerId?: string, section: string, hint: string}} DashboardItem */
+/** Dashboard summary lines: one per worker (state, model or its absence, step and cost),
+ * then waiting reports.
+ * @param {PairSummary} summary @returns {string[]} */
 export function dashboardHeader(summary) {
   const workers = summary.workers.map(w => {
-    const parts = [`${workerLabel(summary, w.id)} ${symbol(w.status)} ${w.status.replace('_', ' ')}`];
-    if (w.task && !['completed', 'cancelled'].includes(w.task.status)) parts.push(`step ${w.task.step}/${w.task.steps}`);
+    const parts = [`${workerLabel(summary, w.id)} ${symbol(w.status)} ${w.status === 'permission' ? 'needs permission' : w.status.replace(/_/g, ' ')}`];
+    parts.push(hasModel(w) ? w.model : 'no worker model chosen');
+    if (w.task && !['completed', 'cancelled'].includes(w.task.status)) parts.push(`step ${w.task.step} of ${w.task.steps}`);
     if (typeof w.task?.reportedCost === 'number' && w.task.reportedCost > 0) parts.push(costLabel(w.task.reportedCost));
     return parts.join(' · ');
   });
   const waiting = summary.waitingReports || 0;
-  return [...workers, ...(waiting ? [`${waiting} report${waiting === 1 ? '' : 's'} waiting`] : [])].join('  |  ');
+  return [...workers, ...(waiting ? [`◐ ${waiting} report${waiting === 1 ? '' : 's'} not yet read by Main`] : [])];
 }
-/** Dashboard entries for the current state: what needs a human first, then only
- * the lifecycle actions that apply to each worker right now. Rarely needed
- * maintenance actions live under More… (dashboardMoreItems).
+/** Dashboard entries for the current state: what needs a human first, then only the
+ * lifecycle actions that apply to each worker right now, then Pair's views. Rarely
+ * needed maintenance actions live under More… (dashboardMoreItems). Escape closes.
  * @param {PairSummary} summary @returns {DashboardItem[]} */
 export function dashboardItems(summary) {
   /** @type {DashboardItem[]} */ const items = [];
   const many = summary.workers.length > 1;
-  /** @param {string} text @param {string} id */
-  const on = (text, id) => (many ? `${text} (${id})` : text);
   for (const w of summary.workers) {
     if (w.task?.reportId && ['question', 'review', 'blocked'].includes(w.task.status)) {
-      items.push({ label: on(`Review ${w.task.status === 'review' ? 'checkpoint' : w.task.status}`, w.id), action: 'report', workerId: w.id });
-      items.push({ label: on('View checkpoint diff', w.id), action: 'diff', workerId: w.id });
+      const what = w.task.status === 'review' ? 'checkpoint' : w.task.status;
+      items.push({ section: 'Needs you', label: `Review ${what}${many ? ` (${w.id})` : ''}`, action: 'report', workerId: w.id, hint: "Read the worker's report. Read-only: Main still inspects and decides." },
+        { section: 'Needs you', label: `View checkpoint diff${many ? ` (${w.id})` : ''}`, action: 'diff', workerId: w.id, hint: 'Scroll the changes in this checkpoint with real file names.' });
     }
   }
   const waiting = summary.waitingReports || 0;
-  if (waiting) items.push({ label: `Deliver ${waiting} waiting report${waiting === 1 ? '' : 's'} to Main`, action: 'yield' });
+  if (waiting) items.push({ section: 'Needs you', label: `Deliver ${waiting} waiting report${waiting === 1 ? '' : 's'} to Main`, action: 'yield', hint: 'Send them to Main now. Each delivery starts a Main turn.' });
   for (const w of summary.workers) {
-    const task = w.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
-    if (task?.status === 'running') items.push({ label: on('Pause worker', w.id), action: 'pause', workerId: w.id });
-    if (task && ['paused', 'interrupted'].includes(task.status)) items.push({ label: on('Resume worker', w.id), action: 'resume', workerId: w.id });
-    if (task) items.push({ label: on('Cancel task', w.id), action: 'cancel', workerId: w.id });
-    if (w.sessionId) items.push({ label: on('Worker transcript', w.id), action: 'transcript', workerId: w.id });
-    if (w.pid) items.push({ label: on('Stop worker', w.id), action: 'stop', workerId: w.id });
-    else items.push({ label: on('Start worker', w.id), action: 'start', workerId: w.id });
+    const section = many ? `Worker · ${w.id}` : 'Worker', task = w.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
+    if (task?.status === 'running') items.push({ section, label: 'Pause', action: 'pause', workerId: w.id, hint: 'Abort the current step and hold the task.' });
+    if (task && ['paused', 'interrupted'].includes(task.status)) items.push({ section, label: 'Resume', action: 'resume', workerId: w.id, hint: 'Continue the held task after checking interrupted work.' });
+    if (task) items.push({ section, label: 'Cancel task', action: 'cancel', workerId: w.id, hint: 'End the task. The conversation and file changes are kept.' });
+    if (w.sessionId) items.push({ section, label: 'Transcript', action: 'transcript', workerId: w.id, hint: "Read the worker's recent conversation." });
+    if (w.pid) items.push({ section, label: 'Stop worker', action: 'stop', workerId: w.id, hint: 'Stop the worker process. Its conversation is kept for next time.' });
+    else items.push({ section, label: 'Start worker', action: 'start', workerId: w.id, hint: hasModel(w) ? 'Launch the worker process. No model turn is requested.' : 'Choose a worker model in Settings first.' });
   }
-  items.push({ label: 'Status', action: 'status' }, { label: 'Inbox', action: 'inbox' }, { label: 'Settings', action: 'settings' },
-    { label: 'More…', action: 'more' }, { label: 'Close', action: 'close' });
+  items.push({ section: 'Pair', label: 'Status', action: 'status', hint: 'Worker, task, Main and cache details.' },
+    { section: 'Pair', label: 'Inbox', action: 'inbox', hint: 'Reports Main has not read yet.' },
+    { section: 'Pair', label: 'Settings', action: 'settings', hint: 'Worker model, review policy, indicator and more.' },
+    { section: 'Pair', label: 'More…', action: 'more', hint: 'Restart the worker, reload configuration, run doctor.' });
   return items;
 }
-/** Maintenance actions behind the dashboard's More… entry.
+/** Maintenance actions behind the dashboard's More… entry. Escape goes back.
  * @param {PairSummary} summary @returns {DashboardItem[]} */
 export function dashboardMoreItems(summary) {
   const many = summary.workers.length > 1;
   // Restart rereads saved settings first and keeps any retained conversation, so it applies in every state.
-  return [...summary.workers.map(w => /** @type {DashboardItem} */ ({ label: many ? `Restart worker (${w.id})` : 'Restart worker', action: 'restart', workerId: w.id })),
-    { label: 'Reload configuration', action: 'reload' }, { label: 'Doctor', action: 'doctor' }, { label: 'Back', action: 'back' }];
+  return [...summary.workers.map(w => /** @type {DashboardItem} */ ({ section: 'Maintenance', label: many ? `Restart worker (${w.id})` : 'Restart worker', action: 'restart', workerId: w.id, hint: 'Reread settings and replace the worker process. Its conversation is kept.' })),
+    { section: 'Maintenance', label: 'Reload configuration', action: 'reload', hint: 'Reread saved Pair settings without restarting Main or starting a worker.' },
+    { section: 'Maintenance', label: 'Doctor', action: 'doctor', hint: 'Check Fabric, Fovea and Pair setup. No inference.' }];
 }
-/** Only an actual offered choice can enter a literal config field.
+/** Menu rows for dashboard items, with a heading wherever the section changes.
+ * @param {DashboardItem[]} items @returns {MenuEntry[]} */
+export function dashboardMenu(items) {
+  return items.flatMap((item, i) => [...(i === 0 || items[i - 1].section !== item.section ? [{ section: item.section }] : []), { id: String(i), label: item.label, hint: item.hint }]);
+}
+/** One unresolved report as the inbox lists it; `view` is its current card when the
+ * report is still the worker's live one.
+ * @typedef {{workerId: string, reportId: string, status: string, observedAt?: number, view?: ReportView | null}} InboxEntry */
+/** Inbox panel in the panel markup: one card per unresolved report, or an explanation
+ * of what the inbox holds when it is empty.
+ * @param {InboxEntry[]} entries @param {boolean} autoDeliver @returns {string} */
+export function inboxText(entries, autoDeliver) {
+  /** @param {string} key @param {string} value */
+  const row = (key, value) => `  ${key.padEnd(8)}  ${value}`;
+  const how = autoDeliver ? '> Automatic delivery is on: each report starts a Main turn as soon as Main is idle.'
+    : '> Automatic delivery is off: Main calls pair_yield, or deliver them with /pair yield.';
+  if (!entries.length) return ['', '  ✔ Nothing waiting', '', '> Worker reports stay here until Main reads them with pair_inspect or pair_decide.', how].join('\n');
+  const lines = [`> ${entries.length} report${entries.length === 1 ? '' : 's'} not yet resolved.`, how, ''];
+  for (const entry of entries) {
+    const view = entry.view?.reportId === entry.reportId ? entry.view : null;
+    lines.push(`## ◐ ${view ? `${kindLabel(view.kind)} from ${entry.workerId} · step ${view.step} of ${view.steps}` : `Report from ${entry.workerId}`}`);
+    if (view) lines.push(row('Summary', inline(view.summary.split('\n')[0], 300)));
+    lines.push(row('Report', `${entry.reportId} · ${entry.status.replace(/_/g, ' ')}`), row('Main', entry.observedAt === undefined ? 'not yet read' : 'read'), '');
+  }
+  return lines.join('\n');
+}
+/** Readable doctor report: the checks that decide whether Pair can run, then the raw
+ * diagnostic data for bug reports.
+ * @param {{main: {model?: {provider: string, id: string} | null, thinkingLevel?: unknown, trusted?: boolean, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}}, pair: PairSummary, configuration: {version?: unknown, scope?: unknown, pendingMigrations?: readonly unknown[]}, blockers: string[], raw: unknown}} data
+ * @returns {string} */
+export function doctorText({ main, pair, configuration, blockers, raw }) {
+  /** @param {boolean} ok @param {string} text */
+  const check = (ok, text) => `  ${ok ? '✔' : '✖'} ${text}`;
+  /** @param {unknown} version */
+  const ver = version => (typeof version === 'string' ? ` ${version}` : '');
+  const pending = Array.isArray(configuration.pendingMigrations) ? configuration.pendingMigrations.length : 0;
+  const lines = ['## Main session',
+    `  Model       ${main.model ? `${main.model.provider}/${main.model.id}` : 'not selected'}${typeof main.thinkingLevel === 'string' ? ` · thinking ${main.thinkingLevel}` : ''}`,
+    `  Project     ${main.trusted ? 'trusted' : 'not trusted (project settings are ignored)'}`, '',
+    '## Extensions', check(main.capabilities.fabric, main.capabilities.fabric ? `Fabric${ver(main.versions.fabric)} loaded` : 'Fabric not loaded'),
+    check(main.capabilities.fovea, main.capabilities.fovea ? `Fovea${ver(main.versions.fovea)} loaded` : 'Fovea not loaded'), '',
+    '## Worker Fabric profile', ...(blockers.length ? blockers.map(item => check(false, item)) : [check(true, 'shellHangMs, maxDepth and prewalk are set for Pair')]), '',
+    '## Configuration', `  Version     ${String(configuration.version ?? 'unknown')} · ${String(configuration.scope ?? 'unknown')} scope`,
+    check(pending === 0, pending === 0 ? 'no pending migrations' : `${pending} pending migration${pending === 1 ? '' : 's'}; review in /pair settings`),
+    check(pair.enabled, pair.enabled ? 'enabled for new work' : 'disabled for new work; turn it on in /pair settings'), '',
+    '## Workers', ...pair.workers.map(w => check(hasModel(w), `${w.id}: ${hasModel(w) ? `${w.model} · ${w.status.replace(/_/g, ' ')}` : 'no model chosen'}`)), '',
+    '## Raw data', '> For bug reports.', ...JSON.stringify(raw, null, 2).split('\n').map(line => `    ${line}`)];
+  return lines.join('\n');
+}
+/** Pick one option in a Pair menu, with the current one marked and a hint per option.
+ * Only an offered option can be returned.
  * @template {string} Value
- * @param {import('@earendil-works/pi-coding-agent').ExtensionUIContext} ui
- * @param {string} title @param {readonly Value[]} choices @returns {Promise<Value | undefined>}
- */
-async function selectValue(ui, title, choices) {
-  const selected = await ui.select(title, [...choices]);
-  return choices.find(choice => choice === selected);
+ * @param {UIContext} ctx @param {string} title @param {readonly {value: Value, hint?: string}[]} options @param {Value} [current]
+ * @returns {Promise<Value | undefined>} */
+async function chooseValue(ctx, title, options, current) {
+  const id = await menu(ctx, options.map(option => ({ id: option.value, label: option.value, value: option.value === current ? '● current' : '', tone: /** @type {PanelColor} */ ('success'), hint: option.hint })),
+    { title, initial: current, footer: '↑↓ move · enter choose · esc back' });
+  return options.find(option => option.value === id)?.value;
 }
 /** @param {boolean} value @returns {string} */
 function onOff(value) { return value ? 'On' : 'Off'; }
 /** What each cosmetic indicator mode shows. @type {Readonly<Record<import('./config.js').Indicator, string>>} */
-const INDICATOR_LABEL = { minimal: 'minimal (status line + current plan step)', compact: 'compact (status line only)', off: 'off (hidden)' };
+const INDICATOR_LABEL = { minimal: 'status line + current plan step', compact: 'status line only', off: 'hidden' };
 
 /** @typedef {Readonly<{optional?: boolean, scale?: number, accepts: (value: number) => boolean, expected: string}>} NumberInputOptions */
 /** @overload @param {UIContext} ctx @param {string} title @param {number} current @param {NumberInputOptions & {optional?: false}} options @returns {Promise<number>} */
@@ -602,7 +820,9 @@ async function pickModel(ctx, worker) {
   const title = 'Worker model (Main stays under /model)';
   /** @type {string | undefined} */ let answer;
   if (ctx.mode === 'tui' && typeof ctx.ui.custom === 'function') {
+    /** @type {import('@earendil-works/pi-tui').TUI | null} */ let host = null;
     answer = await ctx.ui.custom((_tui, theme, keys, done) => {
+      host = _tui;
       const input = new Input({ placeholder: 'Type to filter models…' });
       const items = models.map(m => ({ value: `${m.provider}/${m.id}`, label: `${m.provider}/${m.id}`, description: m.name || '' }));
       /** @param {string} query */
@@ -624,9 +844,9 @@ async function pickModel(ctx, worker) {
         get focused() { return input.focused; },
         set focused(value) { input.focused = value; },
         render(width) {
-          return [theme.fg('accent', title), '', ...input.render(width), '', ...list.render(width), '',
-            theme.fg('dim', '↑/↓ navigate · type to filter · Enter select · Esc/Ctrl+C cancel')]
-            .map(line => truncateToWidth(line, width));
+          const inner = Math.max(1, width - 4);
+          return frame([theme.fg('dim', 'Main stays on its own model; change it with /model.'), '', ...input.render(inner), '', ...list.render(inner)], width,
+            { title: 'Worker model', footer: '↑↓ move · type to filter · enter choose · esc cancel', theme });
         },
         handleInput(data) {
           if (keys.matches(data, 'tui.select.cancel') || matchesKey(data, 'ctrl+c')) { done(undefined); return; }
@@ -641,7 +861,7 @@ async function pickModel(ctx, worker) {
         invalidate() { input.invalidate(); list.invalidate(); }
       };
       return component;
-    });
+    }, { overlay: true, overlayOptions: () => panelOptions(host) });
   } else {
     // RPC supports standard dialogs, but cannot render custom terminal components.
     answer = await ctx.ui.select(title, models.map(m => `${m.provider}/${m.id}`));
@@ -655,42 +875,55 @@ async function pickModel(ctx, worker) {
  * @param {ApplySettings} onApply @param {SettingsOptions} [options] @returns {Promise<void>}
  */
 export async function settingsUI(ctx, original, initialScope, onApply, options = {}) {
-  let saved = clone(original), scope = initialScope, selected = saved.workers[0].id, advanced = false;
+  let saved = clone(original), scope = initialScope, selected = saved.workers[0].id, advanced = false, lastEdited = 1;
   for (;;) {
     // Each interaction gets a disposable draft. Invalid input and failed writes
     // cannot contaminate the next edit or appear as a saved value.
     const draft = clone(saved);
     const w = draft.workers.find(w => w.id === selected) || draft.workers[0]; selected = w.id;
+    const model = w.provider && w.model ? `${w.provider}/${w.model}` : '';
+    /** @param {boolean} value @returns {PanelColor} */
+    const tone = value => (value ? 'success' : 'dim');
+    /** @type {MenuEntry[]} */
     const common = [
-      { id: 1, label: `Enabled for new work: ${onOff(draft.enabled)}` },
-      { id: 4, label: `Worker model: ${w.provider}/${w.model || '(choose)'}` },
-      { id: 5, label: `Worker effort: ${w.effort}` },
-      { id: 8, label: `Review policy: ${draft.supervision.mode}` },
-      { id: 2, label: `Autostart next session: ${onOff(draft.autoStart)}` },
-      { id: 14, label: `Indicator: ${INDICATOR_LABEL[draft.indicator]}` },
-      { id: 18, label: `Save scope: ${scope} (${scope === 'global' ? 'global defaults; project overrides excluded' : 'project overrides + inherited defaults'})` },
-      { id: 20, label: 'Advanced…' }, { id: 21, label: 'Done' }
+      { section: 'Pair' },
+      { id: '1', label: 'Enabled for new work', value: onOff(draft.enabled), tone: draft.enabled ? 'success' : 'warning', hint: draft.enabled ? 'Main can delegate implementation to the worker.' : 'Pair accepts no new work while this is off.' },
+      { id: '2', label: 'Autostart next session', value: onOff(draft.autoStart), tone: tone(draft.autoStart), hint: 'Start the worker when a session opens. No model turn is requested.' },
+      { id: '14', label: 'Indicator', value: draft.indicator, hint: `${INDICATOR_LABEL[draft.indicator]}. Display only; never affects work.` },
+      { id: '18', label: 'Save scope', value: scope, hint: scope === 'global' ? 'Global defaults for every project; project overrides are excluded.' : 'This project: its overrides plus inherited global defaults.' },
+      { section: draft.workers.length > 1 ? `Worker · ${w.id}` : 'Worker' },
+      { id: '4', label: 'Model', value: model || 'not chosen', tone: model ? 'text' : 'warning', hint: 'The model the worker runs. Main stays on its own model (/model).' },
+      { id: '5', label: 'Effort', value: w.effort, hint: 'Thinking effort, checked against the worker model at startup.' },
+      { id: '8', label: 'Review policy', value: draft.supervision.mode, hint: 'How often Main reviews. Final acceptance is always required.' },
+      { section: 'More' },
+      { id: '20', label: 'Advanced settings…', hint: 'Worker workspace, read-only mode, revision limit, verification commands, extra workers.' }
     ];
+    /** @type {MenuEntry[]} */
     const extra = [
-      { id: 3, label: `Selected worker: ${w.id}` },
-      { id: 6, label: `Read-only worker: ${onOff(w.readOnly)}` },
-      { id: 7, label: `Workspace: ${w.cwd || '(Main workspace)'}` },
-      { id: 9, label: `Revision limit: ${draft.supervision.maxRevisions}` },
-      { id: 10, label: `Summary detail: ${draft.supervision.summaryDetail}` },
-      { id: 16, label: 'Add worker' },
-      { id: 17, label: `Verification commands: ${draft.verification.commands.length} (human-owned)` },
-      ...(options.migrate ? [{ id: 22, label: 'Review/migrate selected scope…' }] : []),
-      { id: 20, label: 'Back' }, { id: 21, label: 'Done' }
+      { section: 'Worker' },
+      ...(draft.workers.length > 1 ? [{ id: '3', label: 'Selected worker', value: w.id, hint: 'Which worker the settings below apply to.' }] : []),
+      { id: '6', label: 'Read-only worker', value: onOff(w.readOnly), tone: tone(w.readOnly), hint: 'Read and Fovea tools only. Not supported together with Fabric.' },
+      { id: '7', label: 'Workspace', value: w.cwd || 'same as Main', hint: 'Absolute path the worker edits. Blank uses the Main workspace.' },
+      { section: 'Review' },
+      { id: '9', label: 'Revision limit', value: String(draft.supervision.maxRevisions), hint: 'How many times Main may ask for revisions before the task stops.' },
+      { id: '10', label: 'Summary detail', value: draft.supervision.summaryDetail, hint: 'How much detail the worker puts in its reports.' },
+      { id: '17', label: 'Verification commands', value: `${draft.verification.commands.length} configured`, hint: 'Trusted commands Pair runs itself at every checkpoint, with your permissions.' },
+      { section: 'Manage' },
+      { id: '16', label: 'Add worker…', hint: 'Add another worker slot. Only one worker runs at a time.' },
+      ...(options.migrate ? [{ id: '22', label: 'Review or migrate this scope…', hint: 'Preview and apply a pending settings migration for the selected scope.' }] : [])
     ];
-    const rows = advanced ? extra : common;
-    const title = `Pair settings${advanced ? ' · Advanced' : ''} · saves automatically\nMain model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : 'not selected'} (change with /model)`;
-    const choice = await ctx.ui.select(title, rows.map(row => row.label));
-    const index = rows.find(row => row.label === choice)?.id;
-    if (choice === undefined || index === 21) return;
+    const index = Number(await menu(ctx, advanced ? extra : common, {
+      title: `Pair settings${advanced ? ' · Advanced' : ''}`,
+      subtitle: [`Saves automatically to the ${scope} scope.`, `Main model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : 'not selected'} (change with /model)`],
+      footer: `↑↓ move · enter change · esc ${advanced ? 'back' : 'done'}`, initial: String(lastEdited)
+    }) ?? NaN);
+    if (Number.isNaN(index)) { if (advanced) { advanced = false; lastEdited = 20; continue; } return; }
+    lastEdited = index;
     try {
-      if (index === 20) { advanced = !advanced; continue; }
+      if (index === 20) { advanced = true; continue; }
       if (index === 18) {
-        const nextScope = await selectValue(ctx.ui, 'Save scope · switching does not copy or save values', ctx.isProjectTrusted?.() ? ['project', 'global'] : ['global']);
+        const nextScope = await chooseValue(ctx, 'Save scope', [...(ctx.isProjectTrusted?.() ? [{ value: /** @type {const} */ ('project'), hint: 'This project: its overrides plus inherited global defaults. Switching copies nothing.' }] : []),
+          { value: /** @type {const} */ ('global'), hint: 'Global defaults for every project. Switching copies nothing.' }], scope);
         if (nextScope && nextScope !== scope) {
           const next = options.loadScope ? await options.loadScope(nextScope) : saved;
           scope = nextScope; saved = clone(next);
@@ -700,28 +933,26 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
       if (index === 22) { const next = await options.migrate?.(scope); if (next) saved = clone(next); continue; }
       if (index === 1) draft.enabled = !draft.enabled;
       else if (index === 2) draft.autoStart = !draft.autoStart;
-      else if (index === 3) selected = await selectValue(ctx.ui, 'Worker', draft.workers.map(w => w.id)) || selected;
+      else if (index === 3) selected = await chooseValue(ctx, 'Selected worker', draft.workers.map(worker => ({ value: worker.id })), selected) || selected;
       else if (index === 4) await pickModel(ctx, w);
-      else if (index === 5) w.effort = await selectValue(ctx.ui, 'Effort (validated against the worker model at startup)', ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']) || w.effort;
+      else if (index === 5) w.effort = await chooseValue(ctx, 'Worker effort', /** @type {const} */ (['off', 'minimal', 'low', 'medium', 'high', 'xhigh']).map(value => ({ value, hint: 'Checked against the worker model when it starts.' })), w.effort) || w.effort;
       else if (index === 6) w.readOnly = !w.readOnly;
       else if (index === 7) { const value = await ctx.ui.input('Worker workspace: absolute path, or blank for Main', w.cwd || ''); if (value !== undefined) w.cwd = value.trim() || null; }
       else if (index === 8) {
-        /** @type {readonly Readonly<{label: string, value: import('./contracts.js').ReviewMode}>[]} */
+        /** @type {readonly {value: import('./contracts.js').ReviewMode, hint: string}[]} */
         const modes = [
-          { label: 'Final-only: review after the complete plan; questions always allowed', value: 'final-only' },
-          { label: 'Milestones: approve each dispatched plan milestone', value: 'milestones' },
-          { label: 'Every-step: approve each small plan step; no step skipping', value: 'every-step' }
+          { value: 'final-only', hint: 'Review once after the complete plan. Questions are always allowed.' },
+          { value: 'milestones', hint: 'Approve each dispatched plan milestone.' },
+          { value: 'every-step', hint: 'Approve each small plan step. No step skipping.' }
         ];
-        const pick = await ctx.ui.select('Review policy · final acceptance is always required', modes.map(mode => mode.label));
-        const mode = modes.find(mode => mode.label === pick); if (mode) draft.supervision.mode = mode.value;
+        draft.supervision.mode = await chooseValue(ctx, 'Review policy · final acceptance is always required', modes, draft.supervision.mode) || draft.supervision.mode;
       }
       else if (index === 9) draft.supervision.maxRevisions = await numberInput(ctx, 'Revision limit', draft.supervision.maxRevisions, {
         accepts: value => Number.isInteger(value) && value >= 0 && value <= 20, expected: 'enter an integer from 0 to 20.'
       });
-      else if (index === 10) draft.supervision.summaryDetail = await selectValue(ctx.ui, 'Worker summary detail', ['minimal', 'normal', 'detailed']) || draft.supervision.summaryDetail;
+      else if (index === 10) draft.supervision.summaryDetail = await chooseValue(ctx, 'Summary detail', [{ value: 'minimal', hint: 'Shortest reports.' }, { value: 'normal', hint: 'Changes, reasons and evidence.' }, { value: 'detailed', hint: 'Fuller reasoning and evidence.' }], draft.supervision.summaryDetail) || draft.supervision.summaryDetail;
       else if (index === 14) {
-        const pick = await ctx.ui.select('Indicator · display only, no effect on work', INDICATORS.map(mode => INDICATOR_LABEL[mode]));
-        draft.indicator = INDICATORS.find(mode => INDICATOR_LABEL[mode] === pick) || draft.indicator;
+        draft.indicator = await chooseValue(ctx, 'Indicator · display only', INDICATORS.map(mode => ({ value: mode, hint: `${INDICATOR_LABEL[mode][0].toUpperCase()}${INDICATOR_LABEL[mode].slice(1)}.` })), draft.indicator) || draft.indicator;
       }
       else if (index === 16) {
         const id = await ctx.ui.input('New worker ID (letters, digits, hyphens, underscores)');

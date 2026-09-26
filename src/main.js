@@ -1,11 +1,11 @@
 import { PairController } from './controller.js';
 import { configPaths, configForScope, INDICATORS, isIndicator, loadConfig, previewBackupImport, saveBackupImport, saveConfig, saveIndicator, updateConfigLayer } from './config.js';
 import { decisionSchema, dispatchSchema, inspectSchema, statusSchema, yieldSchema, validate, validateDecision, validateDispatch } from './schema.js';
-import { isDirectMutation, nativeSettings, probeNative, sourcePaths } from './native.js';
+import { isDirectMutation, nativeProfileBlockers, nativeSettings, probeNative, sourcePaths } from './native.js';
 import { selectLastMeasuredUsage } from './metrics.js';
 import { ScopedCacheWarming } from './warming.js';
 import { assert, briefError, cleanText, digest, Serial } from './util.js';
-import { ageLabel, dashboardHeader, dashboardItems, dashboardMoreItems, diffLineColor, humanPatch, indicator, kindLabel, planLine, planWidget, reportCardLines, reportLineColor, settingsUI, staleWorkers, statusText, textView } from './ui.js';
+import { ageLabel, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, diffLineColor, doctorText, humanPatch, inboxText, indicator, kindLabel, menu, planLine, planWidget, reportCardLines, settingsUI, staleWorkers, statusText, textView } from './ui.js';
 
 const MAIN_GUIDE = `Fabric Pair provides persistent supervised implementation workers without switching this Main model.
 You own planning, questions, reviews and final acceptance. For implementation requests, check pair_status, make a bounded plan, and delegate with pair_dispatch to a configured worker when Pair is enabled. The dispatch returns an acknowledgement, not completion. Continue talking with the user normally; do not poll, repeatedly call status, or wait inside a tool for the worker.
@@ -412,10 +412,12 @@ export function registerMain(pi) {
         const showReport = async workerId => {
           const view = c.reportView(workerId);
           assert(view, `Worker ${workerId} has no current report`);
-          await textView(ctx, `${kindLabel(view.kind)} · ${workerId} (read-only; Main still reviews with pair_inspect)`, reportCardLines(view).join('\n'), { paint: reportLineColor });
-          const next = await ctx.ui.select('Report actions', ['View checkpoint diff', ...(c.summary().waitingReports ? ['Deliver waiting reports to Main'] : []), 'Back']);
-          if (next === 'View checkpoint diff') await showDiff(workerId);
-          else if (next === 'Deliver waiting reports to Main') await showYield();
+          await textView(ctx, `${kindLabel(view.kind)} · ${workerId} · read-only`, reportCardLines(view).join('\n'), { panel: true });
+          const next = await menu(ctx, [{ id: 'diff', label: 'View checkpoint diff', hint: 'Scroll the changes in this checkpoint with real file names.' },
+            ...(c.summary().waitingReports ? [{ id: 'yield', label: 'Deliver waiting reports to Main', hint: 'Send them to Main now. Each delivery starts a Main turn.' }] : [])],
+          { title: `${kindLabel(view.kind)} · ${workerId}`, subtitle: ['Main still inspects the evidence and decides with pair_decide.'], footer: '↑↓ move · enter select · esc back' });
+          if (next === 'diff') await showDiff(workerId);
+          else if (next === 'yield') await showYield();
         };
         /** @param {string} workerId */
         const showDiff = async workerId => {
@@ -429,19 +431,22 @@ export function registerMain(pi) {
           const ready = await c.yieldManual();
           if (ready.length) deliveredToMain = true;
           const lines = ready.length
-            ? [`Delivered ${ready.length} report${ready.length === 1 ? '' : 's'} to Main:`, ...ready.map(n => `  • ${n.workerId} · ${n.reportId} (${n.status})`)]
-            : ['No reports were waiting.'];
-          await textView(ctx, 'Pair yield', [...lines, ...(ready.length ? ['', 'Each delivered report starts a Main turn. Main reads a report with pair_inspect or pair_decide.'] : [])].join('\n'));
+            ? [`  ✔ Delivered ${ready.length} report${ready.length === 1 ? '' : 's'} to Main`, '', ...ready.map(n => `  ${n.workerId.padEnd(10)}  ${n.reportId} · ${n.status.replace(/_/g, ' ')}`), '',
+              '> Each delivered report starts a Main turn. Main reads it with pair_inspect or pair_decide.']
+            : ['', '  ✔ Nothing was waiting', '', '> Every report has already reached Main.'];
+          await textView(ctx, 'Pair · Deliver reports', lines.join('\n'), { panel: true });
         };
         const showInbox = async () => {
           const inbox = await c.inbox();
-          const lines = inbox.length ? inbox.flatMap(n => {
-            const view = c.reportView(n.workerId);
-            const title = view?.reportId === n.reportId ? `${kindLabel(view.kind)} from ${n.workerId}: ${view.summary.split('\n')[0].slice(0, 120)}` : `Report from ${n.workerId}`;
-            return [title, `  ${n.reportId} · ${n.status}${n.observedAt === undefined ? ' · not yet read by Main' : ' · read by Main'}`, ''];
-          }) : ['No unresolved reports.'];
-          await textView(ctx, 'Pair inbox', lines.join('\n'));
+          const entries = inbox.map(n => ({ workerId: n.workerId, reportId: n.reportId, status: n.status, observedAt: n.observedAt, view: c.reportView(n.workerId) }));
+          await textView(ctx, 'Pair · Inbox', inboxText(entries, c.summary().autoDeliverReports !== false), { panel: true });
           if (inbox.length && await ctx.ui.confirm('Redeliver saved reports', 'Deliver unresolved reports to this Main session again? Decisions remain idempotent.')) await c.inbox(true);
+        };
+        /** @param {typeof config.requirements} requirements */
+        const showDoctor = async requirements => {
+          const main = await probeMain(ctx), pair = c.summary(), configuration = configObservation();
+          const blockers = main.capabilities.fabric ? nativeProfileBlockers(main.native, requirements) : [];
+          await textView(ctx, 'Pair · Doctor (no inference)', doctorText({ main, pair, configuration, blockers, raw: { main, pair, configuration, requirements } }), { panel: true });
         };
         if (command === 'report') return await showReport(id);
         if (command === 'diff') return await showDiff(id);
@@ -451,9 +456,9 @@ export function registerMain(pi) {
           assert(!idArg && !rest.length, 'Use /pair yield to deliver ready reports to this Main session');
           return await showYield();
         }
-        if (command === 'doctor') return textView(ctx, 'Pair doctor (no inference)', JSON.stringify({ main: await probeMain(ctx), pair: c.summary(), configuration: configObservation(), requirements: config.requirements }, null, 2));
+        if (command === 'doctor') return await showDoctor(config.requirements);
         if (command && command !== 'status') throw new Error('Unknown Pair command. Use /pair for the dashboard.');
-        const showStatus = async () => textView(ctx, 'Pair status', statusText(c.summary(), await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true)));
+        const showStatus = async () => textView(ctx, 'Pair · Status', statusText(c.summary(), await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true)), { panel: true });
         if (command === 'status') return await showStatus();
         /** One dashboard action. @param {import('./ui.js').DashboardItem} item @returns {Promise<void>} */
         const runItem = async item => {
@@ -479,20 +484,18 @@ export function registerMain(pi) {
           if (item.action === 'inbox') return await showInbox();
           if (item.action === 'settings') return await openSettings(ctx);
           if (item.action === 'reload') { await reloadConfiguration(ctx, true); return; }
-          if (item.action === 'doctor') return textView(ctx, 'Pair doctor (no inference)', JSON.stringify({ main: await probeMain(ctx), pair: c.summary(), configuration: configObservation(), requirements: current.requirements }, null, 2));
+          if (item.action === 'doctor') return await showDoctor(current.requirements);
         };
-        // The dashboard stays open: after each action it redraws from fresh state until Close or Esc.
+        // The dashboard stays open: after each action it redraws from fresh state until Esc.
         for (;;) {
           const summary = c.summary(), items = dashboardItems(summary);
-          const choice = await ctx.ui.select(`Fabric Pair · ${dashboardHeader(summary)}`, items.map(item => item.label));
-          let item = items.find(entry => entry.label === choice);
+          let item = items[Number(await menu(ctx, dashboardMenu(items), { title: 'Fabric Pair', subtitle: dashboardHeader(summary), footer: '↑↓ move · enter select · esc close' }) ?? NaN)];
           if (item?.action === 'more') {
             const more = dashboardMoreItems(summary);
-            const pick = await ctx.ui.select('Fabric Pair · More', more.map(entry => entry.label));
-            item = more.find(entry => entry.label === pick);
-            if (!item || item.action === 'back') continue;
+            item = more[Number(await menu(ctx, dashboardMenu(more), { title: 'Fabric Pair · More', footer: '↑↓ move · enter select · esc back' }) ?? NaN)];
+            if (!item) continue;
           }
-          if (!item || item.action === 'close') return;
+          if (!item) return;
           try { await runItem(item); } catch (error) { ctx.ui.notify(`Pair: ${briefError(error)}`, 'error'); }
           if (stopped || controller !== c || deliveredToMain) return;
         }
