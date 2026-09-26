@@ -164,7 +164,9 @@ budgets exclude Main usage and native warming. See the
 
 Pair provides workflow controls; OS and tool permissions remain your security
 boundary. Unattended operation, automatic crash recovery, and multiple writers
-are outside this MVP.
+are outside this MVP. The package ships no automated test suite; verify changes
+by inspection and the retained static checks (`npm run typecheck`,
+`npm run pack:check`).
 
 [Quickstart](docs/QUICKSTART.md) |
 [Architecture](docs/ARCHITECTURE.md) |
@@ -172,7 +174,6 @@ are outside this MVP.
 [Example config](fabric-pair.example.json) |
 [Compatibility](docs/COMPATIBILITY.md) |
 [Security](docs/SECURITY.md) |
-[Testing](docs/TESTING.md) |
 [Changelog](CHANGELOG.md)
 
 [MIT license](LICENSE).

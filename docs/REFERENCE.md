@@ -247,9 +247,8 @@ Fovea 0.31.1, and Node 24 on macOS**, using a deterministic local model. It cove
 the question/review/revision loop, retained sessions, rejection of stale or
 duplicate decisions, cancellation, and confirmed stop. It did not qualify paid
 providers, the interactive Main TUI, or other platforms. See
-[compatibility](COMPATIBILITY.md), [testing scope](TESTING.md), and
+[compatibility](COMPATIBILITY.md) and
 [security boundaries](SECURITY.md). That run predates the report-delivery,
-phase/branch-fencing and retained-scope behavior described above: those are
-verified by the offline registered-hook/child-process suite only and have
+phase/branch-fencing and retained-scope behavior described above: those have
 **not** been natively qualified. The Pair package loaded into a running session
 may differ from this checkout's source.

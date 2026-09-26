@@ -27,7 +27,7 @@ Originally inspected on **2026-09-23** from the supplied reference sources: Pi 0
 Versions identify the source inspected, not npm publication status or a live
 compatibility certification. Use the versions already proven in your environment,
 compare these contracts and run the permitted static checks before updating.
-Behavioral/native qualification requires separate authorization under `TESTING.md`.
+Behavioral/native qualification requires separate owner authorization.
 
 ## Source provenance
 
@@ -161,13 +161,23 @@ shapes remain readable and non-authorizing:
   pauses; `resume` restores the waiting decision without rotating a lease.
   Older interrupted/mid-implementation recovery semantics are unchanged.
 
-These behaviors are covered by the offline suite only; native qualification of
-them is NOT RUN, and a Pair package loaded into a running session may differ
-from the checkout source.
+These behaviors are not covered by any bundled automated suite; native qualification of
+them is NOT RUN, and a Pair package loaded into a running session may differ from
+the checkout source.
 
 ## Upgrade checklist
-Record installed versions and any patches. Follow `TESTING.md`: inspect source,
-run the retained compiler/package checks, and do not recreate tests or probes.
+Record installed versions and any patches. Inspect source and run the retained
+static checks: `npm run typecheck` (pinned strict project check) and
+`npm run pack:check` (an npm package dry run); neither loads or behaviorally
+qualifies the extension. On macOS/arm64, the optional `npm run build:host` /
+`npm run check:host` commands concern the parked native source only
+([private storage contract](H1-PERSISTENT-STORAGE-CONTRACT.md)) and are not
+installation or packaging prerequisites. Install from the committed lockfile
+with `npm ci --ignore-scripts --no-audit --no-fund`; lifecycle scripts stay
+disabled, so that setup does not qualify native components. There is no
+bundled automated test suite; changes require manual review, and the package
+must not be represented as release-qualified, natively certified, or safe for
+unattended work.
 Tool capture, settlement, permissions, compaction, Fovea continuation and session
 reuse remain behavioral requirements, not currently certified outcomes. Separate
 owner authorization is required for future runtime evidence. Do not weaken a

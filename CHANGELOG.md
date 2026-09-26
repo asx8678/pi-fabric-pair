@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Removed the bundled offline test suite: every file under `tests/` (including `tests/helpers/`), the `test` and `test:ui` npm scripts, and `docs/TESTING.md`. The retained static checks are unchanged: `npm run typecheck`, `npm run pack:check`, and `npm run check:host` for the parked native source (macOS/arm64). The repository no longer bundles automated tests; verify changes by manual review. Earlier entries below that describe test additions or point at `docs/TESTING.md` are records of the suite as it existed at the time, not current instructions.
+
 - Reworked the Pair TUI. `/pair` now builds its menu from the current state: waiting reports come first (review, diff, deliver to Main), and each worker only offers the lifecycle actions that apply (no Start while running, Resume only when held, Cancel asks for a reason). Added read-only `/pair report` (a report card separating Pair-captured files and checks from the worker's claims) and `/pair diff` (colored checkpoint diff with real file names and added-file contents); neither marks a report inspected, so Main must still `pair_inspect` before approving. `/pair inbox` and `/pair yield` show readable lists instead of JSON. The scroll view sizes to the terminal, honours keybindings, wraps wide characters correctly and adds `g`/`G`, `/` search with `n`/`N`, and `[`/`]` file jumps. The widget names what a waiting worker waits on (`← W◐ question`), shows the plan of the active worker (labelled when there are several), and the waiting line is shorter.
 
 - Fixed `answer`/`revise` decisions made after the workspace drifted from the report's checkpoint. They were recorded first and then failed the continuation guard, which left the report resolved, the task interrupted and the worker contained. Every continuation now checks the live workspace before recording, so a stale decision is rejected and the report stays open; restoring the reported state makes it decidable again. The `pair_dispatch` result and README now say reports wait in the inbox for `pair_yield` rather than arriving automatically.
@@ -31,7 +33,7 @@
 - Staged runtime-affecting changes without revoking active authorization or racing scanner containment. Explicit `/pair start` reconciles after terminal tasks and confirmed exits; indicator/no-op edits do not restart workers. Saving and runtime setup outcomes are separate.
 - Added aggregate file-profile preflight with required Fabric values, worker workspace paths, precedence and trust limitations; authoritative worker readiness still checks all fields. Added isolated command, profile, autosave and transition regressions.
 
-- Reconciled the testing documentation with the retained offline suite (P3). README, `docs/TESTING.md` and `docs/SCOPE-OF-WORK.md` now describe the current tests instead of the superseded no-tests directive; the suite itself is unchanged.
+- Reconciled the testing documentation with the then-retained offline suite (P3). README, `docs/TESTING.md` and `docs/SCOPE-OF-WORK.md` then described the current tests instead of the superseded no-tests directive; the suite itself stayed unchanged until its later removal described above.
 
 ## 0.1.0 — 2026-09-23
 
@@ -48,4 +50,5 @@ Initial standalone source release. No Pi, Fabric, or Fovea fork.
 - Offline tests using real child processes and a mock Pi host running the actual worker bridge.
 
 This release is not certified against live provider calls or the full installed
-Pi/Fabric/Fovea stack. See `docs/TESTING.md` before enabling it on valuable work.
+Pi/Fabric/Fovea stack. See the compatibility limits in `docs/COMPATIBILITY.md`
+before enabling it on valuable work.
