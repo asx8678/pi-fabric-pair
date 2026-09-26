@@ -178,9 +178,15 @@ export function gateTool(name, authority, latched, readOnly = false) {
   // A latched lease still admits pair_report so an identical retained report can be
   // republished (DUR-01); its execute rejects any different payload.
   if (!authority || authority.phase !== 'running' || (latched && n !== 'pair_report')) return { block: true, reason: 'PAIR_WAIT: no implementation lease is active. Wait for Main; do not continue or start another agent.' };
+  // Delegation registered as Pi tools (subagent, delegate, spawn_agent, pair_dispatch or
+  // a tool named agents.*). Fabric's own providers (agents.spawn/run/create, rlm, councils)
+  // never reach this hook: Fabric replays tool_call only for Pi core tools and captured
+  // extension tools. Fabric spawning is stopped by agents.maxDepth = 0 in the worker's
+  // profile (nativeProfileBlockers), and actor turns run through the same depth check.
   if (/^(agents|actors|crew|swarm)\./.test(n) || /^(subagent|delegate|spawn_agent|pair_dispatch)$/.test(n)) return { block: true, reason: 'Pair workers cannot delegate or create other workers.' };
-  // fabric_exec is an outer envelope. Fabric replays nested tool_call hooks;
-  // each nested call is classified separately. This is workflow gating, not a sandbox.
+  // fabric_exec is an outer envelope. Fabric replays nested tool_call hooks for pi.* and
+  // captured extension calls under their bare names (edit, bash, pair_report), so each
+  // nested call is classified separately. This is workflow gating, not a sandbox.
   if (readOnly && n !== 'fabric_exec' && !isReadCapability(n)) return { block: true, reason: `Read-only Pair worker cannot execute ${n}. Use read/Fovea tools, not shell or mutable providers.` };
   return undefined;
 }
