@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="252" viewBox="0 0 960 252" role="img" aria-labelledby="title desc">
+  <title id="title">Pair runtime</title>
+  <desc id="desc">Main and the Pair controller run in one Pi process. The controller sends work to a separate worker over RPC. The worker returns reports through local files.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1 1L7 4L1 7" fill="none" stroke="#667085" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="start-arrow" viewBox="0 0 8 8" refX="1" refY="4" markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M7 1L1 4L7 7" fill="none" stroke="#667085" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="960" height="252" fill="#fff"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" fill="#202936">
+    <g fill="none" stroke="#d0d5dd" stroke-width="1.2" stroke-dasharray="5 5">
+      <rect x="24" y="24" width="494" height="204" rx="6"/>
+      <rect x="732" y="24" width="204" height="204" rx="6"/>
+    </g>
+    <g font-size="15" fill="#667085">
+      <text x="44" y="52">Main process</text>
+      <text x="752" y="52">Worker process</text>
+    </g>
+    <rect x="48" y="102" width="142" height="72" rx="4" fill="#fff" stroke="#b8c1cc" stroke-width="1.2"/>
+    <rect x="282" y="102" width="204" height="72" rx="4" fill="#f4f7fa" stroke="#8fa5bb" stroke-width="1.2"/>
+    <rect x="756" y="102" width="156" height="72" rx="4" fill="#fff" stroke="#b8c1cc" stroke-width="1.2"/>
+    <g text-anchor="middle">
+      <text x="119" y="130" font-size="20" font-weight="500">Main</text>
+      <text x="119" y="153" font-size="15" fill="#667085">plan + review</text>
+      <text x="384" y="145" font-size="20" font-weight="500">Pair controller</text>
+      <text x="834" y="130" font-size="20" font-weight="500">Worker</text>
+      <text x="834" y="153" font-size="15" fill="#667085">implement</text>
+    </g>
+    <g fill="none" stroke="#667085" stroke-width="1.4" marker-end="url(#arrow)">
+      <path d="M202 138H270" marker-start="url(#start-arrow)"/>
+      <path d="M498 118H744"/>
+      <path d="M744 158H498"/>
+    </g>
+    <g font-size="15" fill="#667085" text-anchor="middle">
+      <text x="236" y="120">tools</text>
+      <text x="621" y="104">RPC</text>
+      <text x="621" y="184">local reports</text>
+    </g>
+  </g>
+</svg>

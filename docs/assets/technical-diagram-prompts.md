@@ -1,4 +1,7 @@
-# Technical diagram prompts
+# Archived technical diagram prompts
+
+These prompts describe the earlier PNG illustrations. The README now uses
+hand-authored SVGs listed in [the asset index](README.md#technical-diagrams).
 
 Generated with the built-in imagegen tool. These diagrams document the active
 `extension.js` -> `main.js` / `worker.js` runtime, with `PairController`, `PiRuntime`,

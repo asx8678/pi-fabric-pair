@@ -2,42 +2,28 @@
 
 ## Technical diagrams
 
-Three illustrations explain the active Pair runtime. Generated with the built-in
-imagegen tool; the [exact prompts](technical-diagram-prompts.md) are retained for
-updates. The existing cache-engine hero remains illustrative artwork.
+The README uses three hand-authored SVG diagrams. Each focuses on one idea, with
+a white background, thin lines, system fonts, and a muted blue accent. Edit text
+and coordinates directly in the SVG files.
 
 | Image | Explains | Implementation sources |
 | --- | --- | --- |
-| [Runtime architecture](pi-fabric-pair-architecture.png) | Main's controller, a persistent RPC worker, the report file channel, and local storage. | [Role selection](../../src/extension.js), [controller](../../src/controller.js), [runtime](../../src/actor-runtime.js), [RPC transport](../../src/rpc.js). |
-| [Review and revision loop](pi-fabric-pair-review-loop.png) | Dispatch, report/yield, settled execution, frozen evidence, inspection, and hash-bound approval. | [Main tools](../../src/main.js), [worker report and gates](../../src/worker.js), [controller decisions](../../src/controller.js), [evidence capture](../../src/evidence.js). |
-| [Persistent context](pi-fabric-pair-context.png) | Separate conversations, state restoration after compaction, and last-request cache observations. | [Main lifecycle](../../src/main.js), [worker lifecycle](../../src/worker.js), [cache measurements](../../src/metrics.js), [native warming integration](../../src/warming.js). |
+| [Runtime](pi-fabric-pair-architecture.svg) | Main's controller and one separate worker. | [Controller](../../src/controller.js), [RPC](../../src/rpc.js), [worker](../../src/worker.js). |
+| [Review loop](pi-fabric-pair-review-loop.svg) | Implement, capture evidence, inspect, and approve or revise. | [Main tools](../../src/main.js), [decisions](../../src/controller.js), [evidence](../../src/evidence.js). |
+| [Retained context](pi-fabric-pair-context.svg) | Two conversations; one worker session across revisions and tasks. | [Main lifecycle](../../src/main.js), [worker lifecycle](../../src/worker.js), [session runtime](../../src/actor-runtime.js). |
 
-### Reading the diagrams
+The diagrams summarize the active extension/controller runtime. The context
+rows show each conversation's progression, rather than exact event timing.
+Protocol details and approval rules are in [Architecture](../ARCHITECTURE.md)
+and [Reference](../REFERENCE.md).
 
-The architecture has two model-bearing processes. `PairController`, `PiRuntime`,
-and `PiRpc` run inside Main's process. RPC carries commands and native lifecycle
-events. `pair_report` latches a report in `latch.json` before publishing it to
-`workers/<id>/inbox/<reportId>.json`; a UI notification only wakes the controller.
-The worker edits source directly in the implementation workspace.
+### Earlier generated versions
 
-The review diagram follows a code-review report. Questions and blockers can
-return earlier through the same reporting channel. The worker yields its lease
-before the controller checks settlement, runs configured verification, and
-captures/rechecks source. Main must inspect the checkpoint before approving its
-exact hash. Source changes make that approval stale; checks must pass when
-`requirePassing` is enabled. A completed task leaves its worker session retained.
-
-The context diagram distinguishes conversations from durable coordination and
-provider cache observations. Relevant user constraints must be in the work order.
-After native compaction, Pair queues a bounded task-state packet with
-`deliverAs: 'nextTurn'` and `triggerTurn: false`. Cache-read share is
-`cacheRead / (input + cacheRead + cacheWrite)`, measured separately for each role's
-last request. Optional native warming is off by default, requires a compatible
-SDK, can incur paid usage, and does not guarantee cache hits.
-
-These images describe the active extension/controller runtime, not the separate
-ActorHost implementation plans. For full details and scope boundaries, see
-[Architecture](../ARCHITECTURE.md) and [Reference](../REFERENCE.md).
+The previous PNGs remain as historical assets:
+[architecture](pi-fabric-pair-architecture.png),
+[review loop](pi-fabric-pair-review-loop.png), and
+[context](pi-fabric-pair-context.png).
+Their [generation prompts](technical-diagram-prompts.md) are archived here.
 
 ## Hot piston cache engines
 
