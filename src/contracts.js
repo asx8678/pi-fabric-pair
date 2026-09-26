@@ -66,7 +66,7 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 /** @typedef {{hash: string, taskId: string, workerId: string, acceptedAt: number, status: string}} StoredRequestV1 */
 /** Delivery receipts are truthful offers, never confirmed comprehension: offeredAt/channel name the channel that received the report; observedAt records an explicit Main read. Legacy 'delivered' remains readable but is never newly written (sendMessage is fire-and-forget).
  * observedBranch pins the persisted conversation-branch counter the report was last inspected on; a decision on a different branch is stale and needs fresh inspection.
- * @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual', observedAt?: number, observedBranch?: number, error?: string}} HistoricalNoticeV1 */
+ * @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual' | 'auto', observedAt?: number, observedBranch?: number, error?: string}} HistoricalNoticeV1 */
 /** @typedef {HistoricalNoticeV1 & {ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} StoredNoticeV1 */
 /** Explicit, nonauthorizing Main logical-phase marker. It only channels report delivery after an explicit yield; it never grants worker or Main authority, and a missing marker never implies readiness or yield. revision is a real monotonic phase token; runToken binds a yield to the exact Main agent run that recorded it.
  * The armed flag records whether an empty yield may receive one future automatic boundary offer; activity is the logical activity epoch captured with the yield.
@@ -719,7 +719,7 @@ function checkNotice(value, label, reportId, historical) {
   // Offer receipts name the delivery channel that received the report; observedAt
   // records an explicit Main read. Neither confirms the model comprehended it.
   if (Object.hasOwn(notice, 'offeredAt')) integer(notice.offeredAt, `${label}.offeredAt`);
-  if (Object.hasOwn(notice, 'channel')) choice(notice.channel, ['tool-result', 'boundary', 'manual'], `${label}.channel`);
+  if (Object.hasOwn(notice, 'channel')) choice(notice.channel, ['tool-result', 'boundary', 'manual', 'auto'], `${label}.channel`);
   if (Object.hasOwn(notice, 'observedAt')) integer(notice.observedAt, `${label}.observedAt`);
   // The branch the report was last inspected on; only fences stale decisions.
   if (Object.hasOwn(notice, 'observedBranch')) integer(notice.observedBranch, `${label}.observedBranch`, 0);

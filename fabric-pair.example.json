@@ -59,5 +59,6 @@
     "maxTotalBytes": 536870912,
     "maxArtifactBytes": 67108864
   },
-  "mainReadOnlyDuringTasks": true
+  "mainReadOnlyDuringTasks": true,
+  "autoDeliverReports": true
 }

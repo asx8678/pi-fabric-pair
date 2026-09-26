@@ -32,11 +32,12 @@ handling, and bounded stream parsing. This is not a new wire protocol or gRPC.
 6. Controller validates the decoded report envelope before reading identities, then checks the incarnation nonce, owner session/epoch, worker slot/generation, session, task attempt/lease, plan revision, step, payload schema, and payload hash.
 7. Controller waits for the native settled event, runs preconfigured checks, and
    freezes/rechecks a source snapshot. It does not review a moving checkpoint.
-8. The finalized report waits in Pair's durable inbox. Main retrieves it
-   explicitly with `pair_yield`; the single exception is one report armed by an
-   empty yield, delivered once at the current run's settlement boundary. No
-   entire worker transcript is copied into Main, and no automatic idle wakeup
-   exists.
+8. The finalized report is stored in Pair's durable inbox and, with
+   `autoDeliverReports` (default), sent to Main as a follow-up message that
+   starts Main's next turn. With it off, Main retrieves reports with
+   `pair_yield`, or one report armed by an empty yield is delivered at the
+   current run's settlement boundary. No entire worker transcript is copied
+   into Main.
 9. Main retrieves immutable evidence, then answers, approves, revises or cancels
    through the decision tool. Approval binds to the snapshot hash and requires the
    live source snapshot still to match.
@@ -178,8 +179,9 @@ a threshold, but cannot provide a provider-enforced total spend ceiling.
 
 ## Handoff: durable inbox, phases and branch fencing
 
-Reports finalize into a durable inbox of notices; no automatic model wakeup
-exists. Delivery channels are explicit: `pair_yield` returns compact reports in
+Reports finalize into a durable inbox of notices. With `autoDeliverReports`
+(default) each one is also pushed to Main as a follow-up that starts a turn.
+The other delivery channels are explicit: `pair_yield` returns compact reports in
 the tool result; an armed empty yield grants exactly one settlement-boundary
 entry injection (public `agent_before_settle` entries/continue) fenced by the
 exact permit; humans redeliver via `/pair yield` and `/pair inbox`.

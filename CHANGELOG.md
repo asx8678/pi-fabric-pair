@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fixed: the workflow stopped after the worker reported.** Finalized reports only waited in the inbox, and nothing woke Main unless it had called `pair_yield` before its turn ended, so Main never reviewed the work. New setting `autoDeliverReports` (default `true`) sends each finalized report to Main as a follow-up message that starts a turn. It only fires when Main is idle (otherwise at Main's `agent_settled`), only for reports no `pair_yield`/boundary delivery has already offered, and at most `limits.maxReportsPerTask` (default 40) times per task, so a report is never delivered twice and question/answer loops stay bounded. Main's guide now tells it to inspect every report, approve only correct work, and `revise` with concrete fixes otherwise, which sends the work back to the worker until it is approved, cancelled or the revision limit is reached. Set `autoDeliverReports: false` for the previous explicit-yield behaviour.
+
 - `pair_decide` `revise` accepts optional `steps` to replace the plan. Completed steps must stay unchanged as its prefix; the task's `planRevision` advances (counted once against the revision limit), old-revision reports are rejected, and `work-order.json` is rewritten so post-compaction scope restoration keeps working. The worker receives the revised plan in the decision message.
 - Report size limits are now UTF-8 bytes (same 4000/12000/32000 values), checked by the worker and again by the controller. Non-ASCII reports are effectively limited more tightly than before.
 - A worker can resubmit its identical locked-in report: the tool gate now lets `pair_report` through after the report latch, so the DUR-01 republish path is reachable. Other tools stay blocked.

@@ -23,9 +23,9 @@ import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonic
  * @typedef {{id: string, record: WorkerRecord, runtime: PiRuntime | undefined, intent: number, generation: number}} Control
  * @typedef {{control: Control, disposition: 'accepted' | 'duplicate' | 'stale' | 'unproven' | 'revoked'}} ReportAcceptance
  */
-/** @typedef {import('./actor-runtime.js').RuntimeConfig & {version: number, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: string, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, limits: import('./contracts.js').TaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: {maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}, mainReadOnlyDuringTasks: boolean, runtime: {command: string, commandArgs: string[], inheritExtensions: boolean, extraExtensions: string[], extraSkills: string[]}}} PairConfig */
+/** @typedef {import('./actor-runtime.js').RuntimeConfig & {version: number, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: string, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, limits: import('./contracts.js').TaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: {maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}, mainReadOnlyDuringTasks: boolean, autoDeliverReports?: boolean, runtime: {command: string, commandArgs: string[], inheritExtensions: boolean, extraExtensions: string[], extraSkills: string[]}}} PairConfig */
 /** @typedef {{reportId: string, workerId: string, taskId: string, ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} NoticeDetails */
-/** @typedef {{notifyUser?: (message: string, level: 'info'|'warning'|'error') => void, notifyMain?: (message: string, details: NoticeDetails) => void | Promise<void>, reportReady?: (notice: import('./contracts.js').StoredNoticeV1) => void, promptUser?: import('./actor-runtime.js').RuntimeOptions['promptUser']}} ControllerCallbacks */
+/** @typedef {{notifyUser?: (message: string, level: 'info'|'warning'|'error') => void, notifyMain?: (message: string, details: NoticeDetails) => void | Promise<void>, reportReady?: (notice: import('./contracts.js').StoredNoticeV1) => void, promptUser?: import('./actor-runtime.js').RuntimeOptions['promptUser'], mainBusy?: () => boolean}} ControllerCallbacks */
 const TERMINAL = new Set(['completed', 'cancelled']);
 const ENTRY = fileURLToPath(new URL('./extension.js', import.meta.url));
 /** Derived per-step display state for summaries; never persisted and never a lease.
@@ -457,7 +457,7 @@ export class PairController extends EventEmitter {
       await this.fenced(work, this.prepareBase(work));
       await this.activate(work, this.workMessage(work.task, true));
     } catch (error) { await this.activationFailed(work, error); throw error; }
-    return { taskId: work.task.id, workerId: work.id, sessionId: work.record.sessionId, status: work.task.status, message: 'Assigned asynchronously. Do not wait or poll; the report waits in Pair\'s inbox until you call pair_yield.' };
+    return { taskId: work.task.id, workerId: work.id, sessionId: work.record.sessionId, status: work.task.status, message: this.config.autoDeliverReports === false ? 'Assigned asynchronously. Do not wait or poll; the report waits in Pair\'s inbox until you call pair_yield.' : 'Assigned asynchronously. Do not wait or poll; the report will be delivered to you automatically when the worker finishes.' };
   }
   /** A paused pre-dispatch receipt may not yet have a baseline; capture before its first grant. @param {Work} work */
   async prepareBase(work) {
@@ -860,11 +860,13 @@ export class PairController extends EventEmitter {
         const notice = { reportId: incoming.reportId, workerId: id, taskId: t.id, ownerEpoch: this.state.ownerEpoch, workerGeneration: r.workerGeneration, attemptId: t.attemptId, deliveryOperationId: uid('delivery'), status: 'pending', createdAt: Date.now() };
         this.state.notices[incoming.reportId] = notice; await this.persist(); return notice;
       });
-      // No automatic Main wakeup: the finalized report stays in the durable inbox
-      // for explicit pair_yield/boundary/manual delivery. Streaming, idle and
-      // settlement observations alone never change the Main phase.
+      // The report stays in the durable inbox either way. With autoDeliverReports,
+      // it is also pushed to Main as a follow-up that starts a turn (after any
+      // current Main run), so Main reviews and approves or revises without waiting
+      // for an explicit pair_yield. Revision limits bound the review loop.
       if (!this.closing && this.controlCurrent(control)) {
         try { this.callbacks.reportReady?.(notice); } catch (error) { console.error(`Pair report-ready notification failed: ${briefError(error)}`); }
+        this.autoDeliver();
       }
     } catch (error) {
       const held = await this.transaction(async () => current() ? this.interrupt(id, `Checkpoint could not be frozen: ${briefError(error)}`) : null);
@@ -879,11 +881,32 @@ export class PairController extends EventEmitter {
       independentlyRunChecks: report.checkpoint.verification.map(v => ({ ...v, output: bounded(v.output, 1500) })), workerInferenceUsage: t.usage, workerBudgetNotice: limitExceeded(t, t.limits), evidenceDirectory: report.checkpoint.path,
       requirement: 'Inspect the immutable checkpoint using pair_inspect before approval. Reply via pair_decide using these exact IDs. Do not create another worker session.' })}`;
   }
-  /** @param {import('./contracts.js').StoredNoticeV1} notice */
-  async deliverNotice(notice) {
+  /** Push never-offered reports to an idle Main as a follow-up that starts a turn.
+   * While Main is busy this does nothing; Main calls it again at agent_settled, after
+   * any armed-yield boundary delivery has already marked its reports offered, so a
+   * report is auto-delivered at most once. Capped per task at limits.maxReportsPerTask. */
+  autoDeliver() {
+    if (this.closing || !this.state || this.config.autoDeliverReports === false || this.callbacks.mainBusy?.()) return;
+    for (const notice of Object.values(this.state.notices)) {
+      if (notice.status !== 'pending' || notice.observedAt !== undefined) continue;
+      const task = this.state.workers[notice.workerId]?.task;
+      const limits = task?.limits, configured = this.config.limits;
+      const cap = (limits && 'maxReportsPerTask' in limits ? limits.maxReportsPerTask : undefined) ?? (configured && 'maxReportsPerTask' in configured ? configured.maxReportsPerTask : undefined) ?? 40;
+      const sent = Object.values(this.state.notices).filter(n => n.taskId === notice.taskId && n.channel === 'auto').length;
+      if (sent >= cap) {
+        this.notifyUser(`Pair: task ${notice.taskId} reached ${cap} automatic report deliveries; report ${notice.reportId} waits in the inbox. Use /pair inbox or ask Main to pair_yield.`, 'warning');
+        continue;
+      }
+      void this.deliverNotice(notice, 'auto').catch(error => this.notifyUser(`Pair: report ${notice.reportId} is saved but automatic delivery to Main failed (${briefError(error)}). Use /pair inbox.`, 'warning'));
+    }
+  }
+  /** @param {import('./contracts.js').StoredNoticeV1} notice @param {'manual' | 'auto'} [channel] */
+  async deliverNotice(notice, channel = 'manual') {
     const delivery = await this.transaction(async () => {
       const r = this.record(notice.workerId);
       if (this.closing || r.task?.report?.reportId !== notice.reportId || !['pending', 'offered', 'delivered', 'delivery_failed'].includes(notice.status)) return null;
+      // Automatic delivery only ever takes a never-offered report; a yield or boundary offer that got there first wins.
+      if (channel === 'auto' && (notice.status !== 'pending' || notice.observedAt !== undefined || this.callbacks.mainBusy?.())) return null;
       const control = this.control(r.id);
       notice.status = 'delivery_pending'; await this.persist();
       if (!this.controlCurrent(control) || this.closing) return null;
@@ -899,7 +922,7 @@ export class PairController extends EventEmitter {
     await this.transaction(async () => {
       if (!this.controlCurrent(delivery.control) || notice.status !== 'delivery_pending') return;
       if (failure) { notice.status = 'delivery_failed'; notice.error = briefError(failure); this.notifyUser('A report is saved but could not reach Main. Use /pair inbox.', 'warning'); }
-      else { notice.status = 'offered'; notice.offeredAt = Date.now(); notice.channel = 'manual'; }
+      else { notice.status = 'offered'; notice.offeredAt = Date.now(); notice.channel = channel; }
       await this.persist();
     });
   }

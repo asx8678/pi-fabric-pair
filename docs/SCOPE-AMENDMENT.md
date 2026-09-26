@@ -9,8 +9,13 @@ open unless explicitly listed here.
 
 ## Delivered (active controller behavior)
 
-- **Durable inbox, no automatic wakeup.** Finalized reports persist as notices
-  and never automatically wake or interrupt Main. Explicit channels only:
+- **Durable inbox with automatic review delivery.** Finalized reports persist
+  as notices. With `autoDeliverReports` (default `true`, changed 2026-09-26
+  because the workflow otherwise stalled after every report), each
+  never-offered report is sent to an **idle** Main as a follow-up that starts a
+  turn, never interrupting a running Main; it is sent at Main's `agent_settled`
+  if Main was busy, at most once per report and at most `maxReportsPerTask`
+  times per task. With it off, explicit channels only:
   `pair_yield` returns compact reports in the tool result; an armed empty yield
   grants exactly one settlement-boundary delivery after `agent_before_settle`;
   `/pair yield` and `/pair inbox` are the human fallbacks.
@@ -64,8 +69,9 @@ open unless explicitly listed here.
 
 ## Current acceptance (handoff slice)
 
-- Reports retained/verified with no automatic Main followUp during an open
-  phase.
+- Reports retained/verified; with `autoDeliverReports` on, one automatic
+  follow-up per never-offered report to an idle Main, capped per task; with it
+  off, no automatic Main followUp during an open phase.
 - Dispatch leaves the Main phase open; explicit yield/review receives ready
   results; no polling, heartbeats or timer inference.
 - No unrelated queue mutation or Main abort; other extensions' boundary drafts

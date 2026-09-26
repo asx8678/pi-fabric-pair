@@ -77,10 +77,19 @@ explicitly.
   observed all defer or revoke the offer; dropped offers stay retrievable.
   `canContinue` is deliberately not pre-gated — native validates it after
   committing the draft.
-- **Manual fallback.** A result arriving after a yielded Main has settled stays
-  retained with a waiting indicator until the next explicit `pair_yield`, or the
-  human `/pair yield` / `/pair inbox` redelivery. There is deliberately no
-  automatic idle wakeup and no timer-based inference.
+- **Automatic delivery (`autoDeliverReports`, default `true`).** Each finalized
+  report is also sent to an idle Main as a follow-up message that starts a
+  turn. If Main is running, delivery waits for Main's `agent_settled`, so it
+  never interrupts Main. Only never-offered reports are sent (a `pair_yield` or
+  armed-yield delivery that got there first wins), and at most
+  `limits.maxReportsPerTask` (default 40) per task; after that, reports wait
+  for `/pair inbox`. Main inspects it and approves, answers or revises; a
+  revise sends the fixes back to the worker, bounded by the revision limit. The
+  notice records `channel: "auto"`.
+- **Manual fallback.** With `autoDeliverReports: false`, a result arriving after
+  a yielded Main has settled stays retained with a waiting indicator until the
+  next explicit `pair_yield`, or the human `/pair yield` / `/pair inbox`
+  redelivery. No timer-based inference exists in either mode.
 - **Main phase.** Dispatch records an explicit, non-authorizing `open` phase;
   `pair_yield` records a `yielded` phase bound to the exact agent run (run
   token, monotonic revision, logical activity epoch). New user input, non-Pair

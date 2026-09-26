@@ -15,7 +15,7 @@ function isArray(value) { return Array.isArray(value); }
 /** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], extraSkills: string[], inheritExtensions: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
-/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').TaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, mainReadOnlyDuringTasks: boolean}} PairConfig */
+/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').TaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean}} PairConfig */
 /** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence'} NestedConfigKey */
 /** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>}} ConfigLayer */
 /** @typedef {{scope: ConfigScope, kind: 'fabric-pair-v1' | 'handoff-v1', sourceFile: string, targetFile: string, fromVersion: 1, toVersion: 2, warnings: string[]}} ConfigMigration */
@@ -46,7 +46,8 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   },
   verification: { commands: [], requirePassing: true, timeoutMs: 120000 },
   evidence: { maxFiles: 25000, maxTotalBytes: 536870912, maxArtifactBytes: 67108864 },
-  mainReadOnlyDuringTasks: true
+  mainReadOnlyDuringTasks: true,
+  autoDeliverReports: true
 }));
 /** @type {NestedConfigKey[]} */
 const NESTED = ['supervision', 'runtime', 'requirements', 'limits', 'verification', 'evidence'];
@@ -93,7 +94,7 @@ function assertMergedConfig(c) {
   assert(isObject(c), 'Pair configuration must be an object');
   assert(isObject(c.supervision) && isObject(c.runtime) && isObject(c.requirements) && isObject(c.limits) && isObject(c.verification) && isObject(c.evidence), 'Pair configuration sections must be objects');
   assert(c.version === CONFIG_VERSION, `Unsupported Pair config version ${c.version}; expected ${CONFIG_VERSION}`);
-  for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
+  for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks', 'autoDeliverReports']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
   assert(c.cacheWarming === 'off' || c.cacheWarming === 'active', 'cacheWarming must be off or active');
   assert(c.indicator === 'minimal' || c.indicator === 'off', 'indicator must be minimal or off');
   assert(typeof c.maxWorkers === 'number' && Number.isInteger(c.maxWorkers) && c.maxWorkers >= 1 && c.maxWorkers <= 8, 'maxWorkers must be 1–8');
