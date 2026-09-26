@@ -2,7 +2,7 @@
 
 **Keep your Main conversation. Give implementation a persistent worker. Review each handoff.**
 
-![Steampunk Main and Worker engines with illustrative last-request cache-read gauges of 80% and 60%. Each cutaway separates provider cache, active context, and retained session history.](docs/assets/pi-fabric-pair-cache-steampunk.png)
+![Steampunk Main and Worker engines with eight exposed pistons compressing steam, spinning flywheels, and illustrative last-request cache-read gauges showing 99% and 100%.](docs/assets/pi-fabric-pair-cache-pistons.png)
 
 *Illustrative readings: each role has its own history and active context. The
 gauges show cache-read share from a past request, not current cache fullness.*

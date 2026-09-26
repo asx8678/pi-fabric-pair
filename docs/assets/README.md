@@ -1,10 +1,47 @@
 # README artwork
 
+## Piston-driven cache engines
+
+Asset: `pi-fabric-pair-cache-pistons.png`
+
+Current README hero, created with built-in image generation by redesigning the
+earlier steampunk illustration. Exposed pistons compress steam in two independent
+Main and Worker engines. Main's 99% and Worker's 100% are illustrative last-request
+cache-read shares, not measured or guaranteed performance.
+Resolution: 1672 x 941 pixels.
+
+### Generation prompt
+
+```text
+Use case: stylized-concept
+Asset type: redesigned GitHub README hero for pi-fabric-pair.
+Input image: the attached current hero is the edit target. Radically redesign its machinery and composition following this new direction; keep the subject of one MAIN engine and one WORKER engine and the steampunk materials, but do not preserve the static cabinet layout.
+
+User's requested change: much more impressive and dynamic, with MANY LARGE PISTONS PRESSING AND COMPRESSING STEAM, and CACHE READINGS AT 99-100%. This is the dominant brief.
+
+Create a breathtaking cinematic steampunk engine room with two immense working cache engines, MAIN on the left and WORKER on the right. Low three-quarter camera angle, powerful diagonal composition, imposing industrial scale, meticulously believable mechanical construction. Four large exposed reciprocating pistons per engine, massive polished steel piston rods, brass crossheads, visible crankshafts and connecting rods, spinning flywheels, heavy riveted copper pressure cylinders. Several cylinders have thick glass cutaway sections showing piston crowns actively pressing swirling luminous steam into small intense compressed volumes. Make the pistons and their motion the visual stars, occupying much of the composition. Freeze a dramatic mid-stroke moment. Forceful white steam jets discharge from relief valves, curl around the machine bases and catch warm furnace light. Add restrained motion blur only to fast linkages and flying steam; the instruments and main structures remain pin sharp.
+
+Each engine has ONE large, beautifully readable luminous analog cache-read dial integrated into its machinery:
+Left: exact labels "MAIN", "CACHE READ", and large "99%".
+Right: exact labels "WORKER", "CACHE READ", and large "100%".
+Both needles are visibly at the extreme high end of a 0-100 scale. High-end arcs are luminous teal or green, conveying excellent reuse, not a red danger zone. Both readouts must be immediately legible when the image is reduced to README width. The exact numbers 99% and 100% are mandatory. No 80% or 60% anywhere.
+
+Build small dense arrays of glowing token-like brass cartridges into each engine separately as a cache metaphor. Retained paper-tape reels and a compact illuminated context slot can appear as subtle supporting details, but the dominant subjects are pistons compressing steam and the two near-maximum CACHE READ instruments. Do not stack three large labelled cabinet drawers. The two engines remain distinct: do not suggest that they transfer a shared cache.
+
+Palette and finish: aged brass, burnished copper, blackened steel, oil-dark joints, warm amber furnace light against selective cool teal luminous steam, volumetric beams in a vast shadowy foundry. Rich patina, tiny machining marks, condensation on glass, convincing reflections, physically detailed construction, lavish cinematic concept-art finish. Strong silhouette and depth, disciplined composition, no visual junk.
+
+A single restrained upper nameplate reads exactly "PI FABRIC PAIR".
+A small clean lower caption reads exactly "ILLUSTRATIVE CACHE READINGS - LAST REQUEST".
+Only those labels and gauge scale numbers; no extra slogans, giant disclaimer plaque, prose, section labels, invented cache tiers, benchmarks, logos, watermarks, people or robots.
+The readouts are conceptual example last-request cache-read percentages, not live measurements or guaranteed performance. This is a dramatic illustration, not a screenshot.
+Wide landscape around 16:9. Generate a completely finished, high-detail raster artwork.
+```
+
 ## Steampunk cache graphic
 
 Asset: `pi-fabric-pair-cache-steampunk.png`
 
-Generated with the built-in image generation tool as the current README hero.
+Generated with the built-in image generation tool as an earlier README concept.
 The twin instruments distinguish session history, active context, and provider
 cache. Main's 80% and Worker's 60% are illustrative last-request cache-read shares,
 not live telemetry, cache fullness, or guaranteed residency.
