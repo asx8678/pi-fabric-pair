@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { agentDir, assert, atomicJSON, digest, exists, merge, plain, readJSON as readUntypedJSON, safeId } from './util.js';
+import { EFFORT_LEVELS } from './contracts.js';
 
 // Keep readJSON's argument-count semantics (a missing required file still throws).
 /** @type {(file: string, fallback?: unknown, maxBytes?: number) => Promise<unknown>} */
@@ -109,7 +110,7 @@ function assertMergedConfig(c) {
     assert(isObject(w), 'Invalid worker'); const id = safeId(w.id, 'worker ID'); assert(!ids.has(id), 'Duplicate worker ID'); ids.add(id);
     for (const key of Object.keys(w)) assert(['id', 'provider', 'model', 'effort', 'cwd', 'readOnly'].includes(key), `Unknown worker setting ${key}`);
     for (const key of ['provider', 'model']) assert(typeof w[key] === 'string' && w[key].length < 1000, `worker.${key} must be a string`);
-    assert(typeof w.effort === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(w.effort), 'Unsupported effort level');
+    assert(EFFORT_LEVELS.some(level => level === w.effort), `Unsupported effort level; use one of ${EFFORT_LEVELS.join(', ')}`);
     assert(w.cwd === null || typeof w.cwd === 'string', 'worker.cwd must be null or a path');
     assert(typeof w.readOnly === 'boolean', 'worker.readOnly must be boolean');
   }

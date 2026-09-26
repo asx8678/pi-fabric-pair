@@ -5,7 +5,7 @@ import { isDirectMutation, nativeProfileBlockers, nativeSettings, probeNative, s
 import { selectLastMeasuredUsage } from './metrics.js';
 import { ScopedCacheWarming } from './warming.js';
 import { assert, briefError, cleanText, digest, Serial } from './util.js';
-import { ageLabel, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, diffLineColor, doctorText, humanPatch, inboxText, indicator, kindLabel, menu, planLine, planWidget, reportCardLines, settingsUI, staleWorkers, statusText, textView } from './ui.js';
+import { ageLabel, chooseWorkerEffort, chooseWorkerModel, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, diffLineColor, doctorText, humanPatch, inboxText, indicator, kindLabel, menu, planLine, planWidget, reportCardLines, settingsUI, staleWorkers, statusText, textView } from './ui.js';
 
 const MAIN_GUIDE = `Fabric Pair provides persistent supervised implementation workers without switching this Main model.
 You own planning, questions, reviews and final acceptance. For implementation requests, check pair_status, make a bounded plan, and delegate with pair_dispatch to a configured worker when Pair is enabled. The dispatch returns an acknowledgement, not completion. Continue talking with the user normally; do not poll, repeatedly call status, or wait inside a tool for the worker.
@@ -156,6 +156,8 @@ export function registerMain(pi) {
     if (!bound || bound !== controller || stopped || epoch !== bindingEpoch || !bound.config.enabled || !bound.config.autoStart) return;
     const spec = bound.config.workers.slice(0, bound.config.maxWorkers).find(candidate => candidate.provider && candidate.model);
     if (!spec) { ctxRef?.ui.notify('Pair setup: choose a worker model in /pair settings, then run /pair start.', 'info'); return; }
+    // Starting outside Git can only fail; say why once instead of reporting an error.
+    if (bound.workspaceGit.get(bound.workspaceFor(spec)) === false) { ctxRef?.ui.notify(`Pair did not start the worker: ${bound.workspaceFor(spec)} is not in a Git repository. Open Pi in a Git project, or set the worker workspace in /pair settings → Advanced.`, 'info'); return; }
     try { await bound.start(spec.id); }
     catch (error) { if (!stopped && bound === controller && epoch === bindingEpoch) ctxRef?.ui.notify(`Pair worker ${spec.id}: ${briefError(error)}`, 'error'); }
   }
@@ -415,7 +417,7 @@ export function registerMain(pi) {
           await textView(ctx, `${kindLabel(view.kind)} · ${workerId} · read-only`, reportCardLines(view).join('\n'), { panel: true });
           const next = await menu(ctx, [{ id: 'diff', label: 'View checkpoint diff', hint: 'Scroll the changes in this checkpoint with real file names.' },
             ...(c.summary().waitingReports ? [{ id: 'yield', label: 'Deliver waiting reports to Main', hint: 'Send them to Main now. Each delivery starts a Main turn.' }] : [])],
-          { title: `${kindLabel(view.kind)} · ${workerId}`, subtitle: ['Main still inspects the evidence and decides with pair_decide.'], footer: '↑↓ move · enter select · esc back' });
+          { title: `${kindLabel(view.kind)} · ${workerId}`, subtitle: ['Main still inspects the evidence and decides with pair_decide.'], cancel: 'back' });
           if (next === 'diff') await showDiff(workerId);
           else if (next === 'yield') await showYield();
         };
@@ -470,6 +472,13 @@ export function registerMain(pi) {
           if (item.action === 'yield') return await showYield();
           if (item.action === 'transcript') return textView(ctx, `Worker ${target}: recent text (read-only)`, await c.transcript(target));
           if (item.action === 'start') return await startWorker(target);
+          // Quick setup from the dashboard: the same validated save path as /pair settings.
+          if (item.action === 'model' || item.action === 'effort') {
+            const edited = await (item.action === 'model' ? chooseWorkerModel : chooseWorkerEffort)(ctx, await readScope(scope), target);
+            if (edited) await apply(edited, scope);
+            return;
+          }
+          if (item.action === 'enable') { await apply({ ...await readScope(scope), enabled: true }, scope); return; }
           // With one worker, restart resolves the default after reloading, which may rename it.
           if (item.action === 'restart') return await restartWorker(ctx, current.workers.length > 1 ? target : undefined);
           if (item.action === 'stop') { if (await confirmStop(ctx, c, [target])) await c.stop(target); return; }
@@ -489,10 +498,10 @@ export function registerMain(pi) {
         // The dashboard stays open: after each action it redraws from fresh state until Esc.
         for (;;) {
           const summary = c.summary(), items = dashboardItems(summary);
-          let item = items[Number(await menu(ctx, dashboardMenu(items), { title: 'Fabric Pair', subtitle: dashboardHeader(summary), footer: '↑↓ move · enter select · esc close' }) ?? NaN)];
+          let item = items[Number(await menu(ctx, dashboardMenu(items), { title: 'Fabric Pair', subtitle: dashboardHeader(summary), }) ?? NaN)];
           if (item?.action === 'more') {
             const more = dashboardMoreItems(summary);
-            item = more[Number(await menu(ctx, dashboardMenu(more), { title: 'Fabric Pair · More', footer: '↑↓ move · enter select · esc back' }) ?? NaN)];
+            item = more[Number(await menu(ctx, dashboardMenu(more), { title: 'Fabric Pair · More', cancel: 'back' }) ?? NaN)];
             if (!item) continue;
           }
           if (!item) return;

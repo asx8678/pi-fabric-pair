@@ -78,7 +78,7 @@ export async function git(cwd, args, options = {}) {
 /** @param {string} cwd @returns {Promise<string>} */
 export async function repositoryRoot(cwd) {
   try { return canonical((await git(cwd, ['rev-parse', '--show-toplevel'])).trim()); }
-  catch { throw new Error(`Pair requires a Git working tree for immutable review evidence: ${cwd}`); }
+  catch { throw new Error(`Pair needs a Git repository to record review evidence, and ${cwd} is not inside one. Open Pi in a Git project, or set the worker workspace in /pair settings → Advanced.`); }
 }
 /** @param {string} root @param {string} name @returns {Promise<WorkspaceEntry>} */
 async function workspaceEntry(root, name) {

@@ -37,7 +37,11 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & DeferredTaskLimits} TaskLimits */
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & Partial<DeferredTaskLimits>} LegacyTaskLimits */
 /** @typedef {{id: string, title: string, instructions: string, acceptance?: string[]}} Step */
-/** @typedef {'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'} Effort */
+/** Every thinking level Pi defines, lowest first (Pi's ModelThinkingLevel). Which ones a
+ * given model accepts comes from its registry entry, not from this list.
+ * @typedef {'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'} Effort */
+/** @type {readonly Effort[]} */
+export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 /** @typedef {{id: string, provider: string, model: string, effort: Effort, cwd: string | null, readOnly: boolean}} WorkerSpec */
 /** @typedef {{name: string, command: string, args: string[]}} VerificationCommand */
 /** @typedef {{commands: VerificationCommand[], requirePassing: boolean, timeoutMs: number}} VerificationPolicy */
@@ -82,7 +86,7 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 /** Measured assistant generation-speed aggregate published with current telemetry. */
 /** @typedef {{tokens: number, seconds: number}} StoredSpeedV1 */
 /** @typedef {{version: 1, nonce: string, workerId: string, pid: number, sessionId: string, context: StoredContextUsage | null, currentTool: string | null, lastUsage: UsageObservation | null, compacting: boolean, detachedEffect: StoredDetachedEffectV1 | null, phase: AuthorityPhase, model: StoredModel | null, at: number}} HistoricalTelemetryV1 */
-/** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number, warming?: import('./warming.js').WarmingObservation, speed?: StoredSpeedV1 | null}} StoredTelemetryV1 */
+/** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number, warming?: import('./warming.js').WarmingObservation, speed?: StoredSpeedV1 | null, currentTarget?: string | null}} StoredTelemetryV1 */
 /** @typedef {{agentDir: string, piCompaction: unknown, cacheWarming: unknown, fabricCompaction: unknown, fabricShellHangMs: number | null, fabricAgentMaxDepth: number | null, prewalkDisabled: boolean, prewalkConfigured: boolean, note: string}} StoredNativeSettings */
 /** sessionFile is omitted by JSON serialization when Pi has no session file (Pi SessionManager API).
  * @typedef {{protocol: 1, pairVersion: string, pid: number, cwd: string, trusted: boolean, sessionId: string, sessionFile?: string, model: (StoredModel & {contextWindow: number}) | null, thinkingLevel: Effort | 'max' | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}, sourcePaths: string[], context: StoredContextUsage | null, native: StoredNativeSettings, checkedAt: number, scope: string, nonce: string, workerId: string, ownerSession: string}} HistoricalProbeV1
@@ -315,7 +319,7 @@ function validateStep(value, label) { assertStep(value, label); return value; }
 function assertWorkerSpec(value, label) {
   const spec = object(value, label); keys(spec, ['id', 'provider', 'model', 'effort', 'cwd', 'readOnly'], label);
   id(required(spec, 'id', label), `${label}.id`); text(required(spec, 'provider', label), `${label}.provider`, 999); text(required(spec, 'model', label), `${label}.model`, 999);
-  choice(required(spec, 'effort', label), ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'], `${label}.effort`);
+  choice(required(spec, 'effort', label), EFFORT_LEVELS, `${label}.effort`);
   const cwd = required(spec, 'cwd', label); invariant(cwd === null || typeof cwd === 'string', `${label}.cwd must be null or a path`, `${label}.cwd`); bool(required(spec, 'readOnly', label), `${label}.readOnly`);
 
 }
@@ -412,9 +416,11 @@ function checkSpeed(value, label) {
 function checkTelemetry(value, label, workerId, ownerSession, facts) {
   if (value === null) return;
   const record = object(value, label), historical = diagnosticHistorical(record, label, 'telemetry', facts);
-  keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration', 'warming', 'speed'])], label);
+  keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration', 'warming', 'speed', 'currentTarget'])], label);
   if (!historical && Object.hasOwn(record, 'warming')) validateWarmingObservation(record.warming);
   if (!historical && Object.hasOwn(record, 'speed') && record.speed !== null) checkSpeed(record.speed, `${label}.speed`);
+  // What the current tool acts on, for display: a workspace-relative path or a shell program name.
+  if (!historical && Object.hasOwn(record, 'currentTarget') && record.currentTarget !== null) text(record.currentTarget, `${label}.currentTarget`, 200);
   knownVersion(required(record, 'version', label), `${label}.version`, 1);
   text(required(record, 'nonce', label), `${label}.nonce`, 10000); text(required(record, 'sessionId', label), `${label}.sessionId`, 10000);
   reference(id(required(record, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Telemetry targets a different worker');

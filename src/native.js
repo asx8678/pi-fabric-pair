@@ -141,7 +141,7 @@ export function checkReadiness(probe, rpcState, config, worker, cwd, expectedMes
   assert(typeof rpcState.sessionFile === 'string' && rpcState.sessionFile.length > 0, 'Worker session persistence is disabled');
   assert(probe.sessionFile === rpcState.sessionFile, 'Worker bridge and RPC session paths differ');
   assert(rpcState.model?.provider === worker.provider && rpcState.model?.id === worker.model, 'Selected worker model was not applied exactly');
-  assert(rpcState.thinkingLevel === worker.effort, 'Selected worker thinking level was not applied exactly');
+  assert(rpcState.thinkingLevel === worker.effort, `Worker effort ${worker.effort} was not applied (Pi used ${rpcState.thinkingLevel}); ${worker.provider}/${worker.model} probably does not support it. Choose a supported effort in /pair settings.`);
   assert(probe.model?.provider === rpcState.model.provider && probe.model?.id === rpcState.model.id, 'Worker bridge and RPC model selections differ');
   assert(probe.thinkingLevel === rpcState.thinkingLevel, 'Worker bridge and RPC thinking levels differ');
   if (config.requirements.fabric) assert(probe.capabilities.fabric, 'Worker has no fabric_exec. Install/load pi-fabric or specify runtime.extraExtensions.');

@@ -23,6 +23,22 @@ function contextUsage(ctx) { const usage = ctx.getContextUsage?.(); return usage
 
 // Serial owns ordering/error propagation. Capture this operation's result rather
 // than relying on the unannotated queue's inferred Promise result type.
+/** What a tool call acts on, for display only. File tools give a workspace-relative path; shell
+ * tools give only the program name, never arguments; other tools give nothing.
+ * @param {string} name @param {unknown} args @param {string} cwd @returns {string | null} */
+function toolTarget(name, args, cwd) {
+  if (args === null || typeof args !== 'object') return null;
+  const n = name.replace(/^extensions\./, '');
+  if (/^(bash|powershell)$/.test(n)) {
+    const command = 'command' in args && typeof args.command === 'string' ? args.command.trim() : '';
+    const program = /^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(\S+)/.exec(command)?.[1];
+    return program ? path.basename(program).slice(0, 40) : null;
+  }
+  const file = ('path' in args && typeof args.path === 'string' && args.path) || ('file_path' in args && typeof args.file_path === 'string' && args.file_path) || '';
+  if (!file) return null;
+  const relative = path.relative(cwd, path.resolve(cwd, file));
+  return (relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : path.basename(file)).slice(-120);
+}
 /** @template T @param {Serial} serial @param {() => Promise<T>} operation @returns {Promise<T>} */
 async function runSerial(serial, operation) {
   /** @type {{completed?: {value: T}}} */
@@ -102,6 +118,10 @@ export function registerWorker(pi, env = process.env) {
   let report = null;
   /** @type {string | null} */
   let currentTool = null;
+  /** What the current tool acts on, for the status line: a workspace-relative path, or only the
+   * program name of a shell command (never its arguments, which can hold secrets).
+   * @type {string | null} */
+  let currentTarget = null;
   /** Display sample: the last measured request. Retained with its original
    * observedAt across compaction and model changes (a new session starts from
    * unknown); only a real measurement, including a 0% miss, replaces it. */
@@ -220,7 +240,7 @@ export function registerWorker(pi, env = process.env) {
       /** @type {import('./contracts.js').StoredTelemetryV1} */
       const packet = {
         version: PROTOCOL, nonce, ownerSession, ownerEpoch, workerId, workerGeneration, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
-        context: contextUsage(ctx) || null, currentTool, lastUsage, compacting, detachedEffect, warming: warming.snapshot(), speed,
+        context: contextUsage(ctx) || null, currentTool, currentTarget, lastUsage, compacting, detachedEffect, warming: warming.snapshot(), speed,
         phase: report ? 'waiting' : authority?.phase || 'idle', model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
         at: Date.now()
       };
@@ -378,8 +398,8 @@ export function registerWorker(pi, env = process.env) {
     setTimeout(() => ctx.shutdown(), 0);
     return { isError: true, content: [{ type: 'text', text: 'PAIR_DETACHED_EFFECT: the shell call is still running. The worker is shutting down so Main can reconcile without publishing a moving checkpoint.' }], details: event.details };
   });
-  pi.on('tool_execution_start', async (event, ctx) => { currentTool = event.toolName; await telemetry(ctx); });
-  pi.on('tool_execution_end', async (_event, ctx) => { currentTool = null; await telemetry(ctx); });
+  pi.on('tool_execution_start', async (event, ctx) => { currentTool = event.toolName; currentTarget = toolTarget(event.toolName, event.args, ctx.cwd); await telemetry(ctx); });
+  pi.on('tool_execution_end', async (_event, ctx) => { currentTool = null; currentTarget = null; await telemetry(ctx); });
   pi.on('message_start', async event => {
     // A start whose end never arrives (aborted/incomplete generation) is discarded by the next start.
     if (event.message?.role === 'assistant') speedStart = performance.now();
@@ -405,7 +425,7 @@ export function registerWorker(pi, env = process.env) {
   });
   pi.on('session_compact_failed', async (_event, ctx) => { compacting = false; await reconcileWarming(ctx); await telemetry(ctx); });
   pi.on('agent_before_settle', async (_event, ctx) => { if (waiting()) ctx.abort(); });
-  pi.on('agent_settled', async (_event, ctx) => { currentTool = null; await reconcileWarming(ctx); await telemetry(ctx); });
+  pi.on('agent_settled', async (_event, ctx) => { currentTool = null; currentTarget = null; await reconcileWarming(ctx); await telemetry(ctx); });
   pi.on('model_select', async (_event, ctx) => { releaseWarming(); speed = null; speedStart = null; await reconcileWarming(ctx); await telemetry(ctx); });
   pi.on('session_shutdown', async () => {
     stopped = true; releaseWarming(); clearInterval(parentTimer); process.removeListener('disconnect', parentGone); await reportSerial.drain(); await telemetrySerial.drain();

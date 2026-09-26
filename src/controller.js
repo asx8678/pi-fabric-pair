@@ -56,6 +56,9 @@ export class PairController extends EventEmitter {
     /** @type {import('./contracts.js').StoredStateV1} */ this.state = { version: STATE_VERSION, ownerSession: this.ownerSession, ownerEpoch: 0, cwd, workers: {}, requests: {}, notices: {} };
     /** @type {Evidence | null} */ this._evidence = null;
     this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory;
+    /** Whether each resolved worker workspace is inside a Git working tree. Display and autostart
+     * only; start() still runs its own authoritative check. @type {Map<string, boolean>} */
+    this.workspaceGit = new Map();
     this.storageDir = storageDir; this.dir = storageDir || '';
     // Runtime wakes (every RPC event, including the worker's report notify) drive scans;
     // this interval is only a backstop for file changes that arrive without an event.
@@ -103,10 +106,21 @@ export class PairController extends EventEmitter {
     this._evidence = new Evidence(path.join(this.dir, 'evidence'), this.config.evidence);
     await this.persist();
     this.timer = setInterval(() => this.scheduleScan(), this.scanIntervalMs); this.timer.unref?.();
+    await this.checkWorkspaces();
     return this;
     } catch (error) { await this.releaseLock?.(); this.releaseLock = null; throw error; }
   }
   get evidence() { assert(this._evidence, 'Controller is not initialized'); return this._evidence; }
+  /** A worker's workspace as start() resolves it, before canonicalization.
+   * @param {import('./contracts.js').WorkerSpec} spec @returns {string} */
+  workspaceFor(spec) { return spec.cwd ? path.resolve(this.cwd, spec.cwd) : this.cwd; }
+  /** Refresh the display-only Git check for every configured workspace. Never throws. */
+  async checkWorkspaces() {
+    const paths = [...new Set(this.config.workers.map(spec => this.workspaceFor(spec)))];
+    const results = await Promise.all(paths.map(async cwd => /** @type {[string, boolean]} */ ([cwd, await repositoryRoot(cwd).then(() => true, () => false)])));
+    this.workspaceGit = new Map(results);
+    if (!this.closing) this.emit('change', this.summary());
+  }
   /** Keep Serial's single queue but give results their exact type without changing util.js.
    * @template T @param {() => T | Promise<T>} action @returns {Promise<T>}
    */
@@ -138,7 +152,8 @@ export class PairController extends EventEmitter {
         return { id: spec.id, model: `${spec.provider}/${spec.model}`, effort: spec.effort, readOnly: spec.readOnly,
           status: h?.permission ? 'permission' : r?.status || 'not_started', pid: h?.pid || null,
           sessionId: r?.sessionId || null, sessionFile: r?.sessionFile || null, workerGeneration: r?.workerGeneration || null, cwd: r?.cwd || spec.cwd || this.cwd,
-          task: task ? { id: task.id, attemptId: task.attemptId, attemptNumber: task.attemptNumber, objective: task.objective, status: task.status, step: task.stepIndex + 1, steps: task.steps.length, revisions: task.revisions, reportId: task.report?.reportId || null, checkpointHash: task.report?.checkpoint?.checkpointHash || null, reportedCost: task.usage?.reportedCost ?? null, startedAt: task.startedAt, turns: task.turns, stepList: task.steps.map((s, i) => ({ id: s.id, title: s.title, state: stepState(task, i) })) } : null,
+          workspaceGit: this.workspaceGit.get(this.workspaceFor(spec)) ?? null,
+          task: task ? { id: task.id, attemptId: task.attemptId, attemptNumber: task.attemptNumber, objective: task.objective, status: task.status, step: task.stepIndex + 1, steps: task.steps.length, revisions: task.revisions, reportId: task.report?.reportId || null, reportKind: task.report?.payload?.kind || null, lastDecision: task.lastDecision?.action || null, checkpointHash: task.report?.checkpoint?.checkpointHash || null, reportedCost: task.usage?.reportedCost ?? null, startedAt: task.startedAt, turns: task.turns, stepList: task.steps.map((s, i) => ({ id: s.id, title: s.title, state: stepState(task, i) })) } : null,
           observation: (h && this.runtimeData.get(h)?.telemetry) || r?.lastObservation || null, usage: r?.usage || null,
           lastExchange: r?.lastExchange || null, error: r?.error || null,
           pendingConfiguration: r?.bound ? digest(r.bound) !== digest(spec) : false
@@ -159,6 +174,7 @@ export class PairController extends EventEmitter {
     this.config = this.pendingConfig ? { ...next, runtime: this.config.runtime, requirements: this.config.requirements, workers: this.config.workers, evidence: this.config.evidence } : next;
     this.evidence.limits = this.config.evidence;
     this.emit('change', this.summary());
+    void this.checkWorkspaces(); // a workspace setting may have changed
     return previousWarming === this.warmingPolicy() ? Promise.resolve() : this.refreshWarmingPolicy();
   }
   /** Nonauthorizing native-warming preference, deliberately outside configHash. */

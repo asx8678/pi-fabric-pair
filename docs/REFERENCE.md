@@ -20,7 +20,7 @@ Commands with an optional worker ID use the first configured worker by default.
 
 | Command | Purpose |
 | --- | --- |
-| `/pair` | Open the dashboard menu. It stays open between actions (closing once a delivery hands the turn to Main); restart, reload and doctor are under **More…**. |
+| `/pair` | Open the dashboard. It lists what needs you, any missing setup (turn Pair on, choose the worker model), and the worker's model and effort, which you can change in place. It stays open between actions (closing once a delivery hands the turn to Main); restart, reload and doctor are under **More…**. |
 | `/pair settings` | Edit settings with scoped autosave. |
 | `/pair start [worker]` | Start the worker or reconcile staged settings when eligible. |
 | `/pair restart [worker]` | Reread settings and replace only the worker process, retaining its conversation. |
@@ -45,33 +45,28 @@ also stops owned workers.
 ### Status line
 
 Pair shows one line in Pi's footer, under its own status key beside other
-extensions' statuses:
+extensions' statuses. It says in plain words what is happening and who has the
+work, then the current step, what the worker is doing right now, and metrics:
 
 ```text
-pair M● → W◉ step 3/5 · edit · avg 42.3 tok/s · $0.013 · cache M 99% W 100%
-pair M● ← W◐ question · step 3/5 · ◐ 1 report for Main
-pair M● W○ not started · /pair start
+pair · ◉ Worker working on step 2/5 · Wire controller · editing src/controller.js · 42.3 tok/s · $0.013 · cache M 99% W 100%
+pair · ◉ Worker revising step 2/5 · Wire controller · running npm · 38.1 tok/s
+pair · ◐ Checkpoint 2/5 ready for review · Wire controller · Main is reviewing
+pair · ◐ Question for Main · step 2/5 · Main is busy; delivered when idle
+pair · ● Task done · worker ready · gpt-6-luna · max
+pair · ○ Worker stopped · not a Git repo
+pair · ○ Worker not set up · /pair to choose a model
 ```
 
-`→` means the work is with the worker; `←` means a report or question is with
-Main. The worker's dot blinks while it is active, and a `stale` marker appears
-after five minutes without activity. Speed appears only while the worker runs
-(`avg — tok/s` until measured), context pressure appears above 75%, and a worker
-that is not running names the command that continues it. No elapsed time or turn
-count is shown. In `minimal` mode a second line above the editor shows the active
-plan: the approved/total bar and the current step. The indicator is display-only
-and never affects work. `/pair status` lists every step and the full legend.
-
-Worker restart keeps Main's session, model and controller running. It waits for
-the old worker's confirmed exit before opening the same conversation in a new
-process. An interrupted assignment keeps its progress, budgets and evidence;
-inspect its changes and use `/pair resume [worker]` to continue. Restart requests
-no model turn. A later stop or Main shutdown cancels a pending restart.
-
-Restart also reloads the worker's native configuration and extensions through
-normal process startup. Pair settings can be reread separately with `/pair reload`;
-this does not reload Main's extensions or native settings. Both controls are
-also under **More…** in the `/pair` dashboard.
+The worker's activity comes from its current tool: a file path relative to the
+workspace for file tools, and only the program name for shell commands (never
+their arguments). The icon blinks while the worker is active and the line says
+`no activity for 5+ min` after five minutes of silence. Speed appears only while
+the worker runs (`— tok/s` until measured), context pressure above 75%. No
+elapsed time or turn count is shown. Pi cuts the footer from the right, so the
+most important words come first. In `minimal` mode a second line above the
+editor shows the plan's approved/total bar and current step. The indicator is
+display-only and never affects work. `/pair status` lists every step.
 
 ## Report delivery, phases and branches
 
