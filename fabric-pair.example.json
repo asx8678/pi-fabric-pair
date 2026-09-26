@@ -39,8 +39,6 @@
     "autoCompaction": true
   },
   "limits": {
-    "maxTurnsPerStep": 40,
-    "taskTimeoutMs": 1800000,
     "activeStepTimeoutMs": 1800000,
     "maxQueuedTasks": 8,
     "maxQueuedReviews": 8,

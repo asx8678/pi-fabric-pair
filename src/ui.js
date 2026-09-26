@@ -67,22 +67,16 @@ export function minutesLabel(ms) {
   const seconds = Math.round(ms / 1000);
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
 }
-/** Bounded, enforced task budgets — elapsed time against taskTimeoutMs and turns
- * against maxTurnsPerStep — the only in-step progress that can be measured
- * honestly before a checkpoint is approved. Colors escalate past 75%/90%.
- * @param {{startedAt?: number, turns?: number, turnLimit?: number, timeoutMs?: number}} task
+/** Raw task telemetry — elapsed time and accumulated model turns — without limit
+ * ratios or thresholds; the former per-step turn and task-duration limits are
+ * removed and no longer color-escalate.
+ * @param {{startedAt?: number, turns?: number}} task
  * @param {(color: IndicatorColor, text: string) => string} paint @param {number} [now]
  * @returns {string[]} */
 export function budgetBadges(task, paint, now = Date.now()) {
   const badges = [];
-  if (typeof task.timeoutMs === 'number' && task.timeoutMs > 0 && typeof task.startedAt === 'number' && task.startedAt > 0) {
-    const elapsed = Math.max(0, now - task.startedAt), ratio = elapsed / task.timeoutMs;
-    badges.push(paint(ratio > 0.9 ? 'error' : ratio > 0.75 ? 'warning' : 'muted', `${minutesLabel(elapsed)}/${minutesLabel(task.timeoutMs)}`));
-  }
-  if (typeof task.turns === 'number' && typeof task.turnLimit === 'number' && task.turnLimit > 0) {
-    const ratio = task.turns / task.turnLimit;
-    badges.push(paint(ratio > 0.9 ? 'error' : ratio > 0.75 ? 'warning' : 'muted', `${task.turns}/${task.turnLimit} turns`));
-  }
+  if (typeof task.startedAt === 'number' && task.startedAt > 0) badges.push(paint('muted', minutesLabel(Math.max(0, now - task.startedAt))));
+  if (typeof task.turns === 'number') badges.push(paint('muted', `${task.turns} turns`));
   return badges;
 }
 
@@ -241,7 +235,7 @@ export function statusText(summary, native = null, now = Date.now()) {
     lines.push(`${w.id}: ${w.status} · ${w.model} · effort ${w.effort}`, `  PID: ${w.pid || 'not running'} · session: ${w.sessionId || 'not created'}`, `  Workspace: ${w.cwd}`);
     if (w.task) lines.push(`  ${w.task.id} · ${w.task.status} · step ${w.task.step}/${w.task.steps} · revisions ${w.task.revisions}`, `  ${w.task.objective}`);
     if (w.task && ['working', 'settling', 'starting'].includes(w.status)) { const age = activityAge(w, now); lines.push(`  Activity: ${ageLabel(age)} since the last worker event${age >= STALE_AGE_MS ? ' — STALE: inspect the transcript or cancel' : ''}`); }
-    if (w.task && typeof w.task.startedAt === 'number' && typeof w.task.timeoutMs === 'number' && typeof w.task.turns === 'number' && typeof w.task.turnLimit === 'number') lines.push(`  Budgets: ${minutesLabel(Math.max(0, now - w.task.startedAt))} of ${minutesLabel(w.task.timeoutMs)} elapsed · ${w.task.turns}/${w.task.turnLimit} turns`);
+    if (w.task && typeof w.task.startedAt === 'number' && typeof w.task.turns === 'number') lines.push(`  Telemetry: ${minutesLabel(Math.max(0, now - w.task.startedAt))} elapsed · ${w.task.turns} turns`);
     if (Array.isArray(w.task?.stepList) && w.task.stepList.length > 0) {
       const bar = progressBar(w.task.stepList.filter(step => step.state === 'done').length, w.task.stepList.length);
       lines.push(`  progress ${'■'.repeat(bar.filled)}${'□'.repeat(bar.empty)} ${bar.label} (${bar.percent}%)`);
@@ -259,7 +253,7 @@ export function statusText(summary, native = null, now = Date.now()) {
     lines.push('');
   }
   if (native) lines.push(`Native warming policy: ${native.cacheWarming} (persisted base policy; scoped leases/other owners may differ)`, '');
-  lines.push('● ready  ◉ working  ◐ waiting  ○ retained/stopped  ! attention', 'widget colors: main working accent · worker working success · waiting warning · attention error · idle muted', 'widget arrows: → plan/task heading to worker · ← summary/question back with Main', 'cache read (last): M Main · W/W1/W2 configured workers in order · cacheRead/(input+cacheRead+cacheWrite) for the last measured request, not task totals · zero-input events do not replace a measured sample · unknown means no measurement · age is observation age, not provider TTL or cache residency', 'plan steps: ✔ done · ▶ in progress · ◐ in review · ⏸ held · ○ not started · ■/□ progress (approved/total)', 'worker liveness: age badge counts up since the last worker event · heartbeat blink stops after 2m silence · stale after 5m', 'widget badges: current tool while running · time/turn budgets (warn past 75% of their limits, error past 90%) · task cost · ctx pressure above 75% · one stale toast per silent episode', '', summary.cacheNote, '', `Local state and evidence: ${summary.directory}`);
+  lines.push('● ready  ◉ working  ◐ waiting  ○ retained/stopped  ! attention', 'widget colors: main working accent · worker working success · waiting warning · attention error · idle muted', 'widget arrows: → plan/task heading to worker · ← summary/question back with Main', 'cache read (last): M Main · W/W1/W2 configured workers in order · cacheRead/(input+cacheRead+cacheWrite) for the last measured request, not task totals · zero-input events do not replace a measured sample · unknown means no measurement · age is observation age, not provider TTL or cache residency', 'plan steps: ✔ done · ▶ in progress · ◐ in review · ⏸ held · ○ not started · ■/□ progress (approved/total)', 'worker liveness: age badge counts up since the last worker event · heartbeat blink stops after 2m silence · stale after 5m', 'widget badges: current tool while running · raw elapsed/turn telemetry (no limit ratios) · task cost · ctx pressure above 75% · one stale toast per silent episode', '', summary.cacheNote, '', `Local state and evidence: ${summary.directory}`);
   return lines.map(s => cleanText(s, 20000)).join('\n');
 }
 /** @param {UIContext} ctx @param {string} title @param {string} text @returns {Promise<void>} */
@@ -399,8 +393,6 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
       { id: 7, label: `Workspace: ${w.cwd || '(Main workspace)'}` },
       { id: 9, label: `Revision limit: ${draft.supervision.maxRevisions}` },
       { id: 10, label: `Summary detail: ${draft.supervision.summaryDetail}` },
-      { id: 11, label: `Turn limit per step: ${draft.limits.maxTurnsPerStep}` },
-      { id: 12, label: `Task timeout (minutes): ${draft.limits.taskTimeoutMs / 60000}` },
       { id: 13, label: `Reported inference budget (USD): ${draft.limits.maxReportedCostUsd ?? 'none'}` },
       { id: 15, label: `Preserved slot limit (V1 live limit: 1): ${draft.maxWorkers}` },
       { id: 16, label: 'Add worker' },
@@ -445,13 +437,6 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
         accepts: value => Number.isInteger(value) && value >= 0 && value <= 20, expected: 'enter an integer from 0 to 20.'
       });
       else if (index === 10) draft.supervision.summaryDetail = await selectValue(ctx.ui, 'Worker summary detail', ['minimal', 'normal', 'detailed']) || draft.supervision.summaryDetail;
-      else if (index === 11) draft.limits.maxTurnsPerStep = await numberInput(ctx, 'Maximum turns per step', draft.limits.maxTurnsPerStep, {
-        accepts: value => Number.isSafeInteger(value) && value > 0, expected: `enter a positive safe integer (1–${Number.MAX_SAFE_INTEGER}).`
-      });
-      else if (index === 12) draft.limits.taskTimeoutMs = await numberInput(ctx, 'Task timeout in minutes', draft.limits.taskTimeoutMs, {
-        scale: 60000, accepts: value => Number.isSafeInteger(value) && value > 0,
-        expected: `enter positive finite minutes resolving to whole milliseconds (1–${Number.MAX_SAFE_INTEGER} ms).`
-      });
       else if (index === 13) draft.limits.maxReportedCostUsd = await numberInput(ctx, 'Inference-only reported USD budget (excludes native warming/unknown prices)', draft.limits.maxReportedCostUsd, {
         optional: true, accepts: value => value > 0, expected: 'enter a finite USD amount greater than 0, or none/off to disable.'
       });

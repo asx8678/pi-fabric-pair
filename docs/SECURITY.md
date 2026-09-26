@@ -87,4 +87,6 @@ warming, and external tools. Use provider-side quotas for a true spending bounda
 
 Use a separate test profile and disposable repository. Disable native Prewalk for
 Pair work, start with one worker, retain human permission prompts, and configure
-small turn/time limits. Test recovery and compaction before unattended workloads.
+small reported-cost/output-token budgets and provider-side spending caps. Keep
+workloads supervised; automatic crash recovery and unattended operation remain
+outside this MVP.

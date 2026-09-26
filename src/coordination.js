@@ -707,8 +707,8 @@ function retainIntent(p,e) { const old = p.intents[e.operationId]; if (old) { ch
  */
 function exhausted(t,at) {
   const l = t.limits, a = t.accounting.lifetime, s = lineageLedger(t,t.steps[t.stepIndex].id);
-  return at - t.assignedAt >= l.taskTimeoutMs || (t.lifetimeDeadlineAt !== null && at >= t.lifetimeDeadlineAt)
-    || s.activeMs >= l.activeStepTimeoutMs || s.turns >= l.maxTurnsPerStep || a.reports >= l.maxReportsPerTask
+  return (l.taskTimeoutMs !== undefined && at - t.assignedAt >= l.taskTimeoutMs) || (t.lifetimeDeadlineAt !== null && at >= t.lifetimeDeadlineAt)
+    || s.activeMs >= l.activeStepTimeoutMs || (l.maxTurnsPerStep !== undefined && s.turns >= l.maxTurnsPerStep) || a.reports >= l.maxReportsPerTask
     || a.revisions > t.policy.maxRevisions || s.revisions > t.policy.maxRevisionsPerStep
     || a.repairAttempts > l.maxAutomaticReportRepairs || a.recoveryAttempts > l.maxAutomaticRecoveryAttempts
     || (l.maxReportedCostUsd !== null && a.costUsd >= l.maxReportedCostUsd) || (l.maxOutputTokens !== null && a.outputTokens >= l.maxOutputTokens);

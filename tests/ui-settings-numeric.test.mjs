@@ -5,8 +5,6 @@ import { DEFAULTS, validateConfig } from '../src/config.js';
 
 const fields = [
   { row: 'Revision limit', path: ['supervision', 'maxRevisions'], title: /Revision limit/, range: /integer.*0.*20/, valid: [['0', 0], ['20', 20]], invalid: ['-1', '21', '1.5'] },
-  { row: 'Turn limit per step', path: ['limits', 'maxTurnsPerStep'], title: /Maximum turns per step/, range: /positive safe integer/, valid: [['1', 1], [' 17 ', 17]], invalid: ['0', '-1', '1.5', '9007199254740992'] },
-  { row: 'Task timeout (minutes)', path: ['limits', 'taskTimeoutMs'], title: /Task timeout in minutes/, range: /positive.*minutes.*whole milliseconds/, valid: [['1.5', 90000], ['0.00005', 3]], invalid: ['0', '-1', '0.000001', '1e308', '150119987579.01654'] },
   { row: 'Reported inference budget (USD)', path: ['limits', 'maxReportedCostUsd'], title: /Inference-only reported USD budget/, range: /finite.*greater than 0/, valid: [['0.25', 0.25], ['1.5', 1.5]], invalid: ['0', '-1'] },
   { row: 'Preserved slot limit', path: ['maxWorkers'], title: /Preserved slot limit/, range: /integer.*1.*8/, valid: [['1', 1], ['8', 8]], invalid: ['0', '-1', '9', '1.5'] }
 ];
@@ -18,7 +16,6 @@ const set = (config, field, value) => {
 function configured() {
   const config = structuredClone(DEFAULTS);
   config.maxWorkers = 2;
-  config.limits.taskTimeoutMs = 59; // minutes -> milliseconds is not an exact floating-point round trip
   config.limits.maxReportedCostUsd = 4.5;
   return validateConfig(config);
 }
@@ -115,10 +112,11 @@ test('already-disabled budget stays inert for blank, whitespace, cancellation an
   assert.deepEqual(result.notices, []);
 });
 
-test('unchanged placeholder input preserves exact stored timeout despite minute conversion', async () => {
-  const original = configured();
-  assert.notEqual(original.limits.taskTimeoutMs / 60000 * 60000, original.limits.taskTimeoutMs);
-  const result = await run(['Advanced', 'Task timeout', 'Done'], [String(original.limits.taskTimeoutMs / 60000)], original);
+test('removed turn/duration limit rows are absent from Advanced settings', async () => {
+  const result = await run(['Advanced', 'Done'], []);
+  const advanced = result.menus[1];
+  assert.ok(!advanced.some(row => /Turn limit per step|Task timeout/.test(row)), 'removed limit settings must not be listed');
+  assert.ok(advanced.some(row => row.startsWith('Reported inference budget')), 'cost budget remains configurable');
   assert.deepEqual(result.notices, []);
   assert.deepEqual(result.saves, []);
 });

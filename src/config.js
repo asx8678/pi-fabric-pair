@@ -39,7 +39,7 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   runtime: { command: 'pi', commandArgs: [], extraExtensions: [], extraSkills: [], inheritExtensions: true, startupTimeoutMs: 120000, requestTimeoutMs: 30000, shutdownTimeoutMs: 5000 },
   requirements: { fabric: true, fovea: true, prewalkDisabled: true, autoCompaction: true },
   limits: {
-    maxTurnsPerStep: 40, taskTimeoutMs: 1800000, activeStepTimeoutMs: 1800000,
+    activeStepTimeoutMs: 1800000,
     maxQueuedTasks: 8, maxQueuedReviews: 8, maxReportsPerTask: 40, maxReportBytes: 16384,
     maxAutomaticReportRepairs: 1, maxAutomaticRecoveryAttempts: 1,
     maxReportedCostUsd: null, maxOutputTokens: null
@@ -52,6 +52,16 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
 const NESTED = ['supervision', 'runtime', 'requirements', 'limits', 'verification', 'evidence'];
 /** @type {Record<string, import('./contracts.js').ReviewMode | undefined>} */
 const POLICY_ALIASES = { final: 'final-only', strict: 'every-step', 'final-only': 'final-only', milestones: 'milestones', 'every-step': 'every-step' };
+/** Removed per-step turn and overall task-duration limits: no longer enforced,
+ * advertised, or persisted. Legacy files that still declare them stay readable —
+ * present values are checked then dropped; unrelated unknown settings stay errors. */
+const DEPRECATED_LIMIT_KEYS = ['maxTurnsPerStep', 'taskTimeoutMs'];
+/** @param {Record<string, unknown>} limits @returns {boolean} whether a deprecated key was dropped */
+function dropDeprecatedLimits(limits) {
+  let dropped = false;
+  for (const key of DEPRECATED_LIMIT_KEYS) if (Object.hasOwn(limits, key)) { delete limits[key]; dropped = true; }
+  return dropped;
+}
 
 /** @param {unknown} value @param {readonly string[]} allowed @param {string} label @returns {asserts value is Record<string, unknown>} */
 function assertKeys(value, allowed, label) {
@@ -65,10 +75,14 @@ export function validateConfig(raw = {}) {
   for (const key of Object.keys(raw)) assert(allowed.includes(key), `Unknown Pair setting: ${key}`);
   for (const section of NESTED) {
     if (raw[section] === undefined) continue;
-    assertKeys(raw[section], Object.keys(DEFAULTS[section]), section);
+    const keys = Object.keys(DEFAULTS[section]);
+    assertKeys(raw[section], section === 'limits' ? [...keys, ...DEPRECATED_LIMIT_KEYS] : keys, section);
   }
+  if (isObject(raw.limits)) for (const key of DEPRECATED_LIMIT_KEYS) if (Object.hasOwn(raw.limits, key))
+    assert(typeof raw.limits[key] === 'number' && Number.isSafeInteger(raw.limits[key]) && raw.limits[key] > 0, `${key} is a removed limit and no longer enforced; delete it or keep a positive integer`);
   /** @type {unknown} */
   const c = merge(DEFAULTS, raw);
+  if (isObject(c) && isObject(c.limits)) dropDeprecatedLimits(c.limits);
   assertMergedConfig(c);
   return c;
 }
@@ -105,7 +119,7 @@ function assertMergedConfig(c) {
   for (const key of ['commandArgs', 'extraExtensions', 'extraSkills']) assert(isArray(c.runtime[key]) && c.runtime[key].every(v => typeof v === 'string' && !v.includes('\0')), `runtime.${key} must be a string array`);
   for (const key of ['fabric', 'fovea', 'prewalkDisabled', 'autoCompaction']) assert(typeof c.requirements[key] === 'boolean', `requirements.${key} must be boolean`);
   /** @type {[Record<string, unknown>, string[]][]} */
-  const positiveFields = [[c.runtime, ['startupTimeoutMs', 'requestTimeoutMs', 'shutdownTimeoutMs']], [c.limits, ['maxTurnsPerStep', 'taskTimeoutMs', 'activeStepTimeoutMs']], [c.evidence, ['maxFiles', 'maxTotalBytes', 'maxArtifactBytes']]];
+  const positiveFields = [[c.runtime, ['startupTimeoutMs', 'requestTimeoutMs', 'shutdownTimeoutMs']], [c.limits, ['activeStepTimeoutMs']], [c.evidence, ['maxFiles', 'maxTotalBytes', 'maxArtifactBytes']]];
   for (const [obj, keys] of positiveFields) {
     for (const key of keys) assert(typeof obj[key] === 'number' && Number.isSafeInteger(obj[key]) && obj[key] > 0, `${key} must be a positive integer`);
   }
@@ -131,7 +145,12 @@ function assertConfigLayer(raw) {
 /** @param {unknown} raw @returns {ConfigLayer} */
 export function validateConfigLayer(raw) {
   assertConfigLayer(raw);
-  return structuredClone(raw);
+  const layer = structuredClone(raw);
+  if (isObject(layer.limits)) {
+    dropDeprecatedLimits(layer.limits);
+    if (Object.keys(layer.limits).length === 0) delete layer.limits;
+  }
+  return layer;
 }
 
 /** @param {Record<string, unknown>} target @param {Record<string, unknown>} before @param {Record<string, unknown>} after @returns {boolean} */
@@ -173,6 +192,8 @@ function migrateShippedV1(raw, sourceFile, scope, targetFile) {
   if (raw.enabled === true) warnings.push('Legacy enabled:true was reset to false; re-enable deliberately after reviewing the migrated settings.');
   layer.enabled = false;
   if (isObject(layer.supervision) && layer.supervision.mode) layer.supervision.mode = migratePolicy(layer.supervision.mode, sourceFile);
+  if (isObject(layer.limits) && dropDeprecatedLimits(layer.limits)) warnings.push('Legacy per-step turn limit and task timeout are no longer enforced; they were dropped from the migrated configuration.');
+  if (isObject(layer.limits) && Object.keys(layer.limits).length === 0) delete layer.limits;
   assertConfigLayer(layer);
   return { layer, migration: { scope, kind: 'fabric-pair-v1', sourceFile, targetFile, fromVersion: 1, toVersion: CONFIG_VERSION, warnings } };
 }
@@ -216,7 +237,7 @@ function migrateHandoffV1(raw, sourceFile, scope, targetFile) {
 /** @param {Record<string, unknown>} raw @param {string} sourceFile @returns {ConfigLayerResult} */
 function currentLayer(raw, sourceFile) {
   assert(raw.version === CONFIG_VERSION, `Unsupported Pair config version ${raw.version} in ${sourceFile}`);
-  assertConfigLayer(raw); return { layer: structuredClone(raw), migration: null };
+  return { layer: validateConfigLayer(raw), migration: null };
 }
 /** @param {string} canonical @param {string} legacy @param {ConfigScope} scope @returns {Promise<ConfigLayerResult>} */
 async function readLayer(canonical, legacy, scope) {

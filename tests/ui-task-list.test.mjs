@@ -115,21 +115,20 @@ test('staleWorkers lists only silent active workers for one-shot alerting', () =
   assert.deepEqual(staleWorkers({ workers: [{ id: 'd', status: 'working' }], main: null }, 500000), [], 'no events yet reads as fresh, never stale');
 });
 
-test('budget badges measure enforced time and turn limits with escalation', () => {
+test('budget badges show raw elapsed/turn telemetry without limit ratios or thresholds', () => {
   assert.equal(minutesLabel(0), '0s');
   assert.equal(minutesLabel(42000), '42s');
   assert.equal(minutesLabel(65000), '1m');
   assert.equal(minutesLabel(1800000), '30m');
   const paint = (color, text) => color + ':' + text;
-  const fresh = budgetBadges({ startedAt: 1000, timeoutMs: 1800000, turns: 3, turnLimit: 40 }, paint, 6000);
-  assert.deepEqual(fresh, ['muted:5s/30m', 'muted:3/40 turns']);
-  const lateTime = budgetBadges({ startedAt: 1000, timeoutMs: 1800000, turns: 0, turnLimit: 40 }, paint, 1501000);
-  assert.ok(lateTime[0].startsWith('warning:'), '80% of the time budget warns');
-  const hotTurns = budgetBadges({ startedAt: 1000, timeoutMs: 1800000, turns: 38, turnLimit: 40 }, paint, 1000);
-  assert.ok(hotTurns[1].startsWith('error:'), '95% of the turn budget errors');
-  assert.deepEqual(budgetBadges({}, paint, 1000), [], 'no budgets without task limits');
-  const withWorker = indicator({ workers: [{ id: 'worker', status: 'working', observation: { at: 1000 }, task: { startedAt: 1000, timeoutMs: 1800000, turns: 3, turnLimit: 40 } }], main: null }, false, theme, 6000);
-  assert.ok(withWorker.includes('5s/30m') && withWorker.includes('3/40 turns'), 'budgets appear in the widget line');
+  const fresh = budgetBadges({ startedAt: 1000, turns: 3 }, paint, 6000);
+  assert.deepEqual(fresh, ['muted:5s', 'muted:3 turns']);
+  const hot = budgetBadges({ startedAt: 1000, turns: 999999 }, paint, 1501000);
+  assert.deepEqual(hot, ['muted:25m', 'muted:999999 turns'], 'once-enforced counts never escalate color');
+  assert.deepEqual(budgetBadges({}, paint, 1000), [], 'no telemetry without task data');
+  assert.deepEqual(budgetBadges({ timeoutMs: 1800000, turnLimit: 40 }, paint, 1000), [], 'removed limit fields alone render nothing');
+  const withWorker = indicator({ workers: [{ id: 'worker', status: 'working', observation: { at: 1000 }, task: { startedAt: 1000, turns: 3 } }], main: null }, false, theme, 6000);
+  assert.ok(withWorker.includes('5s') && withWorker.includes('3 turns'), 'raw telemetry appears in the widget line');
 });
 
 test('indicator appends the painted progress bar only while a plan exists', () => {

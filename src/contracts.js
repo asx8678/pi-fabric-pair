@@ -29,10 +29,13 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 /** @typedef {'minimal' | 'normal' | 'detailed'} SummaryDetail */
 /** @typedef {{mode: ReviewMode, finalReview: true, maxRevisions: number, maxRevisionsPerStep: number, summaryDetail: SummaryDetail}} TaskPolicy */
 /** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, maxRevisionsPerStep?: number, summaryDetail: SummaryDetail}} LegacyTaskPolicy */
-/** @typedef {{maxTurnsPerStep: number, taskTimeoutMs: number, maxReportedCostUsd: number | null, maxOutputTokens: number | null}} BaseTaskLimits */
+/** Removed per-step turn and overall task-duration limits. Legacy snapshots and
+ * authority files may still carry them; they are validated but never enforced. */
+/** @typedef {{maxTurnsPerStep?: number, taskTimeoutMs?: number}} DeprecatedTurnTaskLimits */
+/** @typedef {{maxReportedCostUsd: number | null, maxOutputTokens: number | null}} BaseTaskLimits */
 /** @typedef {{activeStepTimeoutMs: number, maxQueuedTasks: number, maxQueuedReviews: number, maxReportsPerTask: number, maxReportBytes: number, maxAutomaticReportRepairs: number, maxAutomaticRecoveryAttempts: number}} DeferredTaskLimits */
-/** @typedef {BaseTaskLimits & DeferredTaskLimits} TaskLimits */
-/** @typedef {BaseTaskLimits & Partial<DeferredTaskLimits>} LegacyTaskLimits */
+/** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & DeferredTaskLimits} TaskLimits */
+/** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & Partial<DeferredTaskLimits>} LegacyTaskLimits */
 /** @typedef {{id: string, title: string, instructions: string, acceptance?: string[]}} Step */
 /** @typedef {'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'} Effort */
 /** @typedef {{id: string, provider: string, model: string, effort: Effort, cwd: string | null, readOnly: boolean}} WorkerSpec */
@@ -252,7 +255,7 @@ export function validateTaskPolicy(value, label = 'task.policy', options = {}) {
 /** @param {unknown} value @param {string} [label] @param {{legacy?: boolean}} [options] @returns {asserts value is LegacyTaskLimits} */
 function assertTaskLimits(value, label = 'task.limits', { legacy = false } = {}) {
   const limits = object(value, label); keys(limits, LIMIT_KEYS, label);
-  for (const key of ['maxTurnsPerStep', 'taskTimeoutMs']) integer(required(limits, key, label), `${label}.${key}`, 1);
+  for (const key of ['maxTurnsPerStep', 'taskTimeoutMs']) if (Object.hasOwn(limits, key)) integer(limits[key], `${label}.${key}`, 1);
   if (!legacy || Object.hasOwn(limits, 'activeStepTimeoutMs')) integer(required(limits, 'activeStepTimeoutMs', label), `${label}.activeStepTimeoutMs`, 1);
   for (const [key, bounds] of Object.entries(LIMIT_BOUNDS)) {
     if (legacy && !Object.hasOwn(limits, key)) continue;

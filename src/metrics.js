@@ -52,13 +52,14 @@ export function addUsage(total = {}, usage) {
   out.cacheRatio = out.totalInput ? out.cacheRead / out.totalInput : null;
   return out;
 }
-/** @param {{turns: number, startedAt: number, usage?: Partial<UsageTotals> | null}} task
+/** Enforced task budgets: reported inference cost and output tokens only. The former
+ * per-step turn limit and overall task duration limit were removed and are never
+ * checked here, even when a legacy snapshot still carries their values.
+ * @param {{usage?: Partial<UsageTotals> | null}} task
  * @param {import('./contracts.js').BaseTaskLimits} limits @returns {string | null}
  */
 export function limitExceeded(task, limits) {
-  if (task.turns >= limits.maxTurnsPerStep) return 'Per-step model turn limit reached';
   if (limits.maxReportedCostUsd !== null && (task.usage?.reportedCost || 0) >= limits.maxReportedCostUsd) return 'Reported inference-cost budget reached';
   if (limits.maxOutputTokens !== null && (task.usage?.output || 0) >= limits.maxOutputTokens) return 'Output-token budget reached';
-  if (Date.now() - task.startedAt >= limits.taskTimeoutMs) return 'Task duration limit reached';
   return null;
 }

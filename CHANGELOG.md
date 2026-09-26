@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Removed the per-step model turn limit and overall task timeout, including their Advanced settings rows, status budget ratios and live enforcement. Old configurations and task snapshots that still carry `maxTurnsPerStep`/`taskTimeoutMs` stay readable; the deprecated values are checked, then dropped from effective config and normal saves, and never enforce anything. Reported-cost and output-token budgets, revision limits and review/cancellation timeouts are unchanged; widget/status telemetry keeps raw elapsed time and turn counts without limit ratios.
+
 - Added explicit Pair `cacheWarming: off|active` opt-in (default off), requesting native session-scoped idle leases only during enabled active work/review. Global settings and other owners remain untouched; old SDKs report unsupported with no fallback. Fresh Worker authority gates native decisions; native cost/TTL/replayability and 30-minute idle safety remain authoritative. Added isolated policy/lease/registered-hook/publication tests and diagnostics; native SDK counterpart and installation are separate pending components.
 
 - Preserve Main/Worker last measured cache observations and their original timestamps when report-stop/error events contain zero input or no usable usage. Real measured 0% requests still replace previous hits; model/session/compaction clearing and inference accounting remain separate. Added helper and registered-hook regressions, including the actual Worker report/abort path. Documented native idle warming eligibility, paid refreshes and no cache-hit guarantee; no warming settings are changed.

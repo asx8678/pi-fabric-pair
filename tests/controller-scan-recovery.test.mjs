@@ -108,8 +108,7 @@ test('scan accepts a retained inbox report and freezes the review checkpoint', a
     assert.equal(persisted.workers.worker.task.status, 'review', 'review state must be durable');
     const taskSummary = controller.summary().workers[0].task;
     assert.equal(taskSummary.turns, 0, 'summary must expose turns used');
-    assert.equal(taskSummary.turnLimit, 40, 'summary must expose the enforced turn limit');
-    assert.equal(taskSummary.timeoutMs, 1800000, 'summary must expose the enforced task timeout');
+    assert.ok(!('turnLimit' in taskSummary) && !('timeoutMs' in taskSummary), 'summary must not expose removed limit fields');
     assert.ok(taskSummary.startedAt > 0, 'summary must expose the task start time');
     const stepList = taskSummary.stepList;
     assert.equal(stepList.length, 1, 'summary must expose the plan step list');
@@ -194,11 +193,11 @@ test('active runtime edits stage without revocation; original report remains rev
     let revokes = 0; runtime.revoke = () => { revokes++; };
     runtime.settledSequence = 0;
     const oldHash = controller.configHash(), intent = controller.intent('worker'), generation = record.workerGeneration;
-    const next = structuredClone(controller.config); next.workers[0].effort = 'low'; next.limits.maxTurnsPerStep = 77;
+    const next = structuredClone(controller.config); next.workers[0].effort = 'low'; next.limits.maxReportsPerTask = 77;
     controller.updateConfig(next);
     assert.equal(controller.summary().settingsPending, true);
     assert.equal(controller.configHash(), oldHash); assert.equal(controller.intent('worker'), intent);
-    assert.equal(revokes, 0); assert.equal(task.limits.maxTurnsPerStep, 40);
+    assert.equal(revokes, 0); assert.equal(task.limits.maxReportsPerTask, 40);
     await runScan(controller);
     assert.equal(task.status, 'running'); assert.equal(userNotices.length, 0);
     await assert.rejects(controller.start('worker'), /pending until all tasks/);
@@ -303,6 +302,25 @@ test('scoped warming preference updates only nonauthorizing authority data and p
     assert.equal(cancelled.phase, 'paused', 'warming preference never overrides a closed task phase');
     assert.equal(task.status, 'cancelled'); assert.equal(task.report.reportId, report.reportId);
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('removed turn/duration limits no longer pause running tasks, even with legacy snapshot values; cost budgets still do', async () => {
+  const { controller, task, runtime, userNotices, base } = await fixture();
+  try {
+    runtime.settledSequence = 0;
+    let revokes = 0; runtime.revoke = () => { revokes++; };
+    task.turns = 999999; task.startedAt = Date.now() - 10 * 60 * 60 * 1000;
+    task.limits = { ...task.limits, maxTurnsPerStep: 40, taskTimeoutMs: 1800000 };
+    await runScan(controller);
+    assert.equal(task.status, 'running', 'legacy turn/duration values must not stop the task');
+    assert.equal(revokes, 0);
+    assert.deepEqual(userNotices, []);
+    task.limits.maxReportedCostUsd = 1; task.usage = { ...ZERO_USAGE, reportedCost: 5 };
+    await runScan(controller);
+    assert.equal(task.status, 'paused');
+    assert.equal(task.interruption, 'Reported inference-cost budget reached');
+    assert.ok(userNotices.some(message => message.includes('Reported inference-cost budget reached')));
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }).catch(() => {}); }
 });
 
 test('warming publication failure contains the owned generation instead of leaving a stale paid opt-in', async () => {

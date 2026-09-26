@@ -50,10 +50,11 @@ test('public settings command autosaves scoped changes, switches inheritance, an
   const globalBefore = await fs.readFile(f.files.global, 'utf8');
   f.actions.push('Save scope', 'global', 'Enabled', 'Save scope', 'project', 'Autostart', 'Done');
   await f.command('settings');
-  assert.deepEqual(JSON.parse(await fs.readFile(f.files.global, 'utf8')), { version: 2, limits: { maxTurnsPerStep: 55 }, enabled: true });
-  assert.equal(JSON.parse(globalBefore).limits.maxTurnsPerStep, 55);
-  assert.deepEqual(JSON.parse(await fs.readFile(f.files.project, 'utf8')), { version: 2, autoStart: true, limits: { maxTurnsPerStep: 17 } });
-  assert.equal(f.controller.config.limits.maxTurnsPerStep, 17);
+  assert.deepEqual(JSON.parse(await fs.readFile(f.files.global, 'utf8')), { version: 2, enabled: true }, 'removed limit keys are dropped from saves');
+  assert.equal(JSON.parse(globalBefore).limits.maxTurnsPerStep, 55, 'legacy file kept readable');
+  assert.ok(!('maxTurnsPerStep' in f.controller.config.limits), 'deprecated keys never reach effective config');
+  assert.deepEqual(JSON.parse(await fs.readFile(f.files.project, 'utf8')), { version: 2, autoStart: true, limits: { maxReportsPerTask: 12 } });
+  assert.equal(f.controller.config.limits.maxReportsPerTask, 12);
   assert.deepEqual(starts, []); assert.equal(f.spawns(), 0);
   await assert.rejects(fs.stat(f.files.ui), /ENOENT/, 'behavior edits do not rewrite indicator');
   const file = await fs.stat(f.files.project);
@@ -64,7 +65,7 @@ test('public settings command autosaves scoped changes, switches inheritance, an
   assert.equal((await fs.stat(f.files.ui)).mtimeMs, ui.mtimeMs);
   assert.deepEqual(starts, []); assert.equal(f.notices.filter(n => n.level === 'error').length, 0);
   assert.ok(f.tools.has('pair_dispatch') && f.tools.has('pair_status'));
-}, { global: { version: 2, limits: { maxTurnsPerStep: 55 } }, project: { version: 2, autoStart: false, limits: { maxTurnsPerStep: 17 } } }));
+}, { global: { version: 2, limits: { maxTurnsPerStep: 55 } }, project: { version: 2, autoStart: false, limits: { maxTurnsPerStep: 17, maxReportsPerTask: 12 } } }));
 
 test('write failure leaves current value intact, later edit succeeds, saved runtime failure is distinct', () => fixture(async f => {
   await fs.rename(f.files.project, `${f.files.project}.held`); await fs.mkdir(f.files.project);

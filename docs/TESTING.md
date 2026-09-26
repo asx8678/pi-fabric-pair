@@ -26,6 +26,7 @@ post-hook effective-mode fencing and zero-token economics before live deployment
 - `tests/ui-settings-autosave.test.mjs` — compact common/Advanced navigation, per-edit persistence, Done/Esc, canceled/no-op/invalid/failed drafts, scope switching and verification consent via standard RPC dialogs.
 - `tests/main-settings.test.mjs` — public command wiring with isolated temporary config/state, sparse global/project inheritance, indicator no-ops, write/runtime failure distinction, migration consent/backup, and pre-spawn setup feedback. No inference or real worker process is launched.
 - `tests/native-profile.test.mjs` — aggregate exact prerequisites, actual worker workspace paths, project precedence/trust uncertainty, no native mutation, and shared authoritative readiness validation.
+- `tests/removed-limits.test.mjs` — removed turn/duration limits stay absent from effective configuration; legacy files and task snapshots remain readable; cost and output-token budgets still apply. Controller and settings tests cover the same removal through scans, saved settings, and UI telemetry.
 - The controller scan suite also exercises staged active/idle settings, retained report approval, scanner interleaving, newest-edit retention, no-op/indicator behavior, and confirmed-exit/drift fail-closed guards using mock runtime controls.
 - `tests/ui-task-list.test.mjs` — task list and widget rendering: per-step state symbols/colors, plan caps, progress bars, activity age and heartbeat/stale markers, budget badges, and the indicator bar.
 

@@ -62,13 +62,13 @@ test('write rejection rolls back displayed draft and does not poison next edit',
 });
 
 test('scope switching replaces the view without saving/copying project defaults', async () => {
-  const project = structuredClone(DEFAULTS); project.limits.maxTurnsPerStep = 17;
+  const project = structuredClone(DEFAULTS); project.limits.maxReportsPerTask = 12;
   let loads = 0;
   const result = await run(['Save scope', 'global', 'Enabled', 'Done'], { original: project,
     options: { loadScope: async scope => { assert.equal(scope, 'global'); loads++; return structuredClone(DEFAULTS); } } });
   assert.equal(loads, 1); assert.equal(result.saves.length, 1);
   assert.equal(result.saves[0].scope, 'global');
-  assert.equal(result.saves[0].next.limits.maxTurnsPerStep, DEFAULTS.limits.maxTurnsPerStep);
+  assert.equal(result.saves[0].next.limits.maxReportsPerTask, DEFAULTS.limits.maxReportsPerTask);
 });
 
 test('verification commands still require human authorization and unchanged editor is inert', async () => {
