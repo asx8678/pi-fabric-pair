@@ -2,7 +2,10 @@
 
 **Keep your Main conversation. Give implementation a persistent worker. Review each handoff.**
 
-![Main sends a bounded coding task to one retained Worker. The Worker returns a code diff through review, and the loop continues with the same conversation.](docs/assets/pi-fabric-pair-hero.png)
+![Steampunk Main and Worker engines with illustrative last-request cache-read gauges of 80% and 60%. Each cutaway separates provider cache, active context, and retained session history.](docs/assets/pi-fabric-pair-cache-steampunk.png)
+
+*Illustrative readings: each role has its own history and active context. The
+gauges show cache-read share from a past request, not current cache fullness.*
 
 Pi Fabric Pair is a standalone [Pi](https://github.com/earendil-works/pi) extension
 for working with a dedicated coding partner. You plan and discuss in Main.
