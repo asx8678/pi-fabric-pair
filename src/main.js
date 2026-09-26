@@ -21,9 +21,7 @@ const MAIN_GUIDELINES = MAIN_GUIDE.split('\n').filter(Boolean);
  * queued behind its current run) the wait continues; only an idle Main whose session does not
  * hold the report counts as a failed delivery. */
 const RECEIPT_CHECK_MS = 30_000, RECEIPT_MAX_MS = 2 * 60 * 60_000;
-/** How far back Main's session is searched for an earlier delivery of the same report. */
-const DELIVERY_LOOKBACK = 5000;
-/** Input that never starts a run (another extension handled it) stops holding delivery after this. */
+/** After this long without the held input's run starting, the user is told a report is held. */
 const INPUT_HOLD_MS = 60_000;
 /** Pi versions whose run lifecycle, extension events and RPC protocol Pair was verified against. */
 const TESTED_PI = '>=0.87.1 <0.88.0';
@@ -74,12 +72,13 @@ export function registerMain(pi) {
   function rejectReceipts(reason) {
     for (const [id, waiting] of receipts) { receipts.delete(id); clearTimeout(waiting.timer); waiting.reject(new Error(reason)); }
   }
-  /** Whether Main's session already holds a report message for this delivery operation
-   * (delivered by any channel, including a settlement-boundary draft). @param {string} id */
+  /** Whether the active branch of Main's session holds a report message for this delivery
+   * operation (delivered by any channel, including a settlement-boundary draft). A report on
+   * another branch is not in Main's context, so it does not count. @param {string} id */
   function sessionHasDelivery(id) {
     /** @type {readonly unknown[]} */ let entries;
-    try { entries = ctxRef?.sessionManager.getEntries() ?? []; } catch { return false; }
-    for (let i = entries.length - 1, seen = 0; i >= 0 && seen < DELIVERY_LOOKBACK; i--, seen++) {
+    try { entries = ctxRef?.sessionManager.getBranch() ?? []; } catch { return false; }
+    for (let i = entries.length - 1; i >= 0; i--) {
       const entry = /** @type {{type?: unknown, customType?: unknown, details?: {deliveryOperationId?: unknown}} | null} */ (entries[i]);
       if (entry?.type === 'custom_message' && entry.customType === 'fabric-pair.report' && entry.details?.deliveryOperationId === id) return true;
     }
@@ -90,16 +89,20 @@ export function registerMain(pi) {
    * Main's current run is observed when that run drains it. @param {string} id @returns {Promise<void>} */
   function awaitReceipt(id) {
     return new Promise((resolve, reject) => {
-      receipts.get(id)?.reject(new Error('Superseded by a newer delivery of the same report'));
+      const previous = receipts.get(id);
+      if (previous) { receipts.delete(id); clearTimeout(previous.timer); previous.reject(new Error('Superseded by a newer delivery of the same report')); }
+      /** @type {{resolve: () => void, reject: (error: Error) => void, timer: ReturnType<typeof setTimeout>}} */ let own;
       const started = Date.now();
       const check = () => {
-        const waiting = receipts.get(id); if (!waiting) return;
+        // Only this waiter's own entry: a superseded timer must never settle a newer waiter.
+        const waiting = receipts.get(id); if (waiting !== own) return;
         if (sessionHasDelivery(id)) { receipts.delete(id); resolve(undefined); return; }
         if (mainOccupied() && Date.now() - started < RECEIPT_MAX_MS) { waiting.timer = setTimeout(check, RECEIPT_CHECK_MS); waiting.timer.unref?.(); return; }
         receipts.delete(id); reject(new Error('Main did not receive the report'));
       };
       const timer = setTimeout(check, RECEIPT_CHECK_MS); timer.unref?.();
-      receipts.set(id, { resolve: () => resolve(undefined), reject, timer });
+      own = { resolve: () => resolve(undefined), reject, timer };
+      receipts.set(id, own);
     });
   }
   /** Send one report message now. The caller has decided this is a safe moment.
@@ -632,7 +635,7 @@ export function registerMain(pi) {
     }
   });
   pi.on('session_start', async (_event, ctx) => {
-    warming.release(); compacting = false; forgetIndicator(); guideInContext = false; runOutcome = null; rejectReceipts('Main session changed');
+    warming.release(); compacting = false; forgetIndicator(); guideInContext = false; runOutcome = null; clearInput(); idleWake = false; rescued = null; rejectReceipts('Main session changed');
     const epoch = ++bindingEpoch; stopped = false;
     try {
       /** @type {Promise<PairController | null>} */
@@ -651,24 +654,31 @@ export function registerMain(pi) {
     ctxRef = ctx;
     let running = false;
     try { running = typeof ctx.isIdle === 'function' && ctx.isIdle() === false; } catch { running = false; }
-    if (idleWake && running && event.streamingBehavior === undefined && rescued === null) {
+    // Only an interactive prompt that raced the report run's start is rescued. Queued (steer or
+    // follow-up) input joins the report run as user work, so from then on that run is no longer
+    // Pair-only and is never aborted for another input. Extension and RPC senders keep Pi's
+    // native "already processing" outcome. Known limit: input handlers that ran before Pair's see
+    // the re-sent prompt again, and Pi's input event exposes only their transformed text.
+    if (idleWake && running && event.streamingBehavior !== undefined) idleWake = false;
+    if (idleWake && running && event.streamingBehavior === undefined && event.source === 'interactive' && rescued === null) {
       rescued = { text: event.text, images: event.images };
       idleWake = false;
       try { ctx.abort(); } catch { /* the settle handler still re-sends */ }
       ctx.ui.notify('Pair paused a worker report that started just as you sent your message; your message is sent next.', 'info');
       return { action: 'handled' };
     }
-    // Hold automatic delivery until this input's run starts. If another extension handled
-    // the input, no run follows: release the hold once Main is observably idle again.
+    // Hold idle wakes until this input's run starts (agent_start) or a run settles. Pi's prompt
+    // preflight (auth, compaction, before_agent_start hooks) is not observable and has no upper
+    // bound, and a run started during it makes Pi reject the user's prompt, so the hold is never
+    // released on time alone. If another extension handled the input and no run follows, waiting
+    // reports are delivered at Main's next boundary, or now with /pair yield; the user is told once.
     inputSince = Date.now();
     if (inputTimer !== undefined) clearTimeout(inputTimer);
-    const release = () => {
+    inputTimer = setTimeout(() => {
       inputTimer = undefined;
-      if (inputSince === null) return;
-      if (busy || compacting || (typeof ctxRef?.isIdle === 'function' && ctxRef.isIdle() !== true)) { inputTimer = setTimeout(release, INPUT_HOLD_MS); inputTimer.unref?.(); return; }
-      inputSince = null; controller?.autoDeliver();
-    };
-    inputTimer = setTimeout(release, INPUT_HOLD_MS); inputTimer.unref?.();
+      if (inputSince !== null && controller?.autoEligible().length) ctx.ui.notify('Pair is holding a worker report until your last message starts a Main turn. Use /pair yield to send it now.', 'info');
+    }, INPUT_HOLD_MS);
+    inputTimer.unref?.();
     // Observation-only: new user input — including a steering/follow-up message
     // queued and drained inside the CURRENT run — is new Main work and supersedes
     // any outstanding yield or in-flight offer. Never consumed, transformed, blocked.
@@ -772,7 +782,11 @@ export function registerMain(pi) {
     const entries = [...(event.entries || []), ...added];
     return { entries, continue: true };
   });
-  pi.on('message_start', event => observeReceipt(event.message));
+  pi.on('message_start', event => {
+    // A user message inside a report run makes it user work: it is never rescued-aborted.
+    if (event.message?.role === 'user') idleWake = false;
+    observeReceipt(event.message);
+  });
   pi.on('message_end', (event, ctx) => { observeReceipt(event.message); if (event.message?.role === 'assistant') controller?.setMainObservation(modelObservation(ctx, selectLastMeasuredUsage(controller?.mainObservation?.lastUsage, event.message.usage))); });
   pi.on('model_select', (_event, ctx) => { warming.release(); ctxRef = ctx; controller?.setMainObservation(modelObservation(ctx, null)); });
   pi.on('cache_warming_decision', (_event, ctx) => {
