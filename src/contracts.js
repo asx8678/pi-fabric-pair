@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { types as nodeTypes } from 'node:util';
 import { validateUsageObservation, validateUsageTotals, UsageValidationError } from './observations.js';
+import { validateWarmingObservation } from './warming.js';
 
 /** @typedef {import('./observations.js').UsageObservation} UsageObservation */
 /** @typedef {import('./observations.js').UsageTotals} UsageTotals */
@@ -54,7 +55,7 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 /** @typedef {ReportEnvelope & {checkpoint: Checkpoint, snapshotRef: string, inspectedAt?: number}} FinalizedReport */
 /** @typedef {{id: string, objective: string, planRevision: number, attemptId: string, attemptNumber: number, constraints: string[], steps: Step[], stepIndex: number, policy: LegacyTaskPolicy, limits: LegacyTaskLimits, lastDecision: LastDecision | null}} AuthorityTask */
 /** @typedef {'idle' | 'running' | 'waiting' | 'paused' | 'stopped'} AuthorityPhase */
-/** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, phase: AuthorityPhase, leaseId: string, attemptId: string | null, readOnly: boolean, model: {provider: string, id: string}, repoRoot: string, task: AuthorityTask | null, updatedAt: number}} Authority */
+/** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, phase: AuthorityPhase, leaseId: string, attemptId: string | null, readOnly: boolean, model: {provider: string, id: string}, repoRoot: string, task: AuthorityTask | null, updatedAt: number, cacheWarming?: 'off' | 'active'}} Authority */
 /** @typedef {{ownerEpoch: number, workerGeneration: number, leaseId: string, attemptId: string, report: ReportEnvelope}} Latch */
 
 /** @typedef {'running' | 'awaiting_settle' | 'question' | 'blocked' | 'review' | 'paused' | 'interrupted' | 'completed' | 'cancelled'} TaskStatus */
@@ -71,7 +72,7 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 /** @typedef {{provider: string, id: string}} StoredModel */
 /** @typedef {{toolCallId: string, toolName: string, pid: number | null, detectedAt: number}} StoredDetachedEffectV1 */
 /** @typedef {{version: 1, nonce: string, workerId: string, pid: number, sessionId: string, context: StoredContextUsage | null, currentTool: string | null, lastUsage: UsageObservation | null, compacting: boolean, detachedEffect: StoredDetachedEffectV1 | null, phase: AuthorityPhase, model: StoredModel | null, at: number}} HistoricalTelemetryV1 */
-/** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number}} StoredTelemetryV1 */
+/** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number, warming?: import('./warming.js').WarmingObservation}} StoredTelemetryV1 */
 /** @typedef {{agentDir: string, piCompaction: unknown, cacheWarming: unknown, fabricCompaction: unknown, fabricShellHangMs: number | null, fabricAgentMaxDepth: number | null, prewalkDisabled: boolean, prewalkConfigured: boolean, note: string}} StoredNativeSettings */
 /** sessionFile is omitted by JSON serialization when Pi has no session file (Pi SessionManager API).
  * @typedef {{protocol: 1, pairVersion: string, pid: number, cwd: string, trusted: boolean, sessionId: string, sessionFile?: string, model: (StoredModel & {contextWindow: number}) | null, thinkingLevel: Effort | 'max' | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}, sourcePaths: string[], context: StoredContextUsage | null, native: StoredNativeSettings, checkedAt: number, scope: string, nonce: string, workerId: string, ownerSession: string}} HistoricalProbeV1
@@ -393,7 +394,8 @@ function diagnosticHistorical(record, label, kind, facts) {
 function checkTelemetry(value, label, workerId, ownerSession, facts) {
   if (value === null) return;
   const record = object(value, label), historical = diagnosticHistorical(record, label, 'telemetry', facts);
-  keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration'])], label);
+  keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration', 'warming'])], label);
+  if (!historical && Object.hasOwn(record, 'warming')) validateWarmingObservation(record.warming);
   knownVersion(required(record, 'version', label), `${label}.version`, 1);
   text(required(record, 'nonce', label), `${label}.nonce`, 10000); text(required(record, 'sessionId', label), `${label}.sessionId`, 10000);
   reference(id(required(record, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Telemetry targets a different worker');
@@ -887,7 +889,8 @@ function validateFinalizedReport(value, label) { assertFinalizedReport(value, la
 
 /** @param {unknown} value @param {ExpectedIdentity} [expected] @returns {asserts value is Authority} */
 function assertAuthority(value, expected = {}) {
-  const authority = object(value, 'authority'); keys(authority, ['version', 'ownerSession', 'ownerEpoch', 'workerId', 'workerGeneration', 'phase', 'leaseId', 'attemptId', 'readOnly', 'model', 'repoRoot', 'task', 'updatedAt'], 'authority');
+  const authority = object(value, 'authority'); keys(authority, ['version', 'ownerSession', 'ownerEpoch', 'workerId', 'workerGeneration', 'phase', 'leaseId', 'attemptId', 'readOnly', 'model', 'repoRoot', 'task', 'updatedAt', 'cacheWarming'], 'authority');
+  if (Object.hasOwn(authority, 'cacheWarming')) choice(authority.cacheWarming, ['off', 'active'], 'authority.cacheWarming');
   integer(required(authority, 'version', 'authority'), 'authority.version', WIRE_VERSION, WIRE_VERSION); const ownerSession = text(required(authority, 'ownerSession', 'authority'), 'authority.ownerSession', 10000); const ownerEpoch = integer(required(authority, 'ownerEpoch', 'authority'), 'authority.ownerEpoch', 1); const workerId = id(required(authority, 'workerId', 'authority'), 'authority.workerId'); const phase = choice(required(authority, 'phase', 'authority'), AUTHORITY_PHASES, 'authority.phase'); const workerGeneration = integer(required(authority, 'workerGeneration', 'authority'), 'authority.workerGeneration', phase === 'stopped' ? 0 : 1);
   if (expected.ownerSession !== undefined) invariant(ownerSession === expected.ownerSession, 'Pair authority owner session mismatch'); if (expected.ownerEpoch !== undefined) invariant(ownerEpoch === expected.ownerEpoch, 'Pair authority owner epoch mismatch'); if (expected.workerId !== undefined) invariant(workerId === expected.workerId, 'Pair authority worker mismatch'); if (expected.workerGeneration !== undefined) invariant(workerGeneration === expected.workerGeneration, 'Pair authority worker generation mismatch');
   token(required(authority, 'leaseId', 'authority'), 'authority.leaseId'); const attemptId = required(authority, 'attemptId', 'authority'); invariant(attemptId === null || typeof attemptId === 'string', 'authority.attemptId must be null or an ID'); if (typeof attemptId === 'string') id(attemptId, 'authority.attemptId'); bool(required(authority, 'readOnly', 'authority'), 'authority.readOnly');

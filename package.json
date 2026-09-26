@@ -36,6 +36,7 @@
     "src/native.js",
     "src/util.js",
     "src/metrics.js",
+    "src/warming.js",
     "src/observations.js",
     "src/ui.js",
     "skills",

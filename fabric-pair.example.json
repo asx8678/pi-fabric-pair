@@ -2,6 +2,7 @@
   "version": 2,
   "enabled": false,
   "autoStart": false,
+  "cacheWarming": "off",
   "indicator": "minimal",
   "maxWorkers": 1,
   "workers": [

@@ -38,9 +38,19 @@ The worker's effective `fabric.json` must contain:
 }
 ```
 
+Global defaults are in `<PI_CODING_AGENT_DIR>/fabric.json` (normally `~/.pi/agent/fabric.json`). Fields in `<worker-workspace>/.pi/fabric.json` take precedence only if the worker trusts that project. A separate worker workspace has its own project file and trust decision.
+
+Pair gathers these file-level blockers before spawning when reliably knowable. Worker trust is not borrowed from Main: if trust is unknown, preflight rejects only when both trusted and untrusted profiles fail; otherwise the worker readiness check decides. Custom runtime commands/arguments skip Main’s best-effort preflight because their environment may differ. No preflight proves provider authentication or installed capability readiness.
+
 If Main and Worker share this profile, these settings affect both. Pair verifies them, never silently changes them. Keep native auto-compaction enabled. No monitored/background shell jobs, detached processes or recursive workers are supported.
 
 ## 3. Enable and start manually
+
+Keep Pair `cacheWarming` at its default `off` unless the human explicitly accepts
+native refresh costs. Optional `active` is a JSON-only Pair policy, not a native
+global setting: see [Context, warming and cost](../README.md#context-warming-and-cost).
+It needs the new session-scoped SDK capability and separately reviewed deployment;
+older SDKs honestly report unsupported and do not fall back to paid prompts.
 
 Open `/pair settings` and set:
 
@@ -48,14 +58,18 @@ Open `/pair settings` and set:
 - **Autostart:** off.
 - **Worker:** one writer, with the exact provider/model and supported effort you intend to use.
 - **Review policy:** `every-step`; final review stays required.
-- **Verification commands:** configure relevant bounded project checks if needed. Empty commands means no project checks were run, not that tests passed.
+- **Advanced → Verification commands:** configure and explicitly authorize relevant bounded project checks if needed. Empty commands means no project checks were run, not that tests passed.
 
-Apply, then run:
+Every completed valid edit saves immediately; **Done** or Esc closes without undoing saved changes. Canceled/no-op/invalid edits do not save. Save scope switches the displayed layer without copying values: global editing excludes project overrides. Worker selection, workspace, limits and verification are under **Advanced**. Main stays under `/model`.
+
+Ordinary settings edits do not start or replay worker work; runtime-profile changes are staged. The opted-in warming preference changes only nonauthorizing metadata, but failed publication stops the owned worker fail-closed rather than retaining a stale paid opt-in. Autostart is for the next Main session. After configuring, run:
 
 ```text
 /pair start worker
 /pair doctor
 ```
+
+If a retained worker exists, runtime changes stay staged while its current task uses the original profile. Finish or cancel that task, then explicitly run `/pair start` to stop the old generation, confirm its exit and rebind the same conversation. No work is replayed. Unknown exits and interrupted tasks still require explicit recovery; workspace changes still require an explicit reset. Policy/limit/verification edits affect new assignments (explicit resume retains its existing budget-amendment behavior). Project configuration writes may stale a frozen checkpoint; they do not bypass evidence checks.
 
 Start/doctor do not request a model turn. If startup reports missing Fabric/Fovea, load those existing packages or configure their explicit extension paths; do not disable readiness checks to proceed.
 

@@ -56,6 +56,34 @@ export async function nativeSettings(cwd, trusted, env = process.env) {
     note: 'File-level native configuration; session-only overrides may differ. RPC autoCompactionEnabled is authoritative for that switch.'
   };
 }
+/** Shared exact checks for file-level preflight and authoritative worker readback.
+ * @param {{fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean}} native
+ * @param {{prewalkDisabled: boolean}} requirements
+ */
+export function nativeProfileBlockers(native, requirements) {
+  const blockers = [];
+  if (native.fabricShellHangMs !== 0) blockers.push(`executor.shellHangMs = 0 (observed ${JSON.stringify(native.fabricShellHangMs)}; prevents untracked background shell jobs)`);
+  if (native.fabricAgentMaxDepth !== 0) blockers.push(`agents.maxDepth = 0 (observed ${JSON.stringify(native.fabricAgentMaxDepth)}; prevents recursive agents)`);
+  if (requirements.prewalkDisabled && !native.prewalkDisabled) blockers.push('prewalk.enabled = false (not explicitly disabled; Pair owns delegation)');
+  return blockers;
+}
+/** Best-effort file preflight, not authentication/readiness. Trust belongs to the
+ * worker process; Main's trust is never silently transferred to another worker.
+ * Unknown trust is rejected only if BOTH possible profiles have blockers.
+ * @param {string} cwd @param {{prewalkDisabled: boolean}} requirements
+ * @param {boolean | null} [trusted] @param {NodeJS.ProcessEnv} [env]
+ */
+export async function preflightNativeProfile(cwd, requirements, trusted = null, env = process.env) {
+  const globalPath = path.join(agentDir(env), 'fabric.json'), projectPath = path.join(cwd, '.pi', 'fabric.json');
+  const scopes = trusted === null ? [false, true] : [trusted];
+  const profiles = await Promise.all(scopes.map(async trust => {
+    try { return { trust, blockers: nativeProfileBlockers(await nativeSettings(cwd, trust, env), requirements), error: '' }; }
+    catch (error) { return { trust, blockers: [], error: error instanceof Error ? error.message : String(error) }; }
+  }));
+  const blocked = profiles.every(profile => profile.blockers.length > 0 || profile.error);
+  const details = profiles.map(profile => `${profile.trust ? 'If worker trusts project (project overrides global)' : 'Without worker project trust (global only)'}:\n${profile.error || (profile.blockers.length ? profile.blockers.map(item => `  - ${item}`).join('\n') : '  No file-level blockers.')}`).join('\n');
+  return { blocked, message: `Pair profile setup for worker workspace ${cwd}\n${details}\nGlobal defaults: ${globalPath}\nProject override: ${projectPath} (only loaded by a trusted worker; takes precedence per field).\nSet the listed values in the applicable file(s), preserving unrelated settings, then retry /pair start. Pair does not edit native configuration. Worker trust/session overrides, installed capabilities and provider authentication are still checked at startup.` };
+}
 /** @typedef {Omit<import('./contracts.js').HistoricalProbeV1, 'nonce' | 'workerId' | 'ownerSession' | 'native'> & {native: NativeSettings}} NativeProbe */
 /** AR-02 uses the public API, not a context/private thinking-level mirror.
  * @param {NativeAPI} pi
@@ -108,10 +136,9 @@ export function checkReadiness(probe, rpcState, config, worker, cwd) {
   assert(probe.capabilities.pairReport, 'Worker reporting bridge did not load');
   assert(!(worker.readOnly && probe.capabilities.fabric), 'UNSUPPORTED_PROFILE: read-only Pair workers cannot safely expose generic Fabric providers without a pre-effect authorization seam. Use the qualified single-writer profile.');
   if (probe.capabilities.fabric) {
-    assert(probe.native.fabricShellHangMs === 0, 'UNSUPPORTED_PROFILE: Fabric executor.shellHangMs must be explicitly set to 0 so shell calls cannot spill into untracked background jobs.');
-    assert(probe.native.fabricAgentMaxDepth === 0, 'UNSUPPORTED_PROFILE: Fabric agents.maxDepth must be explicitly set to 0; Pair workers cannot delegate or spawn recursive agents.');
+    const blockers = nativeProfileBlockers(probe.native, config.requirements);
+    assert(!blockers.length, `UNSUPPORTED_PROFILE: ${blockers.join('; ')}. Check ${path.join(agentDir(), 'fabric.json')} and ${path.join(cwd, '.pi', 'fabric.json')} (trusted project fields override global). Pair never edits native configuration.`);
   }
-  if (config.requirements.prewalkDisabled && probe.capabilities.fabric) assert(probe.native.prewalkDisabled, 'Disable native Prewalk with /fabric prewalk --disable before using Pair. Pair never edits Fabric configuration itself.');
   if (config.requirements.autoCompaction) assert(rpcState.autoCompactionEnabled, 'Worker automatic compaction is disabled in native Pi settings. Enable it before using Pair.');
 }
 /** @param {unknown} name */

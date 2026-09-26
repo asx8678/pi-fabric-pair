@@ -1,5 +1,44 @@
 # V1 acceptance ledger
 
+## Settings/setup checkpoint acceptance
+
+- Valid completed edits autosave atomically to the selected layer; Done/Esc keep saved changes. Cancel/no-op/invalid/failed writes have no runtime effects.
+- Compact common menu, contextual Main model, Advanced settings and RPC dialogs retain model/verification consent and migration semantics.
+- File-level Fabric preflight aggregates shellHangMs=0, maxDepth=0, Prewalk=false with actual workspace/trust/precedence; worker readiness remains authoritative.
+- Runtime changes preserve active authorization and require a safe boundary; indicator/no-op changes never restart; save success is distinct from runtime setup failure.
+- Regression fixtures cover scoped inheritance, autosave, preflight and idle/active transitions; npm test/typecheck plus wiring/docs checks. Preserve pre-existing budget/UI edits.
+
+## Numeric settings regression checkpoint
+
+- Blank/whitespace/cancel retains every numeric value without saving; optional budget clears only on explicit `none`/`off`. No-op timeout edits preserve exact stored milliseconds.
+- Field-specific errors enforce revision 0–20, slots 1–8, positive safe-integer turns/milliseconds and finite positive USD; fractional minutes/USD remain supported. Invalid drafts cannot leak into later autosaves.
+- Fresh-profile checks still aggregate native guards and scoped paths; worker readiness remains authoritative. Both `/pair start` and dashboard start catch setup rejection once, create no worker/runtime, and do not edit native configuration.
+- Worker-reported verification: `node --test --test-reporter=tap tests/ui-settings-numeric.test.mjs tests/ui-settings-autosave.test.mjs tests/native-profile.test.mjs tests/controller-scan-recovery.test.mjs tests/main-settings.test.mjs` — 98 passed, 0 failed; `npm run typecheck` passed.
+- Checkout source changes do **not** update an already-installed package. No package installation or real user/project configuration writes were performed; test fixtures use isolated temporary profiles.
+
+## Observed cache display checkpoint
+
+- Widget activity is followed by a neutral `Cache read (last)` row only when at least one role has a known share, including idle/review states. Unknown roles are omitted without renumbering configured worker labels; with none known, task rows follow activity immediately, with no cache row/spacer. Activity, progress and indicator-off behavior remain intact.
+- Widget/status share validated last-request `cacheRead/(input+cacheRead+cacheWrite)` and observation age. Missing/null/zero-input shares stay unknown in status diagnostics but are hidden in the widget; measured 0.0% remains visible. Malformed observations still fail validation; cumulative usage and provider residency/TTL are never substituted.
+- Deterministic render coverage includes missing/undefined/null/zero-input data, mixed-known roles and worker label gaps, no workers, 0/fractional/100%, old/future/zero timestamps, ANSI themes, wide titles and widths 0/1/8. Public Main event fixture verifies usage propagation, row removal on model/compaction resets, and off/minimal rendering without model requests or new wiring/timers.
+- Quiet-unknown checkpoint (worker-reported): `node --test tests/ui-cache-observation.test.mjs tests/ui-task-list.test.mjs tests/main-settings.test.mjs` — 35 passed; `node --test tests/ui-model-selector.test.mjs` — 13 passed; `npm run typecheck` passed. Direct Node render probes passed for activity-only, only-W2 measured 0.0%, task rows without cache, widths 0/1/2/8/12/40 and retained unknown status diagnostics. No failed checks; no install/reload/configuration changes.
+- Prior widget checkpoint (worker-reported): `node --test --test-reporter=tap tests/ui-cache-observation.test.mjs tests/ui-task-list.test.mjs tests/main-settings.test.mjs tests/ui-settings-numeric.test.mjs tests/ui-settings-autosave.test.mjs tests/native-profile.test.mjs tests/controller-scan-recovery.test.mjs` — 124 passed, 0 failed; `npm run typecheck` passed. Source-only display changes; no installation or real profile writes.
+
+## Local update preparation (not installed)
+
+- Worker-reported: full `npm test` ran once — 143 passed, 0 failed/skipped. Normal `npm pack --offline --ignore-scripts=false --foreground-scripts --pack-destination <staging> --json` ran `prepack` → `npm run typecheck` successfully, with npm cache/logs isolated under staging.
+- Staging: `/var/folders/h9/04n59szn6793rg31xhy64b400000gp/T/pair-release-acF6Fx`. Artifact: `pi-fabric-pair-0.1.0.tgz`; extracted payload: `extracted/package`. SHA-256: `c6d43da5ae6376019dd2820e1a21313cced958b5b76712cd299317fc9e0fb9d2`.
+- Exact archive membership matches the manifest: 25 files, including all 15 public-runtime JS files. Parsed closure resolves 37 relative imports and one relative URL asset. Every payload file matches current checkout bytes, including Unreleased notes; no tests, `.pi`, sessions, dependencies, parked ActorHost/store or build-only sources ship.
+- Inline offline Node probes loaded the packaged public entrypoint (five Main tools and `/pair`), exercised numeric no-ops/zero/fractions/clearing/errors, cache percentages/unknown/widths 0/1/8, both awaited starts, aggregate preflight and authoritative readiness rejection. A staging-only ancestor `node_modules/@earendil-works/pi-tui` symlink points to the existing checkout dependency; no live dependency directory was edited.
+- This is local packaging evidence, not installed/live-provider certification. Main performs the live update after acceptance. No version bump, install, commit/push/publish, model request, worker start/reset or real profile write occurred. The acceptance ledger itself is intentionally outside the published manifest.
+
+## Local installed update (Main verified, 2026-09-26)
+
+- Main independently checked the prepared tarball SHA-256 and all 25 manifest-approved payload files against the checkout, then loaded the package through the installed Pi public SDK in an isolated profile: one extension, five Main tools, `/pair`, and the `fabric-pair` skill; no session/provider requests.
+- Replaced `/Users/adam2/.pi/agent/packages/pi-fabric-pair-0.1.0-0729da29` using a verified staged directory. Previous installation is preserved at `/Users/adam2/.pi/agent/fabric-pair/backups/pi-fabric-pair-0.1.0-0729da29-2026-09-26T06-39-32-532Z-519da8b7` for rollback.
+- Post-install hashes match all packaged checkout files; native Pi loading from the actual installed path reports zero errors and exactly the expected registrations. Global/project settings and Fabric/Pair configuration hashes are unchanged. Receipt: `/var/folders/h9/04n59szn6793rg31xhy64b400000gp/T/pair-release-acF6Fx/installation-receipt.json`.
+- Running Pi sessions still need `/reload` or restart to activate the replacement. No automatic reload, worker reset, version bump, commit or push was performed; Git publication awaits the user's confirmation. This ledger is outside the package payload, so recording deployment does not stale the installed file identity.
+
 ## Active scope: supervised MVP
 
 The owner stopped architecture expansion. The immediate target is the existing public `extension -> main -> PairController -> PiRuntime/PiRpc -> worker` workflow, not dormant ActorHost cutover. This supersedes the larger active-plan language in the historical ledger below for this pass.
@@ -23,6 +62,10 @@ src/metrics.js         src/observations.js  src/ui.js
 **Park, do not finish or delete:** `actor-host*`, `actor-store*`, `actor-archive*`, `actor-model.js`, the `actor-*-contracts.js`/`actor-contracts.js`/`actor-contract-common.js` family, `coordination.js`, `transitions.js`, `src/native-store/` and `scripts/build-host.mjs`. They are outside that runtime closure. This is a runtime dependency observation, not permission for a filename-based deletion; build scripts and documentation currently reference parts of this group.
 
 **Applied delivery boundary:** package the 15-file runtime plus its existing entry/config/skill/help assets; leave parked architecture out of the MVP tarball. Remove dormant `check:host` from the MVP packaging prerequisite while retaining strict checking and optional parked-source checks. Do not change active stored formats, automatically migrate data or remove existing uncertain-exit holds. The package whitelist and removal of the Host freshness prerequisite are now applied. Parked source files remain untouched in the checkout; strict all-source typechecking remains enabled.
+
+**Completion toast and first decide-loop coverage (2026-09-26):** investigation of a live session showed the report chain works end-to-end (final_review delivered, inspected, approved with witnesses, task completed) — the gap was purely post-approval visibility: no user-facing signal that a task is done and the worker is ready. `controller.decide` now raises `notifyUser` on final approval: "Pair task completed: <objective> · worker retained, ready for the next dispatch." The recovery suite gained the first full decision-loop coverage (inspect → approve → completed → toast → worker ready) against a real controller and evidence pipeline. Typecheck 0 errors, 35/35 tests.
+
+**Task budget meters (2026-09-26):** `summary()` now also exposes `startedAt`, `turns`, `turnLimit` (limits.maxTurnsPerStep) and `timeoutMs` (limits.taskTimeoutMs) — both budgets are enforced by scan containment, so they are the only honest in-step progress measurable before a checkpoint is approved. `ui.js` adds `minutesLabel` and `budgetBadges`: the active-worker cluster shows `4m/30m` elapsed and `13/40 turns`, escalating to warning past 75% and error past 90% of each limit; `/pair status` gains a Budgets line. Tests: label formatting, budget escalation tiers, missing-limit suppression, widget integration, plus summary-exposure assertions in the recovery suite. Typecheck 0 errors, 35/35 tests.
 
 **P3 documentation fix and worker task closure (2026-09-26):** completed the remaining scope of the interrupted P2/P3 task (task-0e8c1095, worker stopped at 23 turns without a report). P2 (deleted-source immutable inspection) had been implemented by the worker and is covered by `tests/evidence-deletion.test.mjs` (deletion in checkpoint changed, patch shows removed lines, byte-for-byte before-image recovery) — suite 34/34, typecheck clean, `pack:check` clean. P3 was finished directly by Main: docs/TESTING.md and README.md now describe the retained bounded suite, list actual commands (`npm test`, `test:ui`, `typecheck`, `check:host`, `pack:check`), and keep the honest scope limits; the stale no-tests prose is gone from all three claim sites. The worker's post-checkpoint fixture correction (mkdir before realpath) is adopted. The interrupted assignment should be cancelled in its owning session.
 
@@ -236,7 +279,7 @@ The [joint NEXT-01/02 runbook](NEXT-01-02-PLAN.md#10-next-02-transition-model-so
 | G11 | V1 | U,R | R6 | Source gap: usage identity deduplication not proven | Count once; report display does not re-charge worker usage to Main. |
 | G12 | V1 | U,N | R6 | Partial arithmetic/display coverage; native unknown-data cases pending | Unknown/N/A displayed; no invented zero cost or hot-cache guarantee. |
 | G13 | V1 | N | R6 | No-heartbeat design; complete native idle proof pending | No LLM call and no fake prompt heartbeat from Pair. |
-| G14 | V1 | U,N | R6 | No warmer implementation; native policy proof pending | Does not silently enable paid warming or alter global native settings. |
+| G14 | V1 | U,N | R6 | Pair scoped-lease fake SDK/config/registered-hook tests; native SDK counterpart and live qualification pending | Explicit cacheWarming active opt-in only; default off, no persisted native policy change or custom warmer; native safety/cost checks remain authoritative. |
 | G15 | V1 | U,N | R6 | Partial mock soft-budget test; active-time semantics fail | New work bounded by policy; in-flight cost uncertainty honestly reported. |
 | G16 | V1 | U,T | R7 | Redacted diagnostic export not implemented | No credentials or unsolicited raw prompts/source; terminal controls sanitized. |
 | H01 | V1 | U,R | R4 | Durable outbox exists; crash-window qualification pending | Parent recovers report once and does not lose required review. |

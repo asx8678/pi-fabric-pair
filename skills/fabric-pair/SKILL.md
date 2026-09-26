@@ -120,5 +120,14 @@ outcomes before doing more work; never replay mutations blindly.
 ## Cost and UI
 
 Do not send status messages or invoke Main merely to keep a cache warm. Native Pi
-owns warming and context management. Pair retains conversations but cannot promise
-provider cache residency. Minimal/off indicators are human UI only.
+owns scheduling, TTL/cost eligibility and safety windows. Pair's separate
+`cacheWarming` policy defaults to `off`. Only explicit `active` cost opt-in allows
+session-scoped native idle leases during enabled active work, including review
+waits; the native 30-minute idle cap is not extended. Leases are not implementation
+authority, cache-residency proof or evidence that refresh usage occurred. Status
+reports SDK support/requested/held separately from last measured cache samples.
+Old SDKs have no fallback: never issue warm prompts, change global settings, invent
+TTLs or reset/restart work to keep a cache hot. Release preserves native policy and
+other owners. Native refresh costs are outside Pair inference-only budgets.
+Native SDK support and Pair deployment must be reviewed/installed separately;
+source edits are not live. Minimal/off indicators remain human UI only.

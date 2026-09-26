@@ -1,14 +1,14 @@
 # Scope of work — qualify Fabric Pair V1
 
-**Current seven-part completion request:** [NEXT-IMPLEMENTATION-PLAN.md §8](NEXT-IMPLEMENTATION-PLAN.md#8-seven-part-completion-plan) is the consolidated delivery handoff: independent review/freeze; coupled Host/store and legacy/migration/archive/recovery; restricted two-runtime supervision; optional sleep; configuration/observability; then separately authorized native qualification. Scope §10 and the no-tests directive remain binding. This planning update changes no production code or provider configuration.
+**Current seven-part completion request:** [NEXT-IMPLEMENTATION-PLAN.md §8](NEXT-IMPLEMENTATION-PLAN.md#8-seven-part-completion-plan) is the consolidated delivery handoff: independent review/freeze; coupled Host/store and legacy/migration/archive/recovery; restricted two-runtime supervision; optional sleep; configuration/observability; then separately authorized native qualification. The §10 no-tests directive was superseded by the P3 testing-documentation reconciliation: the retained offline suite is re-adopted as regression coverage and described in [README](../README.md) and [TESTING.md](TESTING.md). This planning update changes no production code or provider configuration.
 
-> **Owner directive:** all automated tests, fixtures, test/probe runners, and generated test evidence were removed. Do not add or regenerate tests. **[§10](#10-current-scope-after-test-removal) is the current scope and verification boundary.** Earlier implementation requirements remain context; earlier test deliverables and pass counts are historical, not instructions to restore tests or current release certification.
+> **Owner directive (historical):** all automated tests, fixtures, test/probe runners, and generated test evidence were removed, and adding or regenerating them was prohibited at the time. **Superseded by the P3 reconciliation decision:** the retained offline suite is re-adopted as regression coverage for its listed areas and documented in [README](../README.md), [TESTING.md](TESTING.md) and [CHANGELOG](../CHANGELOG.md). **[§10](#10-current-scope-after-test-removal) is retained as historical scope framing, not a current prohibition.** Earlier implementation requirements remain context; earlier test deliverables and pass counts are historical, not current release certification.
 
 **Status:** implementation in progress, not release-qualified. AR-01/NEXT-02/AR-02 source checkpoints are historical delivered slices; AR-03 is now partly implemented, with seven of ten tasks accepted at the last stable baseline and T08 incomplete. The user's **complete all** instruction is tracked in [the completion execution ledger](COMPLETION-EXECUTION-PLAN.md): accounting, durable-retry and LR/prefix corrections have bounded source checkpoints. The renewed five-area plan-and-implement request is mapped to concrete checks in [the delivery plan](FIVE-AREA-DELIVERY-PLAN.md), with submission/authority implementation and the latest [mailbox/archive foundation](MAILBOX-ARCHIVE-CHECKPOINT.md) boundedly checked. Unknown-delivery reconciliation and structural replanning are now source-implemented and partially checked; see the [current checkpoint](RECONCILIATION-REPLAN-CHECKPOINT.md). The [Q01 inline-retention checkpoint](Q01-INLINE-INSPECTION-CHECKPOINT.md) now covers the full acceptance-bearing public history through archive under unchanged caps; independent foundation review remains open. The [scope-checked next implementation plan](NEXT-IMPLEMENTATION-PLAN.md) corrects the remaining order: Q01 → F1/T09/T10 → coherent Host/held-migration/mailbox integration → supervisor/workflow → sleep/configuration/observability. The [downstream audit](DOWNSTREAM-RUNTIME-SCOPE-AUDIT.md) identifies the remaining runtime integration, not completed delivery. Remaining model/review/Host/supervisor/workflow/idle/configuration work is dependency-ordered, not delivered. This is not runtime or V1 release certification.
 
 **Baseline:** submitted `pi-fabric-pair` 0.1.0, the original handoff, and the review performed in this conversation.
 
-**Execution plan:** [current no-tests implementation sequence](IMPLEMENTATION-PLAN.md#13-active-implementation-plan-after-test-removal), as explicitly reconciled by the [actor-owned RPC roadmap](ACTOR-RPC-IMPLEMENTATION-PLAN.md).
+**Execution plan:** [historical no-tests implementation sequence](IMPLEMENTATION-PLAN.md#13-active-implementation-plan-after-test-removal), as explicitly reconciled by the [actor-owned RPC roadmap](ACTOR-RPC-IMPLEMENTATION-PLAN.md).
 
 **Release ledger:** [ACCEPTANCE-LEDGER.md](ACCEPTANCE-LEDGER.md).
 
@@ -250,6 +250,8 @@ B1–B8 remain historical subdivisions of IMP-01–04. Production changes for bo
 
 ## 10. Current scope after test removal
 
+**Superseded for testing:** the no-tests directive in this section is historical. The retained offline suite is re-adopted as regression coverage (see [TESTING.md](TESTING.md)), and the exclusions below no longer forbid that suite or new regression tests.
+
 ### Version and product boundaries
 
 | Version label | Current value | Next treatment |
@@ -282,7 +284,7 @@ Named witnesses below include AR-01, NEXT-02 and AR-02. Earlier line ranges else
 - Preserve session/history/evidence and unresolved review/question obligations through held migration, validation and status/inspect paths. No automatic adoption of legacy work.
 - Complete durable publication/reconciliation and explicit configuration rollback failures. Keep existing activation-failure containment and unsupported-profile restrictions.
 - Complete strict production annotations and static-only CI/package inspection, with truthful status documentation.
-- Keep executable JS, the existing Pi RPC architecture and production validators/evidence functionality. The no-tests directive does not remove runtime validation or the product's user-configured verification feature; this checkpoint does not run it.
+- Keep executable JS, the existing Pi RPC architecture and production validators/evidence functionality. The former no-tests directive did not remove runtime validation or the product's user-configured verification feature; this checkpoint does not run it.
 
 **Order (reconciled):** AR-01 records, NEXT-02 internal transition model and AR-02 retained-runtime slice source-delivered → AR-03 complete actor/storage/wire reader-writer freeze → AR-04 coherent ActorHost/migration/publication integration → NEXT-05 strict typing → NEXT-06 static/package/docs → AR-05 restricted supervisor → AR-06 two-runtime supervised workflow → AR-07 optional idle policy → AR-08 configuration/observability. Original NEXT/AR dependencies may overlap only at their explicitly assigned launch points. Lifecycle/admitted-effect/evidence safety remains foundational; adaptive supervision, parallel writers and new transports stay excluded.
 
@@ -294,8 +296,8 @@ Named witnesses below include AR-01, NEXT-02 and AR-02. Earlier line ranges else
 
 ### Exclusions and completion boundary
 
-Do not add or restore tests, fixtures, compiler-negative cases, smoke/native/probe runners or generated test output. Do not add queue pumping, automatic recovery/repair, multiworker activation, a new transport, a TS build migration, paid inference, new OS profiles or upstream patches. No workers or user-configured verification are launched during the planning/static checks.
+The removed historical tests, fixtures, compiler-negative cases and smoke/native/probe runners remain historical and are not restored; the retained offline suite in [TESTING.md](TESTING.md) is the current regression coverage. Do not add queue pumping, automatic recovery/repair, multiworker activation, a new transport, a TS build migration, paid inference, new OS profiles or upstream patches. No workers or user-configured verification are launched during the planning/static checks.
 
-Implementation progress may be recorded after source walkthrough and static checks. `npm run typecheck` must ultimately pass without suppressions/exclusions; package dry-run confirms contents only. This does **not** close test-dependent foundation, native/fault/installation or V1 release gates. Preserve the original requirements as unverified, not silently waived. If the no-tests policy prevents sufficient behavioral evidence, keep the relevant gate blocked and do not advertise unattended safety.
+Implementation progress may be recorded after source walkthrough and static checks. `npm run typecheck` must ultimately pass without suppressions/exclusions; package dry-run confirms contents only. This does **not** close test-dependent foundation, native/fault/installation or V1 release gates. Preserve the original requirements as unverified, not silently waived. If the retained suite's coverage is insufficient for a gate, keep that gate blocked and do not advertise unattended safety.
 
 **Reconciled planning deliverables:** this scope check, [the active implementation plan](IMPLEMENTATION-PLAN.md#13-active-implementation-plan-after-test-removal), and [the current implementation ledger](ACCEPTANCE-LEDGER.md#current-no-tests-implementation-ledger). Production changes, test creation/execution and commits/pushes are not part of this planning turn.

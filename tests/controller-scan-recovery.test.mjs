@@ -20,7 +20,7 @@ async function fixture() {
     version: 2, enabled: true,
     workers: [{ id: 'worker', provider: 'zro', model: 'deepseek-v4.1-flash', effort: 'high', cwd: null, readOnly: false }],
   }));
-  const loaded = await loadConfig(repo, true);
+  const loaded = await loadConfig(repo, true, { PI_CODING_AGENT_DIR: path.join(base, 'agent') });
   const userNotices = [], mainNotices = [];
   const controller = new PairController({
     config: loaded.config, cwd: repo, ownerSession: 'scan-test-owner', sourcePaths: [],
@@ -88,7 +88,7 @@ async function runScan(controller) {
 }
 
 test('scan accepts a retained inbox report and freezes the review checkpoint', async () => {
-  const { controller, task, record, runtime, workerDir, mainNotices, base } = await fixture();
+  const { controller, task, record, runtime, workerDir, mainNotices, userNotices, base } = await fixture();
   try {
     const report = envelope({ controller, task, record, runtime });
     await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
@@ -106,10 +106,22 @@ test('scan accepts a retained inbox report and freezes the review checkpoint', a
     assert.ok(archive.includes(`${report.reportId}.json`), 'original bytes must be retained in the archive');
     const persisted = JSON.parse(await fs.readFile(path.join(controller.dir, 'state.json'), 'utf8'));
     assert.equal(persisted.workers.worker.task.status, 'review', 'review state must be durable');
-    const stepList = controller.summary().workers[0].task.stepList;
+    const taskSummary = controller.summary().workers[0].task;
+    assert.equal(taskSummary.turns, 0, 'summary must expose turns used');
+    assert.equal(taskSummary.turnLimit, 40, 'summary must expose the enforced turn limit');
+    assert.equal(taskSummary.timeoutMs, 1800000, 'summary must expose the enforced task timeout');
+    assert.ok(taskSummary.startedAt > 0, 'summary must expose the task start time');
+    const stepList = taskSummary.stepList;
     assert.equal(stepList.length, 1, 'summary must expose the plan step list');
     assert.equal(stepList[0].state, 'review', 'the reporting step must display as in-review');
     assert.equal(stepList[0].title, 'Step');
+    // Full decision loop: inspect the checkpoint, approve, and expect completion + user-facing toast.
+    await controller.inspect('worker', report.reportId);
+    const decision = await controller.decide({ workerId: 'worker', taskId: task.id, reportId: report.reportId, action: 'approve', checkpointHash: task.report.checkpoint.checkpointHash, feedback: 'Recovery-suite approval' });
+    assert.equal(decision.status, 'completed', 'approving the final review must complete the task');
+    assert.ok(userNotices.some(n => n.includes('Pair task completed')), 'completion must raise a user-facing toast');
+    assert.ok(userNotices.some(n => n.includes('ready for the next dispatch')), 'the toast must say the worker is ready');
+    assert.equal(controller.summary().workers[0].status, 'ready', 'worker returns to ready after completion');
   } finally {
     await controller.close().catch(() => {});
     await fs.rm(base, { recursive: true, force: true }).catch(() => {});
@@ -173,4 +185,135 @@ test('garbage in the inbox is contained, not dropped silently', async () => {
     await controller.close().catch(() => {});
     await fs.rm(base, { recursive: true, force: true }).catch(() => {});
   }
+});
+
+
+test('active runtime edits stage without revocation; original report remains reviewable', async () => {
+  const f = await fixture(); const { controller, task, record, runtime, workerDir, userNotices, base } = f;
+  try {
+    let revokes = 0; runtime.revoke = () => { revokes++; };
+    runtime.settledSequence = 0;
+    const oldHash = controller.configHash(), intent = controller.intent('worker'), generation = record.workerGeneration;
+    const next = structuredClone(controller.config); next.workers[0].effort = 'low'; next.limits.maxTurnsPerStep = 77;
+    controller.updateConfig(next);
+    assert.equal(controller.summary().settingsPending, true);
+    assert.equal(controller.configHash(), oldHash); assert.equal(controller.intent('worker'), intent);
+    assert.equal(revokes, 0); assert.equal(task.limits.maxTurnsPerStep, 40);
+    await runScan(controller);
+    assert.equal(task.status, 'running'); assert.equal(userNotices.length, 0);
+    await assert.rejects(controller.start('worker'), /pending until all tasks/);
+    assert.equal(revokes, 0); assert.equal(record.workerGeneration, generation);
+    const report = envelope(f);
+    runtime.settledSequence = 1;
+    await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
+    await runScan(controller);
+    assert.equal(task.status, 'review');
+    await controller.inspect('worker', report.reportId);
+    await controller.decide({ workerId: 'worker', taskId: task.id, reportId: report.reportId, action: 'approve', checkpointHash: task.report.checkpoint.checkpointHash, feedback: 'Approve retained task' });
+    assert.equal(task.status, 'completed');
+    let stops = 0;
+    runtime.abortAndStop = async () => { stops++; await runScan(controller); runtime.closed = true; };
+    const sessionFile = record.sessionFile;
+    // Directly probe the boundary without invoking a real Pi process.
+    await controller.reconcileConfig();
+    assert.equal(stops, 1); assert.equal(controller.config.workers[0].effort, 'low');
+    assert.equal(controller.pendingConfig, null); assert.equal(controller.handles.size, 0);
+    assert.equal(record.status, 'stopped'); assert.equal(record.sessionFile, sessionFile);
+    assert.ok(!userNotices.some(message => /authority is held|configuration drift/i.test(message)));
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('idle settings reconciliation waits for confirmed exit and retains newest edit on race', async () => {
+  const { controller, task, record, runtime, userNotices, base } = await fixture();
+  try {
+    task.status = 'completed'; record.status = 'ready';
+    const next = structuredClone(controller.config); next.workers[0].effort = 'low'; controller.updateConfig(next);
+    let stops = 0;
+    runtime.abortAndStop = async () => {
+      stops++; await runScan(controller);
+      const latest = structuredClone(next); latest.workers[0].effort = 'minimal'; controller.updateConfig(latest);
+      runtime.closed = true;
+    };
+    await assert.rejects(controller.reconcileConfig(), /Settings changed during reconciliation/);
+    assert.equal(stops, 1); assert.equal(controller.pendingConfig.workers[0].effort, 'minimal');
+    assert.equal(controller.config.workers[0].effort, 'high');
+    await controller.reconcileConfig();
+    assert.equal(controller.config.workers[0].effort, 'minimal'); assert.equal(controller.pendingConfig, null);
+    assert.equal(userNotices.length, 0);
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('unconfirmed exits and real config drift remain held despite staged settings', async () => {
+  const { controller, task, record, runtime, base } = await fixture();
+  try {
+    task.status = 'completed'; record.status = 'ready';
+    const hash = controller.configHash();
+    const next = structuredClone(controller.config); next.workers[0].effort = 'low'; controller.updateConfig(next);
+    runtime.abortAndStop = async () => { throw Error('unknown exit'); };
+    await assert.rejects(controller.reconcileConfig(), /unknown exit/);
+    assert.equal(controller.configHash(), hash); assert.ok(controller.pendingConfig);
+    assert.match(record.error, /EXIT_UNCONFIRMED/);
+    controller.handles.delete('worker');
+    await assert.rejects(controller.reconcileConfig(), /EXIT_UNCONFIRMED/);
+    controller.handles.set('worker', runtime); record.status = 'ready'; runtime.abortAndStop = async () => { runtime.closed = true; };
+    controller.runtimeData.get(runtime).configHash = 'unexplained-drift';
+    await runScan(controller);
+    assert.equal(controller.runtimeData.get(runtime).failureHandled, true);
+    assert.match(record.error, /configuration drift/);
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('no-op, indicator and reverted runtime edits never revoke or schedule startup', async () => {
+  const { controller, task, runtime, base } = await fixture();
+  try {
+    let revokes = 0; runtime.revoke = () => { revokes++; }; runtime.settledSequence = 0;
+    const before = structuredClone(controller.config), hash = controller.configHash();
+    controller.updateConfig(before);
+    controller.updateConfig({ ...before, indicator: 'off' });
+    assert.equal(controller.pendingConfig, null); assert.equal(controller.configHash(), hash);
+    const next = structuredClone(before); next.workers[0].effort = 'low'; controller.updateConfig(next);
+    controller.updateConfig(before);
+    assert.equal(controller.pendingConfig, null); assert.equal(revokes, 0);
+    await runScan(controller); assert.equal(task.status, 'running');
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('scoped warming preference updates only nonauthorizing authority data and preserves the in-flight report', async () => {
+  const { controller, task, record, runtime, workerDir, base } = await fixture();
+  try {
+    let revokes = 0; runtime.revoke = () => { revokes++; };
+    const before = JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8'));
+    const taskBefore = JSON.stringify(task), hash = controller.configHash(), intent = controller.intent('worker');
+    const report = envelope({ controller, task, record, runtime });
+    await controller.updateConfig({ ...controller.config, cacheWarming: 'active' });
+    const after = JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8'));
+    assert.deepEqual(after, { ...before, cacheWarming: 'active' });
+    assert.equal(JSON.stringify(task), taskBefore);
+    assert.equal(controller.configHash(), hash); assert.equal(controller.intent('worker'), intent);
+    assert.equal(revokes, 0); assert.equal(controller.pendingConfig, null);
+    await controller.updateConfig({ ...controller.config, enabled: false });
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8')), { ...before, cacheWarming: 'off' });
+    await controller.updateConfig({ ...controller.config, enabled: true });
+    await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
+    await runScan(controller);
+    assert.equal(task.status, 'review'); assert.equal(task.report.reportId, report.reportId);
+    assert.equal(JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8')).phase, 'waiting');
+    await controller.cancel('worker', 'fixture cancel');
+    const cancelled = JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8'));
+    assert.equal(cancelled.phase, 'paused', 'warming preference never overrides a closed task phase');
+    assert.equal(task.status, 'cancelled'); assert.equal(task.report.reportId, report.reportId);
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('warming publication failure contains the owned generation instead of leaving a stale paid opt-in', async () => {
+  const { controller, task, runtime, workerDir, base } = await fixture();
+  try {
+    let stops = 0;
+    runtime.abortAndStop = async () => { stops++; runtime.closed = true; };
+    const budget = { limits: structuredClone(task.limits), startedAt: task.startedAt, turns: task.turns };
+    await fs.rm(path.join(workerDir, 'authority.json'));
+    await assert.rejects(controller.updateConfig({ ...controller.config, cacheWarming: 'active' }));
+    assert.equal(stops, 1); assert.equal(task.status, 'interrupted');
+    assert.deepEqual({ limits: task.limits, startedAt: task.startedAt, turns: task.turns }, budget);
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });

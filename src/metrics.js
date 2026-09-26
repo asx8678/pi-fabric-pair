@@ -1,3 +1,5 @@
+import { validateUsageObservation } from './observations.js';
+
 /** @typedef {import('./observations.js').UsageObservation} UsageObservation */
 /** @typedef {import('./observations.js').UsageTotals} UsageTotals */
 /** @typedef {'input' | 'cacheRead' | 'cacheWrite' | 'output'} UsageToken */
@@ -17,6 +19,20 @@ export function normalizedUsage(usage) {
   const totalInput = input + cacheRead + cacheWrite;
   const cost = usage.cost && finiteNumber(usage.cost.total) && usage.cost.total >= 0 ? usage.cost.total : null;
   return { input, cacheRead, cacheWrite, totalInput, output, cacheRatio: totalInput ? cacheRead / totalInput : null, cost, observedAt: Date.now() };
+}
+/** Select display telemetry only; accounting still consumes every normalized response.
+ * Report-stop/error placeholders with no measured input must not erase a sample or
+ * refresh its timestamp. A real request with zero cache reads IS a new measurement.
+ * Callers clear their retained sample explicitly at model/session/compaction boundaries.
+ * @param {unknown} previous
+ * @param {Parameters<typeof normalizedUsage>[0]} usage
+ * @returns {UsageObservation | null}
+ */
+export function selectLastMeasuredUsage(previous, usage) {
+  const next = normalizedUsage(usage);
+  if (next && Number.isFinite(next.totalInput) && next.totalInput > 0) return next;
+  const retained = validateUsageObservation(previous ?? null, 'Last measured usage');
+  return retained && retained.totalInput > 0 ? retained : null;
 }
 /** @param {Partial<UsageTotals> | null | undefined} total @param {UsageObservation} usage @returns {UsageTotals} */
 export function addUsage(total = {}, usage) {

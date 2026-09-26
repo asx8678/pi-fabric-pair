@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { STALE_AGE_MS, activityAge, ageLabel, indicator, indicatorWidget, progressBar, staleWorkers, stepColor, stepSymbol, taskListLines } from '../src/ui.js';
+import { STALE_AGE_MS, activityAge, ageLabel, budgetBadges, indicator, indicatorWidget, minutesLabel, progressBar, staleWorkers, stepColor, stepSymbol, taskListLines } from '../src/ui.js';
 
 const wrap = { accent: 36, success: 32, warning: 33, error: 31, muted: 90, dim: 2 };
 const theme = { fg: (color, text) => '\x1b[' + wrap[color] + 'm' + text + '\x1b[0m' };
@@ -37,13 +37,13 @@ test('long plans collapse past the widget cap with a +N more line', () => {
   assert.ok(lines[lines.length - 1].includes('+ 3 more'));
 });
 
-test('widget renders the activity line plus painted steps, truncating to width', () => {
+test('widget without cache data puts painted steps immediately after activity, truncating to width', () => {
   const s = summary([
     { id: 's1', title: 'A very long step title that will not fit into a narrow status bar at all', state: 'active' },
   ], { step: 1, steps: 1, status: 'running' });
   const widget = indicatorWidget(s, true, theme);
   const lines = widget.render(40);
-  assert.equal(lines.length, 2, 'widget must show the head line and the step line');
+  assert.equal(lines.length, 2, 'widget must show activity then the step, without a cache row or spacer');
   assert.ok(lines[0].includes('M◉'));
   assert.ok(lines[1].includes('▶ 1.'));
   assert.ok(lines[1].includes('\x1b[36m'), 'the active step must be painted with the accent color');
@@ -113,6 +113,23 @@ test('staleWorkers lists only silent active workers for one-shot alerting', () =
   assert.deepEqual(stale.map(worker => worker.id), ['a'], 'fresh or inactive workers never count');
   assert.ok(stale[0].ageMs >= STALE_AGE_MS);
   assert.deepEqual(staleWorkers({ workers: [{ id: 'd', status: 'working' }], main: null }, 500000), [], 'no events yet reads as fresh, never stale');
+});
+
+test('budget badges measure enforced time and turn limits with escalation', () => {
+  assert.equal(minutesLabel(0), '0s');
+  assert.equal(minutesLabel(42000), '42s');
+  assert.equal(minutesLabel(65000), '1m');
+  assert.equal(minutesLabel(1800000), '30m');
+  const paint = (color, text) => color + ':' + text;
+  const fresh = budgetBadges({ startedAt: 1000, timeoutMs: 1800000, turns: 3, turnLimit: 40 }, paint, 6000);
+  assert.deepEqual(fresh, ['muted:5s/30m', 'muted:3/40 turns']);
+  const lateTime = budgetBadges({ startedAt: 1000, timeoutMs: 1800000, turns: 0, turnLimit: 40 }, paint, 1501000);
+  assert.ok(lateTime[0].startsWith('warning:'), '80% of the time budget warns');
+  const hotTurns = budgetBadges({ startedAt: 1000, timeoutMs: 1800000, turns: 38, turnLimit: 40 }, paint, 1000);
+  assert.ok(hotTurns[1].startsWith('error:'), '95% of the turn budget errors');
+  assert.deepEqual(budgetBadges({}, paint, 1000), [], 'no budgets without task limits');
+  const withWorker = indicator({ workers: [{ id: 'worker', status: 'working', observation: { at: 1000 }, task: { startedAt: 1000, timeoutMs: 1800000, turns: 3, turnLimit: 40 } }], main: null }, false, theme, 6000);
+  assert.ok(withWorker.includes('5s/30m') && withWorker.includes('3/40 turns'), 'budgets appear in the widget line');
 });
 
 test('indicator appends the painted progress bar only while a plan exists', () => {

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Added explicit Pair `cacheWarming: off|active` opt-in (default off), requesting native session-scoped idle leases only during enabled active work/review. Global settings and other owners remain untouched; old SDKs report unsupported with no fallback. Fresh Worker authority gates native decisions; native cost/TTL/replayability and 30-minute idle safety remain authoritative. Added isolated policy/lease/registered-hook/publication tests and diagnostics; native SDK counterpart and installation are separate pending components.
+
+- Preserve Main/Worker last measured cache observations and their original timestamps when report-stop/error events contain zero input or no usable usage. Real measured 0% requests still replace previous hits; model/session/compaction clearing and inference accounting remain separate. Added helper and registered-hook regressions, including the actual Worker report/abort path. Documented native idle warming eligibility, paid refreshes and no cache-hit guarantee; no warming settings are changed.
+
+- Numeric settings now retain current values on blank/whitespace/cancel, with field-specific range/type errors and explicit `none`/`off` budget clearing. Zero revisions and valid fractional minutes/USD are supported; invalid edits cannot leak into later autosaves.
+- Both `/pair start` and dashboard start now await startup inside the command error boundary, reporting aggregate setup blockers once without creating a worker on rejection.
+- Added a neutral Main/worker `Cache read (last)` widget row and consistent status output: last-request cache-read share and observation age, including idle/review states. Unknown roles are hidden in the widget (no row/spacer if all are unknown), while status diagnostics retain unknown and measured 0.0% stays visible. Configured worker labels remain stable; no cache-residency/TTL guarantee, warming request or extra model call. Widget lines also fit tiny terminal widths.
+
+- Replaced Apply/Cancel settings drafts with per-edit scoped atomic autosave, disposable invalid/failed drafts, Done/Esc close, and a nine-row common menu plus Advanced. Scope switching excludes project overrides from global editing; migrations and verification retain explicit human consent.
+- Staged runtime-affecting changes without revoking active authorization or racing scanner containment. Explicit `/pair start` reconciles after terminal tasks and confirmed exits; indicator/no-op edits do not restart workers. Saving and runtime setup outcomes are separate.
+- Added aggregate file-profile preflight with required Fabric values, worker workspace paths, precedence and trust limitations; authoritative worker readiness still checks all fields. Added isolated command, profile, autosave and transition regressions.
+
+- Reconciled the testing documentation with the retained offline suite (P3). README, `docs/TESTING.md` and `docs/SCOPE-OF-WORK.md` now describe the current tests instead of the superseded no-tests directive; the suite itself is unchanged.
+
 ## 0.1.0 — 2026-09-23
 
 Initial standalone source release. No Pi, Fabric, or Fovea fork.

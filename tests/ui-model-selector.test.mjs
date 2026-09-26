@@ -16,7 +16,7 @@ async function settings({ available = models, worker = {}, interact, mode = 'tui
   const before = structuredClone(original);
   const main = Object.freeze({ provider: 'main', id: 'unchanged' });
   const notifications = [];
-  let applied, customCalls = 0, inputCalls = 0, settingsCalls = 0, renders = 0;
+  let applied = structuredClone(original), saves = 0, customCalls = 0, inputCalls = 0, settingsCalls = 0, renders = 0;
   let offered;
   const ctx = {
     mode, model: main, modelRegistry: { getAvailable: () => available },
@@ -25,7 +25,7 @@ async function settings({ available = models, worker = {}, interact, mode = 'tui
       notify: (message, level) => notifications.push({ message, level }),
       select: async (title, choices) => {
         if (title.startsWith('Fabric Pair settings')) {
-          return settingsCalls++ === 0 ? choices.find(row => row.startsWith('Worker model:')) : 'Apply';
+          return settingsCalls++ === 0 ? choices.find(row => row.startsWith('Worker model:')) : 'Done';
         }
         offered = choices;
         return answer;
@@ -48,12 +48,12 @@ async function settings({ available = models, worker = {}, interact, mode = 'tui
       },
     },
   };
-  await settingsUI(ctx, original, 'global', async config => { applied = config; });
+  await settingsUI(ctx, original, 'global', async config => { saves++; applied = config; });
   assert.deepEqual(original, before, 'settings must only change a draft');
   assert.equal(ctx.model, main, 'worker selection must not change Main');
   assert.equal(inputCalls, 0, 'show models immediately, not a blank input-only dialog');
   assert.deepEqual(notifications.filter(n => n.level === 'error'), []);
-  return { applied, notifications, customCalls, renders, offered };
+  return { applied, saves, notifications, customCalls, renders, offered };
 }
 
 test('models appear immediately, sorted, with keyboard navigation', async () => {
@@ -88,12 +88,14 @@ test('current worker is highlighted without hiding other models', async () => {
   } });
   assert.equal(result.applied.workers[0].provider, 'alpha');
   assert.equal(result.applied.workers[0].effort, 'high');
+  assert.equal(result.saves, 0, 'unchanged selection does not save');
 });
 
 for (const key of ['\x1b', '\x03']) {
   test(`cancel ${JSON.stringify(key)} leaves the worker unchanged`, async () => {
     const worker = { provider: 'old', model: 'kept', effort: 'high' };
     const result = await settings({ worker, interact(component) { component.handleInput(key); } });
+    assert.equal(result.saves, 0);
     for (const [key, value] of Object.entries(worker)) assert.equal(result.applied.workers[0][key], value);
   });
 }

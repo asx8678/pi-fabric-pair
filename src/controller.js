@@ -6,6 +6,7 @@ import { PiRpc, isRpcRecord } from './rpc.js';
 import { PiRuntime } from './actor-runtime.js';
 import { Evidence, repositoryRoot, verifyConfigured } from './evidence.js';
 import { validateConfig } from './config.js';
+import { preflightNativeProfile } from './native.js';
 import { validateDecision, validateDispatch, validateReport } from './schema.js';
 import { incrementCounter, migrateStoredState, STATE_VERSION, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateStoredState } from './contracts.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
@@ -21,7 +22,7 @@ import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonic
  * @typedef {{id: string, record: WorkerRecord, runtime: PiRuntime | undefined, intent: number, generation: number}} Control
  * @typedef {{control: Control, disposition: 'accepted' | 'duplicate' | 'stale' | 'unproven' | 'revoked'}} ReportAcceptance
  */
-/** @typedef {import('./actor-runtime.js').RuntimeConfig & {version: number, enabled: boolean, autoStart: boolean, indicator: string, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, limits: import('./contracts.js').TaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: {maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}, mainReadOnlyDuringTasks: boolean, runtime: {command: string, commandArgs: string[], inheritExtensions: boolean, extraExtensions: string[], extraSkills: string[]}}} PairConfig */
+/** @typedef {import('./actor-runtime.js').RuntimeConfig & {version: number, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: string, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, limits: import('./contracts.js').TaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: {maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}, mainReadOnlyDuringTasks: boolean, runtime: {command: string, commandArgs: string[], inheritExtensions: boolean, extraExtensions: string[], extraSkills: string[]}}} PairConfig */
 /** @typedef {{reportId: string, workerId: string, taskId: string, ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} NoticeDetails */
 /** @typedef {{notifyUser?: (message: string, level: 'info'|'warning'|'error') => void, notifyMain?: (message: string, details: NoticeDetails) => void | Promise<void>, promptUser?: import('./actor-runtime.js').RuntimeOptions['promptUser']}} ControllerCallbacks */
 const TERMINAL = new Set(['completed', 'cancelled']);
@@ -48,7 +49,9 @@ export class PairController extends EventEmitter {
   /** @param {{config: Parameters<typeof validateConfig>[0], cwd: string, ownerSession: string, sourcePaths?: string[], storageDir?: string, callbacks?: ControllerCallbacks, rpcFactory?: (options: import('./rpc.js').RpcOptions) => PiRpc}} options */
   constructor({ config, cwd, ownerSession, sourcePaths = [], storageDir, callbacks = {}, rpcFactory = opts => new PiRpc(opts) }) {
     super();
-    /** @type {PairConfig} */ this.config = validateConfig(config); this.cwd = cwd; this.ownerSession = String(ownerSession);
+    /** @type {PairConfig} */ this.config = validateConfig(config);
+    /** Persisted requested runtime settings; live authority keeps its original profile until explicit idle reconciliation. @type {PairConfig | null} */
+    this.pendingConfig = null; this.cwd = cwd; this.ownerSession = String(ownerSession);
     /** @type {import('./contracts.js').StoredStateV1} */ this.state = { version: STATE_VERSION, ownerSession: this.ownerSession, ownerEpoch: 0, cwd, workers: {}, requests: {}, notices: {} };
     /** @type {Evidence | null} */ this._evidence = null;
     this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory;
@@ -112,27 +115,86 @@ export class PairController extends EventEmitter {
     this.emit('change', this.summary());
   }
   summary() {
-    return { ownerSession: this.ownerSession, ownerEpoch: this.state?.ownerEpoch || null, directory: this.dir, enabled: this.config.enabled,
+    return { ownerSession: this.ownerSession, ownerEpoch: this.state?.ownerEpoch || null, directory: this.dir, enabled: this.config.enabled, cacheWarming: this.config.cacheWarming, settingsPending: !!this.pendingConfig,
       main: this.mainObservation, workers: this.config.workers.map(spec => {
         const r = this.state?.workers?.[spec.id], h = this.handles.get(spec.id), task = r?.task || null;
         return { id: spec.id, model: `${spec.provider}/${spec.model}`, effort: spec.effort, readOnly: spec.readOnly,
           status: h?.permission ? 'permission' : r?.status || 'not_started', pid: h?.pid || null,
           sessionId: r?.sessionId || null, sessionFile: r?.sessionFile || null, workerGeneration: r?.workerGeneration || null, cwd: r?.cwd || spec.cwd || this.cwd,
-          task: task ? { id: task.id, attemptId: task.attemptId, attemptNumber: task.attemptNumber, objective: task.objective, status: task.status, step: task.stepIndex + 1, steps: task.steps.length, revisions: task.revisions, reportId: task.report?.reportId || null, checkpointHash: task.report?.checkpoint?.checkpointHash || null, reportedCost: task.usage?.reportedCost ?? null, stepList: task.steps.map((s, i) => ({ id: s.id, title: s.title, state: stepState(task, i) })) } : null,
+          task: task ? { id: task.id, attemptId: task.attemptId, attemptNumber: task.attemptNumber, objective: task.objective, status: task.status, step: task.stepIndex + 1, steps: task.steps.length, revisions: task.revisions, reportId: task.report?.reportId || null, checkpointHash: task.report?.checkpoint?.checkpointHash || null, reportedCost: task.usage?.reportedCost ?? null, startedAt: task.startedAt, turns: task.turns, turnLimit: task.limits.maxTurnsPerStep, timeoutMs: task.limits.taskTimeoutMs, stepList: task.steps.map((s, i) => ({ id: s.id, title: s.title, state: stepState(task, i) })) } : null,
           observation: (h && this.runtimeData.get(h)?.telemetry) || r?.lastObservation || null, usage: r?.usage || null,
           lastExchange: r?.lastExchange || null, error: r?.error || null,
           pendingConfiguration: r?.bound ? digest(r.bound) !== digest(spec) : false
         };
       }), cacheNote: 'Cache observations describe past requests. Pair does not guarantee retained provider cache. Native warming costs are not included in Pair inference-only counters.' };
   }
-  /** @param {{model: string | null, busy?: boolean, context?: unknown, lastUsage?: unknown}} value */
+  /** @param {{model: string | null, busy?: boolean, context?: unknown, lastUsage?: unknown, warming?: import('./warming.js').WarmingObservation}} value */
   setMainObservation(value) { this.mainObservation = value; this.emit('change', this.summary()); }
   /** @param {Parameters<typeof validateConfig>[0]} config */
   updateConfig(config) {
+    const previousWarming = this.warmingPolicy();
     const next = validateConfig(config), changed = this.configHash(next) !== this.configHash();
-    this.config = next; this.evidence.limits = next.evidence;
-    if (changed) for (const id of this.handles.keys()) this.revoke(id, 'Pair configuration changed; a fresh readiness boundary is required');
-    this.scheduleScan(); this.emit('change', this.summary());
+    const retained = this.handles.size > 0 || Object.values(this.state.workers).some(r => activeTask(r) || r.status !== 'stopped');
+    this.pendingConfig = changed && retained ? next : null;
+    // No revoke, spawn or scanner wake for a settings edit. Runtime-affecting
+    // fields remain exactly those attested by the current generation. New-task
+    // policy/limits are snapshots; disabling still prevents new assignments.
+    this.config = this.pendingConfig ? { ...next, runtime: this.config.runtime, requirements: this.config.requirements, workers: this.config.workers, evidence: this.config.evidence } : next;
+    this.evidence.limits = this.config.evidence;
+    this.emit('change', this.summary());
+    return previousWarming === this.warmingPolicy() ? Promise.resolve() : this.refreshWarmingPolicy();
+  }
+  /** Nonauthorizing native-warming preference, deliberately outside configHash. */
+  warmingPolicy() { return this.config.enabled && this.config.cacheWarming === 'active' ? 'active' : 'off'; }
+  /** Publish only the warming preference; preserve the exact current authority tuple
+   * and phase. A policy edit is not a work grant, report transition or budget reset.
+   */
+  async refreshWarmingPolicy() {
+    try {
+      await this.transaction(async () => {
+        for (const id of Object.keys(this.state.workers)) {
+          const control = this.control(id);
+          const file = path.join(this.workerDir(id), 'authority.json');
+          const authority = validateAuthority(await readJSON(file), { ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch, workerId: id, workerGeneration: control.generation });
+          if (!this.controlCurrent(control) || this.closing) continue;
+          const cacheWarming = this.warmingPolicy();
+          if ((authority.cacheWarming || 'off') === cacheWarming) continue;
+          await atomicJSON(file, validateAuthority({ ...authority, cacheWarming }));
+        }
+      });
+    } catch (error) {
+      // Never leave a potentially paid stale opt-in in an owned live process
+      // after failed publication. Existing stop containment retains all evidence.
+      await Promise.allSettled([...this.handles.keys()].map(id => this.stop(id)));
+      throw error;
+    }
+  }
+
+  /** Explicit /pair start boundary only. Never change an active assignment or
+   * turn a report/unknown exit into permission to replay work. */
+  async reconcileConfig() {
+    const pending = this.pendingConfig;
+    if (!pending) return;
+    const ids = await this.transaction(() => {
+      assert(!this.closing && !Object.values(this.state.workers).some(activeTask), 'Saved runtime settings are pending until all tasks finish or are cancelled. Existing authorization is unchanged.');
+      assert(Object.values(this.state.workers).every(r => this.handles.has(r.id) || r.status === 'stopped'), 'EXIT_UNCONFIRMED: reconcile the held generation before changing runtime settings');
+      for (const r of Object.values(this.state.workers)) {
+        const spec = pending.workers.find(w => w.id === r.id);
+        assert(!spec || (spec.cwd || this.cwd) === (r.bound.cwd || this.cwd), 'Changing workspace requires an explicit reset after the task is finished/cancelled');
+      }
+      return [...this.handles.keys()];
+    });
+    // Keep the old profile during shutdown. The scanner sees ordinary stopped
+    // authority/pending controls, not unexplained config-hash drift.
+    for (const id of ids) await this.stop(id);
+    await this.transaction(() => {
+      const latest = this.pendingConfig;
+      assert(!this.closing && (!latest || this.configHash(latest) === this.configHash(pending)), 'Settings changed during reconciliation; run /pair start again to use the latest saved settings');
+      assert(!this.handles.size && Object.values(this.state.workers).every(r => r.status === 'stopped' && !activeTask(r)), 'Configuration reconciliation requires confirmed idle exits');
+      if (latest) this.config = latest;
+      this.pendingConfig = null; this.evidence.limits = this.config.evidence;
+      this.emit('change', this.summary());
+    });
   }
   /** @param {PairConfig} [config] @returns {string} */
   configHash(config = this.config) { return digest({ runtime: config.runtime, requirements: config.requirements, workers: config.workers, evidence: config.evidence }); }
@@ -162,6 +224,7 @@ export class PairController extends EventEmitter {
    */
   async reserveStart(id, continuing = false) {
     assert(!this.closing && (this.config.enabled || (continuing && activeTask(this.state.workers[id]))), 'Pair is closing or disabled');
+    assert(continuing || !this.pendingConfig, 'Saved runtime settings are pending. Finish/cancel the task, then run /pair start before new work.');
     const intent = this.intent(id), config = clone(this.config), configHash = this.configHash(config), spec = clone(this.workerSpec(id));
     assert(spec.provider && spec.model, 'Choose the worker provider/model in /pair settings first');
     assert(!(spec.readOnly && config.requirements.fabric), 'UNSUPPORTED_PROFILE: read-only Pair workers cannot safely expose generic Fabric providers without a pre-effect authorization seam. Use the qualified single-writer profile.');
@@ -177,6 +240,13 @@ export class PairController extends EventEmitter {
     assert([...this.handles.values()].every(h => h.closed), 'UNSUPPORTED_PROFILE: Fabric Pair V1 supports one live/starting/stopping worker.');
     const cwd = await canonical(spec.cwd ? path.resolve(this.cwd, spec.cwd) : this.cwd);
     assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked');
+    // Custom launchers/arguments can change the worker environment; do not
+    // pretend Main's file view is authoritative for those profiles.
+    if (config.requirements.fabric && config.runtime.command === 'pi' && config.runtime.commandArgs.length === 0) {
+      const preflight = await preflightNativeProfile(cwd, config.requirements);
+      assert(!preflight.blocked, preflight.message);
+      assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked during profile preflight');
+    }
     const repoRoot = await repositoryRoot(cwd);
     assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked');
     assert(!inside(repoRoot, path.resolve(this.dir)), 'Pair state must be outside the implementation working tree.');
@@ -255,6 +325,7 @@ export class PairController extends EventEmitter {
   }
   /** Safe config rebind closes the old generation; no hot setters. @param {string} id */
   async start(id) {
+    await this.reconcileConfig();
     const old = await this.transaction(() => {
       const h = this.handles.get(id), r = this.state.workers[id];
       if (!h || this.runtimeCurrent(h, null)) return null;
@@ -281,7 +352,7 @@ export class PairController extends EventEmitter {
       version: PROTOCOL, ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch, workerId: id, workerGeneration: r.workerGeneration, phase,
       leaseId: t?.leaseId || `idle-${id}`, attemptId: t?.attemptId || null, readOnly: !!r.bound.readOnly, model: { provider: r.bound.provider, id: r.bound.model }, repoRoot: r.repoRoot,
       task: t ? { id: t.id, objective: t.objective, planRevision: t.planRevision, attemptId: t.attemptId, attemptNumber: t.attemptNumber, constraints: t.constraints, steps: t.steps, stepIndex: t.stepIndex, policy: t.policy, limits: t.limits, lastDecision: t.lastDecision || null } : null,
-      updatedAt: Date.now()
+      updatedAt: Date.now(), cacheWarming: this.warmingPolicy()
     });
     await atomicJSON(path.join(this.workerDir(id), 'authority.json'), authority);
   }
@@ -805,6 +876,7 @@ export class PairController extends EventEmitter {
         });
       } catch (error) { await this.activationFailed(work, error); throw error; }
     }
+    if (t.status === 'completed' && input.action === 'approve') this.notifyUser(`Pair task completed: ${String(t.objective).slice(0, 90)} · worker retained, ready for the next dispatch.`, 'info');
     return { taskId: t.id, status: t.status, stepId: t.steps[t.stepIndex].id, sessionRetained: true };
   }
   /** @param {string} id @param {string} [reportId] @param {string} [file] */
@@ -986,6 +1058,7 @@ export class PairController extends EventEmitter {
   close() {
     if (this.closePromise) return this.closePromise;
     this.closing = true; this.operationAbort.abort(); clearInterval(this.timer);
+    this.emit('change', this.summary());
     for (const id of this.handles.keys()) this.revoke(id, 'Main is closing');
     this.closePromise = (async () => {
       const ids = await this.transaction(() => Object.keys(this.state?.workers || {}));
