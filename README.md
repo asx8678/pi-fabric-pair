@@ -24,6 +24,17 @@ Main -- answer / revise / approve -> same Worker
 **Experimental MVP:** one Main, one writer, one unresolved assignment. Start in a
 disposable Git workspace with manual startup and every-step review.
 
+## How Pair works
+
+![Runtime architecture: Main and its Pair controller share one Pi process. The controller manages a persistent Pi worker through JSONL RPC, while the worker publishes durable reports through local files.](docs/assets/pi-fabric-pair-architecture.png)
+
+The controller lives inside Main's Pi process and owns the worker's lifecycle.
+Commands and lifecycle events use Pi's JSONL RPC. The worker writes source in the
+Git workspace and publishes structured reports to a local inbox; the controller
+delivers a compact report with evidence references to Main. Sessions, authority,
+and review evidence live in private Pair state outside the implementation tree.
+See the [architecture and invariants](docs/ARCHITECTURE.md).
+
 ## Get started
 
 You need **Node.js 24+**, Git, and Pi with Fabric, Fovea, and an authenticated model.
@@ -107,15 +118,30 @@ and the remaining commands.
 Approval is tied to an inspected code checkpoint. Source changes after that
 checkpoint invalidate approval.
 
+![Review sequence: Main dispatches a bounded plan; Worker implements, reports, and yields; the controller waits for settled execution, runs configured checks, and freezes evidence; Main inspects and decides. Revisions use a fresh lease in the same worker session.](docs/assets/pi-fabric-pair-review-loop.png)
+
+`pair_report` closes the current implementation lease. The controller waits for
+the worker to settle, runs configured checks, and freezes the source evidence.
+Main reads that evidence with `pair_inspect`, then uses `pair_decide` to approve,
+revise, or cancel. Continuation grants a fresh attempt and lease in the same
+worker conversation. Final approval completes the task and retains the session.
+
 Add project checks under **Settings > Advanced > Verification commands**.
 Failed checks block approval when `requirePassing` is enabled. An empty command
 list means no independent checks ran.
 
 ## Context, warming and cost
 
+![Separate Main and Worker conversations exchange explicit work orders and compact reports. Durable task state survives native compaction through a small restored packet. Cache-read share measures each role's last request separately.](docs/assets/pi-fabric-pair-context.png)
+
 Main and Worker retain separate conversations. **Cache read (last)** shows the
 share of measured input read from provider cache on each role's last request.
 The artwork's 99-100% values are examples; actual results vary.
+
+The worker does not inherit Main's private chat: include relevant constraints in
+the work order. Native Pi/Fabric manages compaction; Pair restores a small
+task-state packet for the next turn without requesting extra inference. Retained
+conversation history and observed provider cache usage are separate mechanisms.
 
 Optional cache warming is **off by default**. It requires compatible native SDK
 support, can incur paid usage, and does not guarantee cache hits. Pair's inference
@@ -129,6 +155,7 @@ boundary. Unattended operation, automatic crash recovery, and multiple writers
 are outside this MVP.
 
 [Quickstart](docs/QUICKSTART.md) |
+[Architecture](docs/ARCHITECTURE.md) |
 [Reference](docs/REFERENCE.md) |
 [Example config](fabric-pair.example.json) |
 [Compatibility](docs/COMPATIBILITY.md) |

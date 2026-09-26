@@ -1,4 +1,43 @@
-# README artwork
+# README images
+
+## Technical diagrams
+
+Three illustrations explain the active Pair runtime. Generated with the built-in
+imagegen tool; the [exact prompts](technical-diagram-prompts.md) are retained for
+updates. The existing cache-engine hero remains illustrative artwork.
+
+| Image | Explains | Implementation sources |
+| --- | --- | --- |
+| [Runtime architecture](pi-fabric-pair-architecture.png) | Main's controller, a persistent RPC worker, the report file channel, and local storage. | [Role selection](../../src/extension.js), [controller](../../src/controller.js), [runtime](../../src/actor-runtime.js), [RPC transport](../../src/rpc.js). |
+| [Review and revision loop](pi-fabric-pair-review-loop.png) | Dispatch, report/yield, settled execution, frozen evidence, inspection, and hash-bound approval. | [Main tools](../../src/main.js), [worker report and gates](../../src/worker.js), [controller decisions](../../src/controller.js), [evidence capture](../../src/evidence.js). |
+| [Persistent context](pi-fabric-pair-context.png) | Separate conversations, state restoration after compaction, and last-request cache observations. | [Main lifecycle](../../src/main.js), [worker lifecycle](../../src/worker.js), [cache measurements](../../src/metrics.js), [native warming integration](../../src/warming.js). |
+
+### Reading the diagrams
+
+The architecture has two model-bearing processes. `PairController`, `PiRuntime`,
+and `PiRpc` run inside Main's process. RPC carries commands and native lifecycle
+events. `pair_report` latches a report in `latch.json` before publishing it to
+`workers/<id>/inbox/<reportId>.json`; a UI notification only wakes the controller.
+The worker edits source directly in the implementation workspace.
+
+The review diagram follows a code-review report. Questions and blockers can
+return earlier through the same reporting channel. The worker yields its lease
+before the controller checks settlement, runs configured verification, and
+captures/rechecks source. Main must inspect the checkpoint before approving its
+exact hash. Source changes make that approval stale; checks must pass when
+`requirePassing` is enabled. A completed task leaves its worker session retained.
+
+The context diagram distinguishes conversations from durable coordination and
+provider cache observations. Relevant user constraints must be in the work order.
+After native compaction, Pair queues a bounded task-state packet with
+`deliverAs: 'nextTurn'` and `triggerTurn: false`. Cache-read share is
+`cacheRead / (input + cacheRead + cacheWrite)`, measured separately for each role's
+last request. Optional native warming is off by default, requires a compatible
+SDK, can incur paid usage, and does not guarantee cache hits.
+
+These images describe the active extension/controller runtime, not the separate
+ActorHost implementation plans. For full details and scope boundaries, see
+[Architecture](../ARCHITECTURE.md) and [Reference](../REFERENCE.md).
 
 ## Hot piston cache engines
 
