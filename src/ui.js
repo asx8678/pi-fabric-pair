@@ -1,4 +1,4 @@
-import { Input, SelectList, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+import { Input, SelectList, matchesKey, truncateToWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { assert, briefError, cleanText, clone } from './util.js';
 import { validateConfig } from './config.js';
 import { validateUsageObservation } from './observations.js';
@@ -141,7 +141,9 @@ export function indicator(summary, mainBusy, theme, now = Date.now()) {
     const label = `${summary.workers.length === 1 ? 'W' : `W${i + 1}`}${symbol(w.status)}`;
     const arrow = flowArrow(w.status);
     const speed = paint('muted', speedLabel(observedSpeed(w.observation)));
-    if (!['working', 'settling', 'starting'].includes(w.status)) return arrow ? `${paint(color, arrow)} ${paint(color, label)} ${speed}` : `${paint(color, label)} ${speed}`;
+    // A waiting worker names what it is waiting on, so a question stands out from a review.
+    const waitingOn = ['question', 'review', 'blocked'].includes(w.status) ? ` ${paint(color, w.status)}` : '';
+    if (!['working', 'settling', 'starting'].includes(w.status)) return arrow ? `${paint(color, arrow)} ${paint(color, label)}${waitingOn} ${speed}` : `${paint(color, label)}${waitingOn} ${speed}`;
     const age = activityAge(w, now);
     const pulsing = age <= PULSE_MAX_AGE_MS;
     const dotColor = pulsing && Math.floor(now / 2000) % 2 === 1 ? 'dim' : color;
@@ -155,13 +157,26 @@ export function indicator(summary, mainBusy, theme, now = Date.now()) {
     return `${token} ${badges.join(' ')}`;
   });
   let progress = '';
-  const tasked = summary.workers.find(w => Array.isArray(w.task?.stepList) && w.task.stepList.length > 0);
+  const tasked = planWorker(summary);
   if (tasked?.task?.stepList?.length) {
     const list = tasked.task.stepList;
     const bar = progressBar(list.filter(step => step.state === 'done').length, list.length);
-    progress = ` ${paint('success', '■'.repeat(bar.filled))}${paint('dim', '□'.repeat(bar.empty))} ${paint('muted', bar.label)}`;
+    const owner = summary.workers.length > 1 ? `${paint('muted', workerLabel(summary, tasked.id))} ` : '';
+    progress = ` ${owner}${paint('success', '■'.repeat(bar.filled))}${paint('dim', '□'.repeat(bar.empty))} ${paint('muted', bar.label)}`;
   }
   return `${[main, ...workers].join(' ')}${progress}`;
+}
+/** Stable widget label for a configured worker: `W` alone, otherwise `W1`, `W2`…
+ * @param {PairSummary} summary @param {string} id @returns {string} */
+export function workerLabel(summary, id) {
+  return summary.workers.length === 1 ? 'W' : `W${summary.workers.findIndex(w => w.id === id) + 1}`;
+}
+/** The worker whose plan the widget shows: one that is working or waiting on Main
+ * first, so a second worker's active plan is never hidden behind an idle first one.
+ * @param {PairSummary} summary @returns {PairSummary['workers'][number] | undefined} */
+export function planWorker(summary) {
+  const planned = summary.workers.filter(w => Array.isArray(w.task?.stepList) && w.task.stepList.length > 0);
+  return planned.find(w => ['working', 'settling', 'starting', 'question', 'review', 'blocked'].includes(w.status)) || planned[0];
 }
 /** Compact plan progress: one bar cell per step up to maxCells, then proportional.
  * Filled cells are approved steps only; the step under review/hold stays empty.
@@ -203,7 +218,7 @@ function stepPrefix(state) { return state === 'done' ? `complete ${stepSymbol(st
  * @param {number} [maxSteps]
  * @returns {string[]} */
 export function taskListLines(summary, theme, maxSteps = 7) {
-  const worker = summary.workers.find(w => Array.isArray(w.task?.stepList) && w.task.stepList.length > 0);
+  const worker = planWorker(summary);
   if (!worker?.task?.stepList?.length) return [];
   /** @param {IndicatorColor} color @param {string} text @returns {string} */
   const paint = (color, text) => (theme ? theme.fg(color, text) : text);
@@ -245,7 +260,7 @@ function cacheReadLine(summary, theme) {
 function waitingLine(summary, theme) {
   const waiting = summary.waitingReports || 0;
   if (!waiting) return null;
-  const text = `◐ ${waiting} pair report${waiting === 1 ? '' : 's'} waiting — pair_yield to review · pair_inspect acknowledges · /pair inbox`;
+  const text = `◐ ${waiting} pair report${waiting === 1 ? '' : 's'} waiting · Main: pair_yield · you: /pair`;
   return theme ? theme.fg('warning', text) : text;
 }
 /** Status-bar component: activity, waiting reports, last-request cache
@@ -302,32 +317,214 @@ export function statusText(summary, native = null, now = Date.now()) {
   lines.push('● ready  ◉ working  ◐ waiting  ○ retained/stopped  ! attention', 'widget colors: main working accent · worker working success · waiting warning · attention error · idle muted', 'widget badges: retained pair reports show a waiting line until explicitly offered', 'widget arrows: → plan/task heading to worker · ← summary/question back with Main', 'cache read (last): M Main · W/W1/W2 configured workers in order · cacheRead/(input+cacheRead+cacheWrite) for the last measured request, not task totals · zero-input events do not replace a measured sample · unknown means no measurement', 'plan steps: complete ✔ done · ▶ in progress · ◐ in review · ⏸ held · ○ not started · ■/□ progress (approved/total)', 'worker liveness: heartbeat blink stops after 2m silence · stale marked after 5m without a visible timer', 'widget badges: current tool while running · avg streaming throughput (weighted output tokens/second, pre-response request latency excluded, unavailable is explicit) · task cost · ctx pressure above 75% · one stale toast per silent episode', '', summary.cacheNote, '', `Local state and evidence: ${summary.directory}`);
   return lines.map(s => cleanText(s, 20000)).join('\n');
 }
-/** @param {UIContext} ctx @param {string} title @param {string} text @returns {Promise<void>} */
-export async function textView(ctx, title, text) {
+/** @typedef {{paint?: (line: string) => IndicatorColor | null, section?: RegExp}} TextViewOptions */
+/** @typedef {{matches(data: string, id: string): boolean}} KeyMatcher */
+/** Scrollable read-only text body shared by status, transcript, report and diff
+ * views. Keys go through the keybinding manager first (so remapped keys work),
+ * with raw sequences and vi-style letters as fallbacks.
+ * @param {string[]} raw
+ * @param {{title: string, theme?: {fg(color: IndicatorColor, text: string): string} | null, keys?: KeyMatcher | null, rows?: () => number | undefined, close: () => void} & TextViewOptions} options
+ * @returns {{render(width: number): string[], handleInput(data: string): void}} */
+export function createTextView(raw, { title, theme, keys, rows = () => undefined, close, paint, section }) {
+  let offset = 0, width = 80, message = '', lastQuery = '';
+  // Raw line of the last search/section jump. A jump near the end is clamped to the
+  // last page, so the top visible line is not where the next search should resume.
+  /** @type {number | null} */ let cursor = null;
+  /** @type {string | null} */ let query = null;
+  /** @type {{width: number, lines: string[], starts: number[]}} */ let cache = { width: -1, lines: [], starts: [] };
+  /** @param {IndicatorColor} color @param {string} text */
+  const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  const layout = () => {
+    if (cache.width === width) return cache;
+    /** @type {string[]} */ const lines = []; /** @type {number[]} */ const starts = [];
+    const span = Math.max(20, width - 2);
+    for (const line of raw) {
+      starts.push(lines.length);
+      const color = paint?.(line);
+      // wrapTextWithAnsi measures display columns, so wide characters never overflow.
+      const wrapped = line ? wrapTextWithAnsi(color ? fg(color, line) : line, span) : [];
+      lines.push(...(wrapped.length ? wrapped : ['']));
+    }
+    return cache = { width, lines, starts };
+  };
+  const page = () => Math.max(5, (rows() || 28) - 8);
+  const maxOffset = () => Math.max(0, layout().lines.length - page());
+  const currentLine = () => { if (cursor !== null) return cursor; const { starts } = layout(); let i = 0; while (i + 1 < starts.length && starts[i + 1] <= offset) i++; return i; };
+  /** Jump to the next raw line matching `test`, scanning in `step` direction and wrapping once.
+   * @param {(line: string) => boolean} test @param {1 | -1} step @param {boolean} inclusive @param {string} missing */
+  const jump = (test, step, inclusive, missing) => {
+    const from = currentLine(), n = raw.length;
+    for (let k = inclusive ? 0 : 1; k <= n; k++) {
+      const i = ((from + step * k) % n + n) % n;
+      if (test(raw[i])) { cursor = i; offset = Math.min(maxOffset(), layout().starts[i]); message = (step > 0 ? i < from : i > from) ? 'search wrapped' : ''; return; }
+    }
+    message = missing;
+  };
+  /** @param {1 | -1} step @param {boolean} inclusive */
+  const search = (step, inclusive) => {
+    if (!lastQuery) return;
+    const needle = lastQuery.toLowerCase();
+    jump(line => line.toLowerCase().includes(needle), step, inclusive, `not found: ${lastQuery}`);
+  };
+  /** @param {string} data @param {string} id @param {...string} fallbacks */
+  const is = (data, id, ...fallbacks) => (keys?.matches(data, id) ?? false) || fallbacks.includes(data);
+  return {
+    render(w) {
+      width = w;
+      const { lines } = layout(); offset = Math.min(offset, maxOffset());
+      const hints = ['↑/↓ scroll', 'PgUp/PgDn', 'g/G top/bottom', '/ search', ...(lastQuery ? ['n/N next/prev'] : []), ...(section ? ['[/] prev/next file'] : []), 'Esc close'];
+      const position = `${lines.length ? offset + 1 : 0}–${Math.min(offset + page(), lines.length)} / ${lines.length}`;
+      const footer = query !== null ? fg('accent', `/${query}▏  Enter search · Esc cancel`) : fg('dim', message ? `${position} · ${message}` : position);
+      return [fg('accent', cleanText(title)), fg('dim', hints.join(' · ')), '', ...lines.slice(offset, offset + page()), '', footer].map(line => truncateToWidth(line, w));
+    },
+    handleInput(data) {
+      if (query !== null) {
+        if (is(data, 'tui.select.cancel', '\x1b')) query = null;
+        else if (is(data, 'tui.select.confirm', '\r', '\n')) { lastQuery = query; query = null; search(1, true); }
+        else if (data === '\x7f' || data === '\b') query = query.slice(0, -1);
+        else if (!/[\x00-\x1f\x7f]/.test(data)) query += data;
+        return;
+      }
+      message = '';
+      if (!['n', 'N', ']', '['].includes(data)) cursor = null;
+      if (is(data, 'tui.select.cancel', '\x1b', 'q') || is(data, 'tui.select.confirm', '\r', '\n')) close();
+      else if (is(data, 'tui.select.up', '\x1b[A', 'k')) offset = Math.max(0, offset - 1);
+      else if (is(data, 'tui.select.down', '\x1b[B', 'j')) offset = Math.min(maxOffset(), offset + 1);
+      else if (is(data, 'tui.select.pageUp', '\x1b[5~', 'b')) offset = Math.max(0, offset - page());
+      else if (is(data, 'tui.select.pageDown', '\x1b[6~', ' ')) offset = Math.min(maxOffset(), offset + page());
+      else if (data === 'g' || data === '\x1b[H') offset = 0;
+      else if (data === 'G' || data === '\x1b[F') offset = maxOffset();
+      else if (data === '/') query = '';
+      else if (data === 'n') search(1, false);
+      else if (data === 'N') search(-1, false);
+      else if (section && (data === ']' || data === '[')) jump(line => section.test(line), data === ']' ? 1 : -1, false, 'no other file');
+    },
+  };
+}
+/** @param {UIContext} ctx @param {string} title @param {string} text @param {TextViewOptions} [options] @returns {Promise<void>} */
+export async function textView(ctx, title, text, options = {}) {
   if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') { ctx.ui.notify(`${title}\n${cleanText(text, 10000)}`, 'info'); return; }
   const raw = cleanText(text, 100000).split('\n');
-  await ctx.ui.custom((_tui, _theme, _keys, done) => {
-    let offset = 0, width = 80;
-    const wrapped = () => raw.flatMap(line => {
-      const lines = []; const chars = Array.from(line); const span = Math.max(20, width - 4);
-      if (!chars.length) return [''];
-      for (let i = 0; i < chars.length; i += span) lines.push(chars.slice(i, i + span).join(''));
-      return lines;
-    });
+  await ctx.ui.custom((tui, theme, keys, done) => {
+    const view = createTextView(raw, { ...options, title, theme, keys, rows: () => tui.terminal?.rows, close: () => done(undefined) });
     /** @type {import('@earendil-works/pi-tui').Component} */
-    const component = {
-      render(w) { width = w; const all = wrapped(); return [cleanText(title), '↑/↓ scroll · PgUp/PgDn · Esc/Enter close', '', ...all.slice(offset, offset + 20), '', `${offset + 1}–${Math.min(offset + 20, all.length)} / ${all.length}`]; },
-      handleInput(data) {
-        if (['\x1b', '\r', '\n', 'q'].includes(data)) return done(undefined);
-        if (data === '\x1b[A' || data === 'k') offset = Math.max(0, offset - 1);
-        if (data === '\x1b[B' || data === 'j') offset = Math.min(Math.max(0, wrapped().length - 1), offset + 1);
-        if (data === '\x1b[5~') offset = Math.max(0, offset - 20);
-        if (data === '\x1b[6~') offset = Math.min(Math.max(0, wrapped().length - 1), offset + 20);
-        _tui.requestRender?.();
-      }, invalidate() {}
-    };
+    const component = { render: width => view.render(width), handleInput(data) { view.handleInput(data); tui.requestRender?.(); }, invalidate() {} };
     return component;
   }, { overlay: true });
+}
+/** Rewrite a stored checkpoint patch for people: real file names instead of Pair's
+ * blob-store paths, and added files shown as `+` lines instead of only a hash.
+ * Main's pair_inspect output is unchanged; this is display only.
+ * @param {string} patch @param {Map<string, string | null>} [added] @returns {string} */
+export function humanPatch(patch, added = new Map()) {
+  /** @type {string[]} */ const out = [];
+  /** @type {string | null} */ let file = null, skip = false;
+  for (const line of patch.split('\n')) {
+    const header = /^### ("(?:[^"\\]|\\.)*") \((\w+) → (\w+)\)$/.exec(line);
+    if (header) {
+      file = /** @type {string} */ (JSON.parse(header[1]));
+      if (out.length && out.at(-1) !== '') out.push('');
+      out.push(`### ${file} (${header[2]} → ${header[3]})`);
+      skip = header[2] === 'absent' && header[3] === 'file' && added.has(file);
+      if (skip) {
+        const content = added.get(file);
+        if (content == null) out.push('(binary or unreadable file; pair_inspect it for details)');
+        else out.push(`--- /dev/null`, `+++ b/${file}`, ...content.replace(/\n$/, '').split('\n').map(text => `+${text}`));
+      }
+      continue;
+    }
+    if (skip || line.startsWith('diff --git ') || line.startsWith('index ')) continue;
+    if (file !== null && line.startsWith('--- ') && !line.startsWith('--- /dev/null')) out.push(`--- a/${file}`);
+    else if (file !== null && line.startsWith('+++ ') && !line.startsWith('+++ /dev/null')) out.push(`+++ b/${file}`);
+    else out.push(line);
+  }
+  while (out.length && out[0] === '') out.shift();
+  return out.join('\n');
+}
+/** Unified-diff line coloring for the checkpoint viewer.
+ * @param {string} line @returns {IndicatorColor | null} */
+export function diffLineColor(line) {
+  if (line.startsWith('### ') || line.startsWith('diff --git ')) return 'warning';
+  if (line.startsWith('+++ ') || line.startsWith('--- ') || line.startsWith('index ')) return 'muted';
+  if (line.startsWith('@@')) return 'accent';
+  if (line.startsWith('+')) return 'success';
+  if (line.startsWith('-')) return 'error';
+  return null;
+}
+/** @typedef {NonNullable<ReturnType<import('./controller.js').PairController['reportView']>>} ReportView */
+const KIND_LABEL = /** @type {const} */ ({ question: 'Question', checkpoint: 'Checkpoint', blocked: 'Blocker', final_review: 'Final review' });
+/** @param {string} kind @returns {string} */
+export function kindLabel(kind) { return Reflect.get(KIND_LABEL, kind) || kind; }
+/** Human-readable card for one retained report. Controller-captured evidence
+ * (changed paths, configured checks) is kept apart from the worker's own claims.
+ * @param {ReportView} view @returns {string[]} */
+export function reportCardLines(view) {
+  const lines = [`${kindLabel(view.kind)} from ${view.workerId} · step ${view.step}/${view.steps} · ${view.reportId}`, `Task: ${view.objective}`, ''];
+  lines.push('Summary', ...view.summary.split('\n').map(line => `  ${line}`), '');
+  if (view.question) lines.push('Question for Main', ...view.question.split('\n').map(line => `  ${line}`), '');
+  lines.push(`Changed files (captured by Pair): ${view.changed.length}`, ...view.changed.slice(0, 40).map(file => `  ${file}`));
+  if (view.changed.length > 40) lines.push(`  + ${view.changed.length - 40} more — see the diff`);
+  lines.push('', 'Verification (run by Pair)');
+  if (!view.verification.length) lines.push('  none configured — no independent checks ran');
+  for (const v of view.verification) lines.push(`  ${v.passed ? '✔' : '✖'} ${v.name}${v.passed ? '' : v.timedOut ? ' (timed out)' : ` (exit ${v.code ?? 'unknown'})`}`);
+  if (view.workerChecks.length) {
+    lines.push('', 'Worker-reported checks (claims, not verified)');
+    for (const c of view.workerChecks) lines.push(`  ${c.result === 'pass' ? '✔' : c.result === 'fail' ? '✖' : '○'} ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
+  }
+  if (view.decisions.length) lines.push('', 'Worker decisions', ...view.decisions.map(d => `  • ${d}`));
+  lines.push('', `Checkpoint ${view.checkpointHash.slice(0, 12)}${view.patchTruncated ? ' · patch truncated' : ''} · ${view.acknowledged ? 'read by Main' : 'not yet read by Main'}`);
+  return lines;
+}
+/** @param {string} line @returns {IndicatorColor | null} */
+export function reportLineColor(line) {
+  if (/^ {2}✔/.test(line)) return 'success';
+  if (/^ {2}✖/.test(line)) return 'error';
+  if (/^[A-Z]/.test(line) && !line.startsWith('Task:')) return 'accent';
+  return null;
+}
+/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'close', workerId?: string}} DashboardItem */
+/** One-line dashboard header: each worker's state, step and cost, then waiting reports.
+ * @param {PairSummary} summary @returns {string} */
+export function dashboardHeader(summary) {
+  const workers = summary.workers.map(w => {
+    const parts = [`${workerLabel(summary, w.id)} ${symbol(w.status)} ${w.status.replace('_', ' ')}`];
+    if (w.task && !['completed', 'cancelled'].includes(w.task.status)) parts.push(`step ${w.task.step}/${w.task.steps}`);
+    if (typeof w.task?.reportedCost === 'number' && w.task.reportedCost > 0) parts.push(`$${w.task.reportedCost.toFixed(2)}`);
+    return parts.join(' · ');
+  });
+  const waiting = summary.waitingReports || 0;
+  return [...workers, ...(waiting ? [`${waiting} report${waiting === 1 ? '' : 's'} waiting`] : [])].join('  |  ');
+}
+/** Dashboard entries for the current state: what needs a human first, then only
+ * the lifecycle actions that apply to each worker right now.
+ * @param {PairSummary} summary @returns {DashboardItem[]} */
+export function dashboardItems(summary) {
+  /** @type {DashboardItem[]} */ const items = [];
+  const many = summary.workers.length > 1;
+  /** @param {string} text @param {string} id */
+  const on = (text, id) => (many ? `${text} (${id})` : text);
+  for (const w of summary.workers) {
+    if (w.task?.reportId && ['question', 'review', 'blocked'].includes(w.task.status)) {
+      items.push({ label: on(`Review ${w.task.status === 'review' ? 'checkpoint' : w.task.status}`, w.id), action: 'report', workerId: w.id });
+      items.push({ label: on('View checkpoint diff', w.id), action: 'diff', workerId: w.id });
+    }
+  }
+  const waiting = summary.waitingReports || 0;
+  if (waiting) items.push({ label: `Deliver ${waiting} waiting report${waiting === 1 ? '' : 's'} to Main`, action: 'yield' });
+  for (const w of summary.workers) {
+    const task = w.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
+    if (task?.status === 'running') items.push({ label: on('Pause worker', w.id), action: 'pause', workerId: w.id });
+    if (task && ['paused', 'interrupted'].includes(task.status)) items.push({ label: on('Resume worker', w.id), action: 'resume', workerId: w.id });
+    if (task) items.push({ label: on('Cancel task', w.id), action: 'cancel', workerId: w.id });
+    if (w.sessionId) items.push({ label: on('Worker transcript', w.id), action: 'transcript', workerId: w.id });
+    if (w.pid) items.push({ label: on('Stop worker', w.id), action: 'stop', workerId: w.id });
+    else items.push({ label: on('Start worker', w.id), action: 'start', workerId: w.id });
+    // Restart rereads saved settings first and keeps any retained conversation, so it applies in every state.
+    items.push({ label: on('Restart worker', w.id), action: 'restart', workerId: w.id });
+  }
+  items.push({ label: 'Status', action: 'status' }, { label: 'Inbox', action: 'inbox' }, { label: 'Settings', action: 'settings' },
+    { label: 'Reload configuration', action: 'reload' }, { label: 'Doctor', action: 'doctor' }, { label: 'Close', action: 'close' });
+  return items;
 }
 /** Only an actual offered choice can enter a literal config field.
  * @template {string} Value

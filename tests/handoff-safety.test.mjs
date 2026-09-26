@@ -359,6 +359,19 @@ test('raw malformed work-order JSON is omitted conservatively without weakening 
   assert.equal(packet.taskId, 'scope-task', 'the authoritative packet still restores');
 }, { orderRaw: '{not valid json' }));
 
+test('an unreadable authority aborts the turn instead of letting a paid request run', () => workerFixture(async f => {
+  const original = await fs.readFile(path.join(f.dir, 'authority.json'), 'utf8');
+  let aborts = 0; f.ctx.abort = () => { aborts++; };
+  await fs.writeFile(path.join(f.dir, 'authority.json'), '{"version":1,"ownerSession":"someone-else"}');
+  await assert.rejects(f.events.get('before_agent_start')({ systemPrompt: 'x' }, f.ctx));
+  assert.equal(aborts, 1, 'before_agent_start aborts: Pi only logs a throwing handler');
+  await assert.rejects(f.events.get('turn_start')({}, f.ctx));
+  assert.equal(aborts, 2, 'turn_start aborts continuations too');
+  await fs.writeFile(path.join(f.dir, 'authority.json'), original);
+  await f.events.get('turn_start')({}, f.ctx);
+  assert.equal(aborts, 2, 'a valid running lease is not aborted');
+}));
+
 test('a decision resting on a previous conversation branch is stale until the current context re-inspects', () => mainFixture(async f => {
   const { notice, reportId, taskId } = await injectReview(f.controller, f.cwd, { stepComplete: true });
   await f.controller.inspect('worker', reportId);

@@ -68,7 +68,7 @@ test('idle, review and not-started workers remain ordered and cumulative usage i
   assert.equal(cacheRow(s), 'Cache read (last): W1 0.0% · W2 100.0%');
   const lines = indicatorWidget(s, false, plain, now).render(1000);
   assert.equal(lines.length, 2, 'known cache shares remain visible without a plan');
-  assert.match(lines[0], /M● W1● avg — tok\/s ← W2◐ avg — tok\/s W3○ avg — tok\/s/);
+  assert.match(lines[0], /M● W1● avg — tok\/s ← W2◐ review avg — tok\/s W3○ avg — tok\/s/, 'a waiting worker names what it waits on');
   const text = statusText(s, null, now);
   assert.ok(text.indexOf('z-last-alphabetically:') < text.indexOf('a-first-alphabetically:'));
   assert.ok(text.includes('new: not_started'));

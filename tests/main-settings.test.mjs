@@ -96,7 +96,7 @@ test('migration requires explicit scoped consent and preserves backup; indicator
 
 for (const command of ['start worker', '']) {
   test(`fresh startup preflight via ${command || 'dashboard'} lists all blockers once without constructing a runtime`, () => fixture(async f => {
-    if (!command) f.actions.push('Start default worker');
+    if (!command) f.actions.push('Start worker');
     await f.command(command);
     assert.equal(f.actions.length, 0);
     assert.equal(f.spawns(), 0); assert.equal(f.controller.handles.size, 0);
@@ -182,7 +182,7 @@ for (const dashboard of [false, true]) test(`worker restart ${dashboard ? 'dashb
     if (fail) throw Error('Worker model unavailable');
     return { task: { status: 'interrupted' } };
   };
-  const restart = async () => { if (dashboard) f.actions.push('Restart default worker'); await f.command(dashboard ? '' : 'restart'); };
+  const restart = async () => { if (dashboard) f.actions.push('Restart worker'); await f.command(dashboard ? '' : 'restart'); };
   await assert.doesNotReject(restart());
   assert.equal(f.notices.at(-1).level, 'error'); assert.match(f.notices.at(-1).message, /Worker model unavailable/);
   assert.equal(f.controller.closing, false); assert.equal(f.ctx.model, model); assert.equal(f.controller.state.ownerEpoch, epoch);

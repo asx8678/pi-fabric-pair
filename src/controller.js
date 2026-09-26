@@ -453,7 +453,7 @@ export class PairController extends EventEmitter {
       await this.prepareBase(work); this.requireWork(work);
       await this.activate(work, this.workMessage(work.task, true));
     } catch (error) { await this.activationFailed(work, error); throw error; }
-    return { taskId: work.task.id, workerId: work.id, sessionId: work.record.sessionId, status: work.task.status, message: 'Assigned asynchronously. Do not wait or poll; a report will be delivered to this Main conversation.' };
+    return { taskId: work.task.id, workerId: work.id, sessionId: work.record.sessionId, status: work.task.status, message: 'Assigned asynchronously. Do not wait or poll; the report waits in Pair\'s inbox until you call pair_yield.' };
   }
   /** A paused pre-dispatch receipt may not yet have a baseline; capture before its first grant. @param {Work} work */
   async prepareBase(work) {
@@ -664,10 +664,12 @@ export class PairController extends EventEmitter {
         const incoming = validateReportEnvelope(await readJSON(file));
         if (!current()) return changed;
         assert(name === `${incoming.reportId}.json`, 'Report filename/identity mismatch');
+        const staleBefore = r.staleReports;
         const accepted = await this.acceptReport(id, incoming, control); control = accepted.control;
         if (!current()) return changed;
         retainedReport = true;
-        if (accepted.disposition === 'unproven') { changed = true; continue; }
+        // An unproven candidate stays in the inbox; only its first sighting is recorded.
+        if (accepted.disposition === 'unproven') { changed = r.staleReports !== staleBefore || changed; continue; }
         // Retain the first archived original even if publication races a retry.
         try { await fs.link(file, archive); }
         catch (error) {
@@ -694,9 +696,12 @@ export class PairController extends EventEmitter {
       if (!current()) return changed;
       if (raw !== undefined) {
         const latch = validateLatch(raw); retainedReport = true;
-        control = (await this.acceptReport(id, latch.report, control)).control;
+        // The worker never deletes its latch, so it is re-read on every scan. Only
+        // an adoption or a newly recorded stale entry changes durable state.
+        const staleBefore = r.staleReports;
+        const accepted = await this.acceptReport(id, latch.report, control); control = accepted.control;
         if (!current()) return changed;
-        changed = true;
+        if (accepted.disposition === 'accepted' || r.staleReports !== staleBefore) changed = true;
       }
     } catch (error) {
       if (current()) { const held = await this.interrupt(id, `Invalid retained worker latch/report: ${briefError(error)}`); jobs.push(() => this.contain(held, 'Invalid retained report', true)); }
@@ -1114,9 +1119,13 @@ export class PairController extends EventEmitter {
     if (input.action === 'approve') {
       assert(t.status === 'review' && report.inspectedAt, 'Inspect the current review checkpoint before approval');
       assert(input.checkpointHash === report.checkpoint.checkpointHash, 'Approval hash does not match the report');
+    }
+    if (input.action !== 'cancel') {
+      // Every continuation is later guarded against this checkpoint. Reject drift
+      // BEFORE the decision is recorded, so the report stays open and decidable.
       const live = await this.evidence.capture(control.record.repoRoot); check();
-      assert(live.hash === report.checkpoint.checkpointHash, 'STALE_CHECKPOINT: workspace changed after the report; request a revision');
-      if (t.verification.requirePassing) assert(report.checkpoint.verification.every(v => v.passed), 'Configured verification failed');
+      assert(live.hash === report.checkpoint.checkpointHash, 'STALE_CHECKPOINT: the workspace changed after this report; restore the reported state, or cancel the task and dispatch again');
+      if (input.action === 'approve' && t.verification.requirePassing) assert(report.checkpoint.verification.every(v => v.passed), 'Configured verification failed');
     }
     const next = await this.transaction(async () => {
       check(); const r = control.record;
@@ -1205,6 +1214,38 @@ export class PairController extends EventEmitter {
       await this.persist();
     });
     return evidence;
+  }
+  /** Human read-only view of a worker's current report. Unlike inspect(), it never
+   * marks the report inspected, acknowledges its notice or pins a branch, so a
+   * human glance can never stand in for Main's pair_inspect before approval.
+   * @param {string} id */
+  reportView(id) {
+    const t = this.record(id).task, report = t?.report;
+    if (!t || !report) return null;
+    const p = report.payload, notice = this.state.notices[report.reportId];
+    return { workerId: id, taskId: t.id, objective: t.objective, taskStatus: t.status, step: t.stepIndex + 1, steps: t.steps.length,
+      reportId: report.reportId, kind: p.kind, summary: p.summary, question: p.question ?? null, decisions: p.decisions ?? [], workerChecks: p.checks ?? [],
+      checkpointHash: report.checkpoint.checkpointHash, changed: report.checkpoint.changed, patchTruncated: report.checkpoint.patchTruncated,
+      verification: report.checkpoint.verification.map(v => ({ name: v.name, passed: v.passed, timedOut: v.timedOut, code: v.code })),
+      acknowledged: notice?.observedAt !== undefined };
+  }
+  /** Human read-only checkpoint patch, with the same non-acknowledging contract as reportView().
+   * @param {string} id */
+  async reviewPatch(id) {
+    const report = this.record(id).task?.report;
+    assert(report, 'This worker has no current checkpoint to show');
+    const evidence = await this.evidence.inspect(report.checkpoint.path);
+    assert('patch' in evidence, 'Checkpoint summary is unavailable');
+    // The stored patch lists added files by hash only; read their authenticated
+    // contents so a human sees new code, not just its digest.
+    /** @type {Map<string, string | null>} */ const added = new Map();
+    for (const match of evidence.patch.matchAll(/^### ("(?:[^"\\]|\\.)*") \(absent → file\)$/gm)) {
+      if (added.size >= 50) break;
+      const file = JSON.parse(match[1]);
+      const read = await this.evidence.inspect(report.checkpoint.path, file);
+      added.set(file, 'content' in read && typeof read.content === 'string' ? read.content : null);
+    }
+    return { reportId: report.reportId, checkpointHash: report.checkpoint.checkpointHash, changed: report.checkpoint.changed, patch: evidence.patch, added, patchTruncated: report.checkpoint.patchTruncated };
   }
   /** Durable control fence; no mutable lifecycle flags. @param {string} id @returns {Control} */
   control(id) { const record = this.record(id); return { id, record, runtime: this.handles.get(id), intent: this.intent(id), generation: record.workerGeneration }; }

@@ -93,18 +93,21 @@ Now ask Main:
 > Use Pair's worker to make one small change. Inspect its diff and verification
 > results, and ask me before approving it.
 
-Reports arrive automatically. Review gates govern Main's decisions; asking the
-human before each approval requires that explicit instruction.
+Reports wait in Pair's inbox until Main calls `pair_yield`. Review gates govern
+Main's decisions; asking the human before each approval requires that explicit
+instruction.
 
 ## Everyday controls
 
 | Command | Purpose |
 | --- | --- |
-| `/pair` | Open the dashboard. |
+| `/pair` | Open the dashboard; it lists what needs you first. |
 | `/pair settings` | Choose the worker, review policy, and limits. |
 | `/pair status` | See activity, progress, and observed cache usage. |
 | `/pair reload` | Reload saved Pair settings while Main stays open. |
 | `/pair restart worker` | Reload settings and restart only the worker, keeping its conversation. |
+| `/pair report` | Read the current report as a card (read-only; Main still inspects). |
+| `/pair diff` | Scroll the checkpoint diff; `[`/`]` jump between files, `/` searches. |
 | `/pair inbox` | Inspect retained reports. |
 | `/pair yield` | Explicitly deliver retained, unacknowledged reports to Main. |
 | `/pair cancel worker` | Cancel the task and keep the conversation. |

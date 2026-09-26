@@ -317,18 +317,24 @@ export function registerWorker(pi, env = process.env) {
       }, 2000); parentTimer.unref?.();
     }
   });
+  // Pi only logs a throwing handler and continues the turn, so every failure here
+  // must abort explicitly rather than rely on the throw to stop a paid request.
   pi.on('before_agent_start', async (event, ctx) => {
-    ctxRef = ctx; await load();
-    if (stopped) ctx.abort();
-    assert(!waiting() && authority && authority.task, 'PAIR_WAIT: the worker is retained but has no active implementation lease');
-    assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
+    ctxRef = ctx;
+    try {
+      await load();
+      if (stopped) ctx.abort();
+      assert(!waiting() && authority && authority.task, 'PAIR_WAIT: the worker is retained but has no active implementation lease');
+      assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
+    } catch (error) { ctx.abort(); throw error; }
     return { systemPrompt: `${event.systemPrompt}\n\n${WORKER_GUIDE}`, message: {
       customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false,
       details: { ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: authority.task.attemptId, planRevision: authority.task.planRevision }
     } };
   });
   pi.on('turn_start', async (_event, ctx) => {
-    ctxRef = ctx; await load();
+    ctxRef = ctx;
+    try { await load(); } catch (error) { ctx.abort(); throw error; } // unreadable/invalid authority never runs a turn
     if (stopped || waiting() || !expectedModel(ctx)) ctx.abort(); // catches automatic/Fovea continuations too
     await telemetry(ctx);
   });

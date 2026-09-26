@@ -28,6 +28,8 @@ Commands with an optional worker ID use the first configured worker by default.
 | `/pair status` | Inspect task state, sessions, usage, and warming diagnostics. |
 | `/pair doctor` | Check configuration and extension registrations. |
 | `/pair transcript [worker]` | Read the recent worker conversation. |
+| `/pair report [worker]` | Show the current report as a card: summary, question, Pair-captured files and checks, then worker claims. Read-only: it never marks the report inspected for Main. |
+| `/pair diff [worker]` | Scroll the checkpoint diff with real file names and added-file contents. Keys: ↑/↓, PgUp/PgDn, `g`/`G`, `/` search, `n`/`N`, `[`/`]` previous/next file, Esc. Read-only, like `/pair report`. |
 | `/pair inbox` | Inspect unresolved reports and recovery delivery options. |
 | `/pair yield` | Explicitly deliver retained, unacknowledged reports to Main. |
 | `/pair pause [worker]` | Abort current work and hold the assignment. |

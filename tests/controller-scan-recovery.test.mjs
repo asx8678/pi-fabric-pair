@@ -7,6 +7,8 @@ import { execFileSync } from 'node:child_process';
 import { PairController } from '../src/controller.js';
 import { loadConfig } from '../src/config.js';
 import { digest, PROTOCOL } from '../src/util.js';
+import { validateLatch } from '../src/contracts.js';
+import { humanPatch } from '../src/ui.js';
 
 const ZERO_USAGE = { input: 0, cacheRead: 0, cacheWrite: 0, totalInput: 0, output: 0, reportedCost: 0, unknownCostRequests: 0, requests: 0, cacheRatio: null };
 
@@ -379,5 +381,85 @@ test('warming publication failure contains the owned generation instead of leavi
     await assert.rejects(controller.updateConfig({ ...controller.config, cacheWarming: 'active' }));
     assert.equal(stops, 1); assert.equal(task.status, 'interrupted');
     assert.deepEqual({ limits: task.limits, startedAt: task.startedAt, turns: task.turns }, budget);
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+/** Stub the continuation path so a decision can reach activation without a real worker. */
+function stubContinuation(runtime, record) {
+  let serial = 0; const prompts = [];
+  Object.assign(runtime, {
+    reserveActivation: identity => Object.freeze({ ...identity, serial: ++serial }), activationCurrent: () => true,
+    ensureStarted: async () => ({ probe: record.probe || null, state: { sessionId: record.sessionId, sessionFile: record.sessionFile } }),
+    prepareActivation: async () => ({ probe: record.probe || null }), activate: async (...args) => { prompts.push(args); },
+  });
+  return prompts;
+}
+
+test('an answer after workspace drift is rejected before it is recorded; the question stays decidable', async () => {
+  const { controller, repo, task, record, runtime, workerDir, base } = await fixture();
+  try {
+    const report = envelope({ controller, task, record, runtime, kind: 'question', reportId: 'report-drift-q' });
+    report.payload.question = 'Which name?'; report.payloadHash = digest(report.payload);
+    await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
+    await runScan(controller);
+    assert.equal(task.status, 'question');
+    const prompts = stubContinuation(runtime, record);
+    const drift = path.join(repo, 'human-note.txt');
+    await fs.writeFile(drift, 'edited after the question\n');
+    const answer = { workerId: 'worker', taskId: task.id, reportId: report.reportId, action: 'answer', feedback: 'Use foo' };
+    await assert.rejects(controller.decide(answer), /STALE_CHECKPOINT: the workspace changed after this report/);
+    assert.equal(task.decisions[report.reportId], undefined, 'a rejected decision is not recorded');
+    assert.equal(task.status, 'question', 'the question stays open');
+    assert.notEqual(record.status, 'error', 'the worker is not contained');
+    assert.notEqual(controller.state.notices[report.reportId].status, 'resolved');
+    assert.equal(prompts.length, 0);
+    await assert.rejects(controller.decide({ ...answer, action: 'revise' }), /STALE_CHECKPOINT/, 'revise is guarded the same way');
+    assert.equal(task.revisions, 0, 'a rejected revision does not consume the revision budget');
+    await fs.rm(drift);
+    const result = await controller.decide(answer);
+    assert.equal(result.duplicate, undefined, 'restoring the reported state makes the same answer admissible');
+    assert.equal(task.decisions[report.reportId].action, 'answer');
+    assert.equal(prompts.length, 1, 'the answer reaches the worker');
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('an unchanged retained latch does not rewrite state on every scan', async () => {
+  const { controller, task, record, runtime, workerDir, base } = await fixture();
+  try {
+    const report = envelope({ controller, task, record, runtime });
+    await fs.writeFile(path.join(workerDir, 'latch.json'), JSON.stringify(validateLatch({ ownerEpoch: report.ownerEpoch, workerGeneration: report.workerGeneration, leaseId: report.leaseId, attemptId: report.attemptId, report })));
+    await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
+    await runScan(controller);
+    assert.equal(task.status, 'review');
+    let persists = 0, changes = 0;
+    const persist = controller.persist.bind(controller);
+    controller.persist = async (...args) => { persists++; return persist(...args); };
+    controller.on('change', () => changes++);
+    for (let i = 0; i < 3; i++) await runScan(controller);
+    assert.equal(persists, 0, 'a duplicate latch changes no durable state');
+    assert.equal(changes, 0);
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('a human report or diff view never counts as Main inspection', async () => {
+  const { controller, repo, task, record, runtime, workerDir, base } = await fixture();
+  try {
+    await fs.writeFile(path.join(repo, 'feature.txt'), 'new line\n');
+    const report = envelope({ controller, task, record, runtime });
+    await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
+    await runScan(controller);
+    assert.equal(task.status, 'review');
+    const view = controller.reportView('worker');
+    assert.equal(view.reportId, report.reportId); assert.equal(view.kind, 'final_review');
+    assert.deepEqual(view.changed, ['feature.txt']); assert.equal(view.acknowledged, false);
+    const diff = await controller.reviewPatch('worker');
+    assert.match(diff.patch, /### "feature.txt" \(absent → file\)/);
+    assert.equal(diff.added.get('feature.txt'), 'new line\n', 'added-file contents are read for the human view');
+    assert.match(humanPatch(diff.patch, diff.added), /### feature.txt \(absent → file\)\n--- \/dev\/null\n\+\+\+ b\/feature.txt\n\+new line/);
+    assert.equal(task.report.inspectedAt, undefined, 'viewing does not mark the checkpoint inspected');
+    assert.equal(controller.state.notices[report.reportId].observedAt, undefined, 'viewing does not acknowledge the notice');
+    assert.equal(controller.summary().waitingReports, 1, 'the report still waits for Main');
+    await assert.rejects(controller.decide({ workerId: 'worker', taskId: task.id, reportId: report.reportId, action: 'approve', checkpointHash: view.checkpointHash, feedback: 'ok' }),
+      /Inspect the current review checkpoint before approval/, 'Main still has to pair_inspect before approving');
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });

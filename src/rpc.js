@@ -51,7 +51,11 @@ export class PiRpc extends EventEmitter {
     /** @type {WriteItem[]} */ this.queue = [];
     /** @type {WriteItem | null} */ this.activeWrite = null;
     this.normalBytes = 0; this.controlBytes = 0;
-    this.stderr = ''; this.buffer = ''; this.decoder = new TextDecoder('utf-8', { fatal: true });
+    this.stderr = '';
+    // Incomplete-frame text is kept as parts so each byte is scanned once; after a
+    // bad frame, `discarding` skips to the next newline to resynchronize.
+    /** @type {string[]} */ this.parts = []; this.partBytes = 0; this.discarding = false;
+    this.decoder = new TextDecoder('utf-8', { fatal: true });
     this.closed = false; this.started = false; this.stopping = false;
     /** @type {Error | null} */ this.fault = null;
     /** @type {Promise<void> | null} */ this.stopPromise = null;
@@ -70,8 +74,8 @@ export class PiRpc extends EventEmitter {
       if (stdin === null || stdout === null || stderr === null) throw new Error('Worker stdio pipes missing');
       stdout.on('data', (/** @type {Buffer} */ chunk) => this.consume(chunk));
       stdout.on('end', () => {
-        try { this.buffer += this.decoder.decode(); } catch (e) { this.fail(errorOf(e)); }
-        if (this.buffer.length) this.fail(new RpcUncertainError('Worker stdout ended with an incomplete JSONL frame'));
+        try { if (this.decoder.decode()) this.discarding = true; } catch (e) { this.fail(errorOf(e)); }
+        if (this.parts.length || this.discarding) this.fail(new RpcUncertainError('Worker stdout ended with an incomplete JSONL frame'));
         else if (!this.stopping && !this.closed) this.fail(new RpcUncertainError('Worker stdout ended before confirmed exit'));
       });
       stdout.on('error', error => this.fail(error));
@@ -104,7 +108,7 @@ export class PiRpc extends EventEmitter {
   fail(error) {
     if (this.fault) return;
     this.fault = error;
-    this.rejectAll(error); this.rejectWrites(error); this.buffer = '';
+    this.rejectAll(error); this.rejectWrites(error);
     this.emit('fault', error);
     // Containment has its own finite deadlines. Failure retains the unclosed child.
     if (!this.closed) void this.abortAndStop('transport fault').catch(e => this.emit('diagnostic', { error: errorOf(e).message.slice(0, 2000) }));
@@ -121,20 +125,34 @@ export class PiRpc extends EventEmitter {
   /** @param {Buffer} chunk */
   consume(chunk) {
     if (this.closed) return;
+    // Read continuously even after a fault so control ACKs and close can arrive:
+    // a bad frame faults the transport but never discards the frames after it.
+    let text;
+    try { text = this.decoder.decode(chunk, { stream: true }); }
+    catch (e) { this.dropPartial(); this.fail(new RpcUncertainError(`Invalid worker protocol: ${errorOf(e).message}`)); return; }
+    let start = 0;
+    for (let at = text.indexOf('\n'); at >= 0; at = text.indexOf('\n', start)) {
+      const piece = text.slice(start, at); start = at + 1;
+      if (this.discarding) { this.discarding = false; continue; }
+      const line = this.parts.length ? this.parts.join('') + piece : piece;
+      this.parts = []; this.partBytes = 0;
+      this.frame(line.endsWith('\r') ? line.slice(0, -1) : line);
+    }
+    if (start >= text.length || this.discarding) return;
+    const rest = text.slice(start);
+    this.parts.push(rest); this.partBytes += Buffer.byteLength(rest);
+    if (this.partBytes > this.maxLineBytes) { this.dropPartial(); this.fail(new RpcUncertainError('Invalid worker protocol: Oversized incomplete RPC frame')); }
+  }
+  /** Drop the incomplete frame and skip input until the next frame boundary. */
+  dropPartial() { this.parts = []; this.partBytes = 0; this.discarding = true; }
+  /** @param {string} line */
+  frame(line) {
     try {
-      // Read continuously even after a fault so control ACKs and close can arrive.
-      const text = this.decoder.decode(chunk, { stream: true });
-      this.buffer += text;
-      for (;;) {
-        const at = this.buffer.indexOf('\n'); if (at < 0) break;
-        const line = this.buffer.slice(0, at).replace(/\r$/, ''); this.buffer = this.buffer.slice(at + 1);
-        if (!line.length || Buffer.byteLength(line) > this.maxLineBytes) throw new Error('Empty or oversized RPC frame');
-        /** @type {unknown} */ const value = JSON.parse(line);
-        if (!isRpcRecord(value) || typeof value.type !== 'string') throw new Error('Invalid RPC frame');
-        this.handle(value);
-      }
-      if (Buffer.byteLength(this.buffer) > this.maxLineBytes) throw new Error('Oversized incomplete RPC frame');
-    } catch (e) { this.buffer = ''; this.fail(new RpcUncertainError(`Invalid worker protocol: ${errorOf(e).message}`)); }
+      if (!line.length || Buffer.byteLength(line) > this.maxLineBytes) throw new Error('Empty or oversized RPC frame');
+      /** @type {unknown} */ const value = JSON.parse(line);
+      if (!isRpcRecord(value) || typeof value.type !== 'string') throw new Error('Invalid RPC frame');
+      this.handle(value);
+    } catch (e) { this.fail(new RpcUncertainError(`Invalid worker protocol: ${errorOf(e).message}`)); }
   }
   /** @param {RpcRecord} event */
   handle(event) {

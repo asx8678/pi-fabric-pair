@@ -5,7 +5,7 @@ import { isDirectMutation, nativeSettings, probeNative, sourcePaths } from './na
 import { selectLastMeasuredUsage } from './metrics.js';
 import { ScopedCacheWarming } from './warming.js';
 import { assert, briefError, cleanText, clone, digest, Serial } from './util.js';
-import { ageLabel, indicatorWidget, settingsUI, staleWorkers, statusText, textView } from './ui.js';
+import { ageLabel, dashboardHeader, dashboardItems, diffLineColor, humanPatch, indicatorWidget, kindLabel, reportCardLines, reportLineColor, settingsUI, staleWorkers, statusText, textView } from './ui.js';
 
 export const MAIN_GUIDE = `Fabric Pair provides persistent supervised implementation workers without switching this Main model.
 You own planning, questions, reviews and final acceptance. For implementation requests, check pair_status, make a bounded plan, and delegate with pair_dispatch to a configured worker when Pair is enabled. The dispatch returns an acknowledgement, not completion. Continue talking with the user normally; do not poll, repeatedly call status, or wait inside a tool for the worker.
@@ -316,9 +316,9 @@ export function registerMain(pi) {
     ctx.ui.notify(`Worker ${id} ${outcome}; no model turn was requested.${held}`, 'info');
   }
   pi.registerCommand('pair', {
-    description: 'Pair settings/status/start/restart/reload/stop/pause/resume/cancel/yield/indicator/inbox/transcript/doctor/reset-worker/import-backup',
+    description: 'Pair settings/status/report/diff/start/restart/reload/stop/pause/resume/cancel/yield/indicator/inbox/transcript/doctor/reset-worker/import-backup',
     getArgumentCompletions(prefix) {
-      return ['settings', 'status', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'yield', 'indicator minimal', 'indicator off', 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup global ', 'import-backup project '].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }));
+      return ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'yield', 'indicator minimal', 'indicator off', 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup global ', 'import-backup project '].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }));
     },
     /** @param {string} args @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx @returns {Promise<void>} */
     async handler(args, ctx) {
@@ -363,30 +363,75 @@ export function registerMain(pi) {
         if (command === 'resume') { if (await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) await c.resume(id); return; }
         if (command === 'cancel') { await c.cancel(id, rest.join(' ') || 'Cancelled by the user'); return; }
         if (command === 'reset-worker') { if (await ctx.ui.confirm('Reset worker conversation', 'This starts a new conversation next time and may lose cache reuse. Old session files/evidence are archived, not deleted. Continue?')) await c.reset(id); return; }
-        if (command === 'transcript') return textView(ctx, `Worker ${id}: recent text (read-only)`, await c.transcript(id));
-        if (command === 'inbox') {
-          const inbox = await c.inbox(); await textView(ctx, 'Pair unresolved reports', JSON.stringify(inbox, null, 2));
+        /** Read-only report card; a human view never acknowledges the report for Main. @param {string} workerId */
+        const showReport = async workerId => {
+          const view = c.reportView(workerId);
+          assert(view, `Worker ${workerId} has no current report`);
+          await textView(ctx, `${kindLabel(view.kind)} · ${workerId} (read-only; Main still reviews with pair_inspect)`, reportCardLines(view).join('\n'), { paint: reportLineColor });
+          const next = await ctx.ui.select('Report actions', ['View checkpoint diff', ...(c.summary().waitingReports ? ['Deliver waiting reports to Main'] : []), 'Back']);
+          if (next === 'View checkpoint diff') await showDiff(workerId);
+          else if (next === 'Deliver waiting reports to Main') await showYield();
+        };
+        /** @param {string} workerId */
+        const showDiff = async workerId => {
+          const diff = await c.reviewPatch(workerId);
+          const body = diff.patch.trim() ? humanPatch(diff.patch, diff.added) + (diff.patchTruncated ? '\n\n[patch truncated — pair_inspect individual files for full content]' : '') : 'No source changes in this checkpoint.';
+          await textView(ctx, `Checkpoint ${diff.checkpointHash.slice(0, 12)} · ${diff.changed.length} file${diff.changed.length === 1 ? '' : 's'} · ${workerId}`, body, { paint: diffLineColor, section: /^### / });
+        };
+        const showYield = async () => {
+          const ready = await c.yieldManual();
+          const lines = ready.length
+            ? [`Delivered ${ready.length} report${ready.length === 1 ? '' : 's'} to Main:`, ...ready.map(n => `  • ${n.workerId} · ${n.reportId} (${n.status})`)]
+            : ['No reports were waiting.'];
+          await textView(ctx, 'Pair yield', [...lines, '', 'Main acknowledges a report when it calls pair_inspect or pair_decide. Nothing wakes Main automatically.'].join('\n'));
+        };
+        const showInbox = async () => {
+          const inbox = await c.inbox();
+          const lines = inbox.length ? inbox.flatMap(n => {
+            const view = c.reportView(n.workerId);
+            const title = view?.reportId === n.reportId ? `${kindLabel(view.kind)} from ${n.workerId}: ${view.summary.split('\n')[0].slice(0, 120)}` : `Report from ${n.workerId}`;
+            return [title, `  ${n.reportId} · ${n.status}${n.observedAt === undefined ? ' · not yet read by Main' : ' · read by Main'}`, ''];
+          }) : ['No unresolved reports.'];
+          await textView(ctx, 'Pair inbox', lines.join('\n'));
           if (inbox.length && await ctx.ui.confirm('Redeliver saved reports', 'Deliver unresolved reports to this Main session again? Decisions remain idempotent.')) await c.inbox(true);
-          return;
-        }
+        };
+        if (command === 'report') return await showReport(id);
+        if (command === 'diff') return await showDiff(id);
+        if (command === 'transcript') return textView(ctx, `Worker ${id}: recent text (read-only)`, await c.transcript(id));
+        if (command === 'inbox') return await showInbox();
         if (command === 'yield') {
           assert(!idArg && !rest.length, 'Use /pair yield to deliver ready reports to this Main session');
-          const ready = await c.yieldManual();
-          await textView(ctx, 'Pair yield', JSON.stringify({ delivered: ready.map(n => ({ reportId: n.reportId, workerId: n.workerId, status: n.status, channel: n.channel })), note: 'Explicit human delivery of unacknowledged reports. sendMessage is fire-and-forget; offers are not confirmed observations until pair_inspect/pair_decide acknowledges them. No automatic idle wakeup exists.' }, null, 2));
-          return;
+          return await showYield();
         }
         if (command === 'doctor') return textView(ctx, 'Pair doctor (no inference)', JSON.stringify({ main: await probeMain(ctx), pair: c.summary(), configuration: configObservation(), requirements: config.requirements }, null, 2));
         if (command && command !== 'status') throw new Error('Unknown Pair command. Use /pair for the dashboard.');
-        if (command === 'status') return textView(ctx, 'Pair status', statusText(c.summary(), await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true)));
-        const choice = await ctx.ui.select('Fabric Pair', ['Settings', 'Status', 'Worker transcript', 'Start default worker', 'Restart default worker', 'Reload configuration', 'Pause default worker', 'Stop all workers', 'Close']);
-        if (choice === 'Settings') return await openSettings(ctx);
-        if (choice === 'Status') return textView(ctx, 'Pair status', statusText(c.summary(), await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true)));
-        if (choice === 'Worker transcript') return textView(ctx, 'Worker transcript', await c.transcript(config.workers[0].id));
-        if (choice === 'Start default worker') return await startWorker(config.workers[0].id);
-        if (choice === 'Restart default worker') return await restartWorker(ctx);
-        if (choice === 'Reload configuration') { await reloadConfiguration(ctx, true); return; }
-        if (choice === 'Pause default worker') { await c.pause(config.workers[0].id); return; }
-        if (choice === 'Stop all workers') for (const worker of [...c.handles.keys()]) await c.stop(worker);
+        const showStatus = async () => textView(ctx, 'Pair status', statusText(c.summary(), await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true)));
+        if (command === 'status') return await showStatus();
+        const summary = c.summary(), items = dashboardItems(summary);
+        const choice = await ctx.ui.select(`Fabric Pair · ${dashboardHeader(summary)}`, items.map(item => item.label));
+        const item = items.find(entry => entry.label === choice);
+        if (!item || item.action === 'close') return;
+        const target = item.workerId || id;
+        if (item.action === 'report') return await showReport(target);
+        if (item.action === 'diff') return await showDiff(target);
+        if (item.action === 'yield') return await showYield();
+        if (item.action === 'transcript') return textView(ctx, `Worker ${target}: recent text (read-only)`, await c.transcript(target));
+        if (item.action === 'start') return await startWorker(target);
+        // With one worker, restart resolves the default after reloading, which may rename it.
+        if (item.action === 'restart') return await restartWorker(ctx, config.workers.length > 1 ? target : undefined);
+        if (item.action === 'stop') { await c.stop(target); return; }
+        if (item.action === 'pause') { await c.pause(target); return; }
+        if (item.action === 'resume') { if (await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) await c.resume(target); return; }
+        if (item.action === 'cancel') {
+          const reason = await ctx.ui.input('Cancel reason (the worker conversation is kept; file changes are not undone)', 'Cancelled by the user');
+          if (reason !== undefined) await c.cancel(target, reason.trim() || 'Cancelled by the user');
+          return;
+        }
+        if (item.action === 'status') return await showStatus();
+        if (item.action === 'inbox') return await showInbox();
+        if (item.action === 'settings') return await openSettings(ctx);
+        if (item.action === 'reload') { await reloadConfiguration(ctx, true); return; }
+        if (item.action === 'doctor') return textView(ctx, 'Pair doctor (no inference)', JSON.stringify({ main: await probeMain(ctx), pair: c.summary(), configuration: configObservation(), requirements: config.requirements }, null, 2));
       } catch (error) { ctx.ui.notify(`Pair: ${briefError(error)}`, 'error'); }
     }
   });
