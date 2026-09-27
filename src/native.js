@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { agentDir, assert, canonical, merge, plain, readJSONC, VERSION } from './util.js';
 
-/** Public Pi API subset used for probing; no private session/runtime APIs.
+/**
  * @typedef {{name: string, source?: string, sourceInfo?: {path?: string}}} NativeRegistration
  * @typedef {{getAllTools: () => NativeRegistration[], getCommands: () => NativeRegistration[], getThinkingLevel: import('@earendil-works/pi-coding-agent').ExtensionAPI['getThinkingLevel']}} NativeAPI
  * @typedef {{cwd: string, model?: {provider: string, id: string, contextWindow: number}, sessionManager: {getSessionId: () => string, getSessionFile: () => string | undefined}, isProjectTrusted?: () => boolean, getContextUsage?: () => import('./contracts.js').StoredContextUsage | undefined}} NativeContext
@@ -14,10 +14,7 @@ export function sourcePaths(pi) {
   const entries = [...(pi.getAllTools?.() || []), ...(pi.getCommands?.() || []).filter(c => c.source === 'extension' || c.source === undefined)];
   return [...new Set(entries.map(v => v.sourceInfo?.path).filter(/** @returns {v is string} */ v => typeof v === 'string' && path.isAbsolute(v) && /\.(?:[cm]?[jt]s)$/.test(v)))];
 }
-/** Whether an extension source is excluded from worker inheritance. An absolute entry matches that
- * file or anything under that directory; a bare name matches a package directory of that name
- * anywhere in the path (for example "pi-retry" or "@scope/pkg").
- * @param {string} source @param {readonly string[]} excludes */
+/** @param {string} source @param {readonly string[]} excludes */
 export function excludedExtension(source, excludes) {
   const normal = path.resolve(source);
   return excludes.some(entry => {
@@ -26,7 +23,7 @@ export function excludedExtension(source, excludes) {
     return name.length > 0 && normal.includes(`${path.sep}${name}${path.sep}`);
   });
 }
-/** Package root of an extension entry file: the nearest directory with a package.json. @param {string} source */
+/** @param {string} source */
 async function packageRoot(source) {
   let dir = path.dirname(source);
   for (let i = 0; i < 8; i++) {
@@ -35,10 +32,7 @@ async function packageRoot(source) {
   }
   return path.dirname(source);
 }
-/** Inherited extensions whose source can start a turn on its own (sendMessage with triggerTurn,
- * or sendUserMessage). In a worker such a turn has no Pair lease: Pair aborts it, but it is noise
- * and costs a request. Static and bounded; used only for /pair doctor.
- * @param {readonly string[]} sources @returns {Promise<{name: string, source: string}[]>} */
+/** @param {readonly string[]} sources @returns {Promise<{name: string, source: string}[]>} */
 export async function turnStartingExtensions(sources) {
   const pattern = /triggerTurn\s*:\s*true|sendUserMessage\s*\(/;
   /** @type {{name: string, source: string}[]} */ const found = [];
@@ -68,20 +62,12 @@ export async function turnStartingExtensions(sources) {
   }
   return found;
 }
-/** Pair-owned private Fabric mesh namespace for one retained worker directory.
- * Derived only from the worker directory: stable across process generations and
- * retained-session restarts, different per worker directory, never keyed by PID,
- * nonce or worker generation. This is environment/path isolation only, not a
- * proof of Fabric store health or an OS sandbox.
- * @param {string} workerDir @returns {string}
- */
+/** @param {string} workerDir @returns {string} */
 export function meshRootFor(workerDir) {
   assert(path.isAbsolute(workerDir), 'Worker directory must be an absolute path');
   return path.join(workerDir, 'fabric', 'mesh');
 }
-/** Package metadata is observational, not a validated version contract.
- * @param {string | undefined | null} source @param {string} expectedName @returns {Promise<unknown>}
- */
+/** @param {string | undefined | null} source @param {string} expectedName @returns {Promise<unknown>} */
 export async function packageVersion(source, expectedName) {
   if (!source) return null;
   let dir = path.dirname(source);
@@ -91,18 +77,13 @@ export async function packageVersion(source, expectedName) {
   }
   return null;
 }
-/** Validate only the JSONC object boundary; selected policy values remain unknown
- * until the exact readiness/worker comparisons or persisted-probe validator.
- * @param {string} file @returns {Promise<Record<string, unknown>>}
- */
+/** @param {string} file @returns {Promise<Record<string, unknown>>} */
 async function nativeObject(file) {
   const value = await readJSONC(file);
   assert(plain(value), `Native configuration must be an object: ${file}`);
   return value;
 }
-/** Unvalidated native observations must not masquerade as StoredNativeSettings.
- * @typedef {Omit<import('./contracts.js').StoredNativeSettings, 'fabricShellHangMs' | 'fabricAgentMaxDepth'> & {fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown}} NativeSettings
- */
+/** @typedef {Omit<import('./contracts.js').StoredNativeSettings, 'fabricShellHangMs' | 'fabricAgentMaxDepth'> & {fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown}} NativeSettings */
 /** @param {string} cwd @param {boolean} trusted @param {NodeJS.ProcessEnv} [env] @returns {Promise<NativeSettings>} */
 export async function nativeSettings(cwd, trusted, env = process.env) {
   const home = agentDir(env);
@@ -110,7 +91,6 @@ export async function nativeSettings(cwd, trusted, env = process.env) {
   const fabric = merge(await nativeObject(path.join(home, 'fabric.json')), trusted ? await nativeObject(path.join(cwd, '.pi', 'fabric.json')) : {});
   return {
     agentDir: home,
-    // Only selected non-secret policy fields are retained.
     piCompaction: settings.compaction || {},
     cacheWarming: (await nativeObject(path.join(home, 'settings.json'))).cacheWarming ?? 'streaming',
     fabricCompaction: fabric.compaction || {},
@@ -121,7 +101,7 @@ export async function nativeSettings(cwd, trusted, env = process.env) {
     note: 'File-level native configuration; session-only overrides may differ. RPC autoCompactionEnabled is authoritative for that switch.'
   };
 }
-/** Shared exact checks for file-level preflight and authoritative worker readback.
+/**
  * @param {{fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean}} native
  * @param {{prewalkDisabled: boolean}} requirements
  */
@@ -132,11 +112,11 @@ export function nativeProfileBlockers(native, requirements) {
   if (requirements.prewalkDisabled && !native.prewalkDisabled) blockers.push('prewalk.enabled = false (not explicitly disabled; Pair owns delegation)');
   return blockers;
 }
-/** Best-effort file preflight, not authentication/readiness. Trust belongs to the
- * worker process; Main's trust is never silently transferred to another worker.
- * Unknown trust is rejected only if BOTH possible profiles have blockers.
- * @param {string} cwd @param {{prewalkDisabled: boolean}} requirements
- * @param {boolean | null} [trusted] @param {NodeJS.ProcessEnv} [env]
+/**
+ * @param {string} cwd
+ * @param {{prewalkDisabled: boolean}} requirements
+ * @param {boolean | null} [trusted]
+ * @param {NodeJS.ProcessEnv} [env]
  */
 export async function preflightNativeProfile(cwd, requirements, trusted = null, env = process.env) {
   const globalPath = path.join(agentDir(env), 'fabric.json'), projectPath = path.join(cwd, '.pi', 'fabric.json');
@@ -150,11 +130,7 @@ export async function preflightNativeProfile(cwd, requirements, trusted = null, 
   return { blocked, message: `Pair profile setup for worker workspace ${cwd}\n${details}\nGlobal defaults: ${globalPath}\nProject override: ${projectPath} (only loaded by a trusted worker; takes precedence per field).\nSet the listed values in the applicable file(s), preserving unrelated settings, then retry /pair start. Pair does not edit native configuration. Worker trust/session overrides, installed capabilities and provider authentication are still checked at startup.` };
 }
 /** @typedef {Omit<import('./contracts.js').HistoricalProbeV1, 'nonce' | 'workerId' | 'ownerSession' | 'native'> & {native: NativeSettings}} NativeProbe */
-/** AR-02 uses the public API, not a context/private thinking-level mirror.
- * @param {NativeAPI} pi
- * @param {NativeContext} ctx
- * @returns {Promise<NativeProbe>}
- */
+/** @param {NativeAPI} pi @param {NativeContext} ctx @returns {Promise<NativeProbe>} */
 export async function probeNative(pi, ctx) {
   const tools = pi.getAllTools?.() || [];
   const commands = pi.getCommands?.() || [];
@@ -179,7 +155,7 @@ export async function probeNative(pi, ctx) {
     scope: 'Registration and configuration checks, not a proof of Fovea graph coverage or provider authentication.'
   };
 }
-/** Exact readback after setters: an ACK alone does not establish readiness.
+/**
  * @param {{protocol: number, cwd: string, sessionId: string, sessionFile?: string, meshRoot?: string | null, model: {provider: string, id: string} | null, thinkingLevel: string | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, native: {fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean}}} probe
  * @param {{sessionId: string, sessionFile?: string, model?: {provider: string, id: string}, thinkingLevel?: string, autoCompactionEnabled?: boolean}} rpcState
  * @param {{requirements: {fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}}} config
@@ -223,24 +199,17 @@ export function requestsDetachedEffect(name, input) {
   const n = toolName(name);
   return /^(bash|powershell)$/.test(n) && input !== null && (typeof input === 'object' || typeof input === 'function') && (('background' in input && input.background === true) || ('run_in_background' in input && input.run_in_background === true) || ('monitor' in input && input.monitor !== undefined));
 }
-/** @param {unknown} name @param {Pick<import('./contracts.js').Authority, 'phase'> | null | undefined} authority
- * @param {boolean} latched @param {boolean} [readOnly]
+/**
+ * @param {unknown} name
+ * @param {Pick<import('./contracts.js').Authority, 'phase'> | null | undefined} authority
+ * @param {boolean} latched
+ * @param {boolean} [readOnly]
  * @returns {import('@earendil-works/pi-coding-agent').ToolCallEventResult | undefined}
  */
 export function gateTool(name, authority, latched, readOnly = false) {
   const n = toolName(name);
-  // A latched lease still admits pair_report so an identical retained report can be
-  // republished (DUR-01); its execute rejects any different payload.
   if (!authority || authority.phase !== 'running' || (latched && n !== 'pair_report')) return { block: true, reason: 'PAIR_WAIT: no implementation lease is active. Wait for Main; do not continue or start another agent.' };
-  // Delegation registered as Pi tools (subagent, delegate, spawn_agent, pair_dispatch or
-  // a tool named agents.*). Fabric's own providers (agents.spawn/run/create, rlm, councils)
-  // never reach this hook: Fabric replays tool_call only for Pi core tools and captured
-  // extension tools. Fabric spawning is stopped by agents.maxDepth = 0 in the worker's
-  // profile (nativeProfileBlockers), and actor turns run through the same depth check.
   if (/^(agents|actors|crew|swarm)\./.test(n) || /^(subagent|delegate|spawn_agent|pair_dispatch)$/.test(n)) return { block: true, reason: 'Pair workers cannot delegate or create other workers.' };
-  // fabric_exec is an outer envelope. Fabric replays nested tool_call hooks for pi.* and
-  // captured extension calls under their bare names (edit, bash, pair_report), so each
-  // nested call is classified separately. This is workflow gating, not a sandbox.
   if (readOnly && n !== 'fabric_exec' && !isReadCapability(n)) return { block: true, reason: `Read-only Pair worker cannot execute ${n}. Use read/Fovea tools, not shell or mutable providers.` };
   return undefined;
 }

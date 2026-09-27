@@ -1,7 +1,3 @@
-/**
- * Standalone Pi entry point. Pi supplies the host API; this package has no
- * runtime npm dependencies and does not import Fabric or Fovea internals.
- */
 import { registerMain } from './main.js';
 import { registerWorker } from './worker.js';
 import { assert } from './util.js';

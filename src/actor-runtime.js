@@ -20,22 +20,13 @@ import { checkReadiness, meshRootFor } from './native.js';
 /** @typedef {{input: number, output: number, cacheRead: number, cacheWrite: number, cost?: {total: number}}} Usage */
 /** @typedef {{type: string, at: number, message?: {role: string, usage?: Usage}, reason?: string, toolCallId?: string, toolName?: string, steering?: number, followUp?: number, error?: string, notifyType?: string}} RuntimeObservation */
 /** @typedef {{id: string, event: RecordValue, activation: Activation | null, startup: boolean, scope: number, controller: AbortController, deadline: number, timer: ReturnType<typeof setTimeout>, bytes: number}} Dialog */
-/** Verified retained-history fingerprint: the exact verified byte prefix and its hash, identity
- * facts of every verified entry, parent links for branch checks, and a bounded tail.
- * @typedef {{header: RecordValue, bytes: number, sha256: string, known: Map<string, EntryFact>, parents: Map<string, string | null>, count: number, lastId: string | null, tail: RecordValue[]}} VerifiedHistory */
+/** @typedef {{header: RecordValue, bytes: number, sha256: string, known: Map<string, EntryFact>, parents: Map<string, string | null>, count: number, lastId: string | null, tail: RecordValue[]}} VerifiedHistory */
 /** @typedef {{rpcOptions: RpcOptions, rpcFactory?: (options: RpcOptions) => PiRpc, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, nonce: string, dir: string, cwd: string, sessionFile: string, sessionId: string | null, freshSession: boolean, config: RuntimeConfig, spec: WorkerSpec, entryPath: string, promptUser?: (workerId: string, event: RecordValue, options: {signal: AbortSignal, timeout: number}) => Promise<unknown>, onWake: () => void, onSpawn?: (pid: number) => void, isCurrent: (runtime: PiRuntime, activation: Activation | null) => boolean}} RuntimeOptions */
 
-// Internal bounded retention, deliberately not configuration or wire-format additions.
 const OBS_COUNT = 256, OBS_BYTES = 1024 * 1024, OBS_BATCH = 32;
 const DIALOG_COUNT = 8, DIALOG_BYTES = 64 * 1024, TOOL_COUNT = 128;
-// Session files are stream-verified (memory tracks entry identities, not bytes), so the
-// ceiling is a sanity bound, not a practical lifetime limit for a retained worker.
 const HISTORY_BYTES = 4 * 1024 * 1024 * 1024, HISTORY_ENTRIES = 2_000_000, PROBE_BYTES = 256 * 1024;
-/** Entries compared directly against Pi's in-memory history at startup (RPC frames stay small). */
 const TAIL_ENTRIES = 64;
-/** Sessions up to this size are compared entry-for-entry against Pi's whole in-memory history
- * (one RPC frame) at every verification, which also catches in-memory rewrites of old entries.
- * Larger sessions are verified by prefix hash plus the appended suffix. */
 const FULL_COMPARE_BYTES = 8 * 1024 * 1024;
 const MAX_TIMEOUT = 300_000, UI_TIMEOUT = 120_000;
 const THINKING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -60,9 +51,7 @@ function freeze(value) {
   if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value); }
   return value;
 }
-/** Authoritative assistant message_end accounting, never streaming/legacy zero-fill.
- * @param {unknown} value @returns {Usage}
- */
+/** @param {unknown} value @returns {Usage} */
 function usageOf(value) {
   const usage = record(value, 'Assistant final usage accounting');
   const { input, output, cacheRead, cacheWrite } = usage;
@@ -70,7 +59,6 @@ function usageOf(value) {
   /** @type {{total: number} | undefined} */ let cost;
   if (Object.hasOwn(usage, 'cost')) {
     const rawCost = record(usage.cost, 'Assistant final usage cost accounting');
-    // Absent total is unknown, including cost: {}; only an explicit valid zero is zero.
     if (Object.hasOwn(rawCost, 'total')) {
       requireValue(nonnegative(rawCost.total), 'Malformed assistant final usage accounting: invalid cost.total');
       cost = { total: rawCost.total };
@@ -79,9 +67,7 @@ function usageOf(value) {
   return { input, output, cacheRead, cacheWrite, ...(cost ? { cost } : {}) };
 }
 
-/** Bounded regular-file read with fatal UTF-8; no symlinks or stat/read size race.
- * @param {string} file @param {number} maximum @returns {Promise<string>}
- */
+/** @param {string} file @param {number} maximum @returns {Promise<string>} */
 async function readBounded(file, maximum) {
   const handle = await fs.open(file, FS.O_RDONLY | FS.O_NOFOLLOW);
   try {
@@ -115,9 +101,7 @@ function validateContent(value, role) {
     }
   }
 }
-/** Known Pi messages are schema-checked; augmented host roles remain opaque JSON.
- * @param {unknown} value @param {boolean} [allowPending]
- */
+/** @param {unknown} value @param {boolean} [allowPending] */
 function validateMessage(value, allowPending = false) {
   const message = record(value, 'Session message'); requireValue(text(message.role), 'Invalid message role');
   if (!['user', 'assistant', 'toolResult', 'system', 'custom', 'bashExecution', 'branchSummary', 'compactionSummary'].includes(message.role)) return;
@@ -135,18 +119,13 @@ function validateMessage(value, allowPending = false) {
   if (message.role === 'compactionSummary') requireValue(typeof message.summary === 'string' && nonnegative(message.tokensBefore), 'Invalid stored compaction summary');
   if (message.usage !== undefined) validateUsage(message.usage);
 }
-/** Minimal retained facts about an already-verified entry: enough to validate references from later entries.
- * @typedef {{type: string, role: string | null}} EntryFact */
+/** @typedef {{type: string, role: string | null}} EntryFact */
 /** @param {RecordValue} entry @returns {EntryFact} */
 function factOf(entry) {
   const message = entry.type === 'message' && isRpcRecord(entry.message) ? entry.message : null;
   return { type: String(entry.type), role: message && typeof message.role === 'string' ? message.role : null };
 }
-/** Strict base/payload/ref validation. Arbitrary extension/custom JSON is preserved, never interpreted.
- * `known` carries facts of previously verified entries, so an appended suffix can be validated
- * against the history before it without re-reading that history.
- * @param {unknown[]} values @param {Map<string, EntryFact>} [known] @returns {RecordValue[]}
- */
+/** @param {unknown[]} values @param {Map<string, EntryFact>} [known] @returns {RecordValue[]} */
 function validateEntries(values, known = new Map()) {
   requireValue(values.length + known.size <= HISTORY_ENTRIES, 'Session entry count exceeds retention bound');
   const seen = new Map(known);
@@ -154,8 +133,7 @@ function validateEntries(values, known = new Map()) {
   for (const value of values) { const entry = validateEntry(value, seen); seen.set(String(entry.id), factOf(entry)); result.push(entry); }
   return result;
 }
-/** Validate one entry against the facts of every entry before it. Does not record it.
- * @param {unknown} value @param {Map<string, EntryFact>} seen @returns {RecordValue} */
+/** @param {unknown} value @param {Map<string, EntryFact>} seen @returns {RecordValue} */
 function validateEntry(value, seen) {
   {
     const entry = record(value, 'Session entry');
@@ -171,7 +149,6 @@ function validateEntry(value, seen) {
       case 'thinking_level_change': requireValue(typeof entry.thinkingLevel === 'string' && THINKING.has(entry.thinkingLevel), 'Invalid thinking entry'); break;
       case 'compaction':
         requireValue(typeof entry.summary === 'string' && nonnegative(entry.tokensBefore), 'Invalid compaction entry');
-        // Retain-none compaction legitimately references its OWN id.
         requireValue(entry.firstKeptEntryId === entry.id || (text(entry.firstKeptEntryId) && seen.has(entry.firstKeptEntryId)), 'Broken compaction reference'); break;
       case 'branch_summary': requireValue(typeof entry.summary === 'string' && text(entry.fromId) && seen.has(entry.fromId), 'Broken branch-summary reference'); break;
       case 'context_edit': {
@@ -180,7 +157,6 @@ function validateEntry(value, seen) {
         requireValue(target && ['message', 'custom_message'].includes(String(target.type)), 'Context-edit target is not editable');
         const role = target.type === 'custom_message' ? 'custom' : target.role;
         requireValue(typeof role === 'string' && (target.type === 'custom_message' || ['user', 'assistant', 'toolResult'].includes(role)), 'Context-edit target is not editable');
-        // Pi 0.87.1 persists a wrapper, not the shorthand shown in older prose docs.
         if (entry.replacement !== null) validateContent(record(entry.replacement, 'Context-edit replacement').content, role);
         break;
       }
@@ -196,8 +172,7 @@ function validateEntry(value, seen) {
     return entry;
   }
 }
-/** Whether `leafId` lies on the branch that continues from `priorLeaf`.
- * @param {Map<string, string | null>} parents @param {string} priorLeaf @param {string} leafId */
+/** @param {Map<string, string | null>} parents @param {string} priorLeaf @param {string} leafId */
 function descendsFrom(parents, priorLeaf, leafId) {
   /** @type {string | null | undefined} */ let node = leafId;
   for (let steps = 0; node !== null && node !== undefined && steps <= parents.size; steps++) {
@@ -213,11 +188,9 @@ function validateHeader(value, cwd) {
   requireValue(header.parentSession === undefined || text(header.parentSession), 'Invalid parent session path');
   return header;
 }
-/** Parse and validate one session line against the facts of everything before it.
- * @param {Buffer} bytes @param {number} lineNumber @param {Map<string, EntryFact>} seen @returns {RecordValue} */
+/** @param {Buffer} bytes @param {number} lineNumber @param {Map<string, EntryFact>} seen @returns {RecordValue} */
 function parseEntryLine(bytes, lineNumber, seen) {
   /** @type {RecordValue} */ let value;
-  // No trim/filter: blank lines, malformed tails, or legacy migration would hide history.
   try { value = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), `Session line ${lineNumber}`); }
   catch { throw new Error(`Malformed session JSONL at line ${lineNumber}`); }
   requireValue(seen.size < HISTORY_ENTRIES, 'Session entry count exceeds retention bound');
@@ -225,13 +198,13 @@ function parseEntryLine(bytes, lineNumber, seen) {
   seen.set(String(entry.id), factOf(entry));
   return entry;
 }
-/** Stream-verify a bound session file. Without `base` the whole file is validated; with
- * `base` the previously verified prefix must hash identically (nothing old was replaced or
- * truncated) and only the appended suffix is parsed. Memory stays proportional to the
- * entry count (identity facts), not the file size.
- * `keepAll` retains every entry of a full scan (small sessions only).
- * @param {string} file @param {string} cwd @param {VerifiedHistory | null} [base] @param {boolean} [keepAll]
- * @returns {Promise<{history: VerifiedHistory, suffix: RecordValue[]}>} */
+/**
+ * @param {string} file
+ * @param {string} cwd
+ * @param {VerifiedHistory | null} [base]
+ * @param {boolean} [keepAll]
+ * @returns {Promise<{history: VerifiedHistory, suffix: RecordValue[]}>}
+ */
 async function scanHistory(file, cwd, base = null, keepAll = false) {
   const handle = await fs.open(file, FS.O_RDONLY | FS.O_NOFOLLOW);
   try {
@@ -261,7 +234,6 @@ async function scanHistory(file, cwd, base = null, keepAll = false) {
       parents.set(String(entry.id), entry.parentId === null ? null : String(entry.parentId));
       count++; lastId = String(entry.id);
       suffix.push(entry);
-      // An initial full scan keeps only a bounded tail for RPC comparison.
       if (!base && !keepAll && suffix.length > TAIL_ENTRIES) suffix.shift();
     };
     if (stat.size > start) {
@@ -276,7 +248,6 @@ async function scanHistory(file, cwd, base = null, keepAll = false) {
         requireValue(pendingBytes <= 64 * 1024 * 1024, 'Session JSONL line exceeds 64 MiB');
       }
     }
-    // Pi appends whole lines; a tail without a newline is an incomplete write.
     requireValue(pendingBytes === 0, 'Session JSONL ends with an incomplete line');
     requireValue(header !== null, 'Invalid bound V3 session header');
     const after = await handle.stat();
@@ -291,13 +262,10 @@ function validateState(value) {
   requireValue(typeof state.isStreaming === 'boolean' && typeof state.isCompacting === 'boolean' && count(state.pendingMessageCount) && typeof state.autoCompactionEnabled === 'boolean', 'Invalid RPC idle state');
   return { model: { provider: model.provider, id: model.id }, thinkingLevel: state.thinkingLevel, sessionId: state.sessionId, sessionFile: state.sessionFile, isStreaming: state.isStreaming, isCompacting: state.isCompacting, pendingMessageCount: state.pendingMessageCount, autoCompactionEnabled: state.autoCompactionEnabled };
 }
-/** Validate the entire retained public probe before assigning its typed contract.
- * @param {unknown} value @returns {asserts value is Probe}
- */
+/** @param {unknown} value @returns {asserts value is Probe} */
 function assertProbe(value) {
   const p = record(value, 'Bridge probe'), model = record(p.model, 'Bridge model'), caps = record(p.capabilities, 'Bridge capabilities'), native = record(p.native, 'Bridge native settings');
   requireValue(p.protocol === 1 && text(p.pairVersion) && count(p.pid) && p.pid > 0 && text(p.cwd) && typeof p.trusted === 'boolean', 'Invalid bridge protocol/process');
-  // Live workers must observe the private mesh root in their own environment.
   requireValue(text(p.meshRoot) && path.isAbsolute(p.meshRoot), 'Invalid bridge mesh root');
   for (const key of ['sessionId', 'sessionFile', 'nonce', 'workerId', 'ownerSession', 'scope']) requireValue(text(p[key]), `Invalid bridge ${key}`);
   requireValue(count(p.ownerEpoch) && p.ownerEpoch > 0 && count(p.workerGeneration) && p.workerGeneration > 0 && nonnegative(p.checkedAt), 'Invalid bridge generation/time');
@@ -314,7 +282,6 @@ function assertProbe(value) {
   requireValue((native.fabricShellHangMs === null || nonnegative(native.fabricShellHangMs)) && (native.fabricAgentMaxDepth === null || nonnegative(native.fabricAgentMaxDepth)), 'Invalid native runtime limits');
 }
 
-/** One immutable worker generation. All session lifecycle and dialogs have exactly this owner. */
 export class PiRuntime {
   /** @type {Readonly<RuntimeOptions>} */ #options;
   /** @type {PiRpc} */ #rpc;
@@ -337,7 +304,7 @@ export class PiRuntime {
   #ready = false; #started = false; #provenUnspawned = false; #closing = false; #revokedStartup = false;
   #streaming = false; #unsettled = false; #retrying = false; #summaryRetrying = false; #overflowRecovery = false;
   #steering = 0; #followUp = 0; #idleKnown = false; #promptPending = false; #bridge = false; #rejecting = false;
-  /** Unleased tool calls awaiting their outcome. @type {Set<string>} */ #strayTools = new Set();
+  /** @type {Set<string>} */ #strayTools = new Set();
   #startupController = new AbortController();
   /** @type {Set<() => void>} */ #waiters = new Set();
   /** @param {RuntimeOptions} options */
@@ -346,7 +313,6 @@ export class PiRuntime {
     requireValue(count(options.ownerEpoch) && options.ownerEpoch > 0 && count(options.workerGeneration) && options.workerGeneration > 0, 'Invalid runtime generation');
     this.#options = Object.freeze({ ...options, rpcOptions: freeze(structuredClone(options.rpcOptions)), config: freeze(structuredClone(options.config)), spec: freeze(structuredClone(options.spec)) });
     this.#rpc = (options.rpcFactory || (opts => new PiRpc(opts)))(this.#options.rpcOptions);
-    // Observers are installed before start(), all commands, and all possible activity.
     this.#rpc.on('event', event => { try { this.#observe(event); } catch (error) { this.#hold(error); } });
     this.#rpc.on('fault', error => this.#hold(error));
     this.#rpc.on('spawn', pid => { try { this.#options.onSpawn?.(pid); } catch { /* observational */ } });
@@ -385,11 +351,15 @@ export class PiRuntime {
     if (!this.#options.isCurrent(this, activation)) return false;
     return !activation || (this.#activation?.token === activation && !this.#activation.controller.signal.aborted);
   }
-  /** Stale ownership says nothing about whether an already-written command executed.
-   * @param {Activation | null} activation
-   */
+  /** @param {Activation | null} activation */
   #assertCurrent(activation) { if (!this.#current(activation)) throw new Error('Runtime owner/activation fence is no longer current'); }
-  /** @param {string} command @param {RecordValue} fields @param {Activation | null} activation @param {number} [timeoutMs] @returns {Promise<unknown>} */
+  /**
+   * @param {string} command
+   * @param {RecordValue} fields
+   * @param {Activation | null} activation
+   * @param {number} [timeoutMs]
+   * @returns {Promise<unknown>}
+   */
   async #send(command, fields, activation, timeoutMs) {
     this.#assertCurrent(activation);
     const signal = activation ? this.#activation?.controller.signal : this.#startupController.signal;
@@ -399,7 +369,7 @@ export class PiRuntime {
   #requestTimeout() { return boundedTimeout(this.#options.config.runtime.requestTimeoutMs, 30000); }
   #startupTimeout() { return boundedTimeout(this.#options.config.runtime.startupTimeoutMs, 120000); }
 
-  /** Single-flight is installed synchronously; a failed generation never respawns. @returns {Promise<Readiness>} */
+  /** @returns {Promise<Readiness>} */
   ensureStarted() {
     if (!this.#startPromise) {
       /** @type {ReturnType<typeof setTimeout> | undefined} */ let timer;
@@ -424,7 +394,6 @@ export class PiRuntime {
     /** @type {VerifiedHistory | null} */ let prelaunch = null;
     if (o.freshSession) {
       requireValue(o.sessionId === null, 'Fresh session cannot replace a retained session identity');
-      // Only a live Controller reservation can authorize this exclusive empty file.
       this.#assertCurrent(null);
       const handle = await fs.open(o.sessionFile, 'wx', 0o600);
       await handle.close(); this.#assertCurrent(null);
@@ -437,7 +406,6 @@ export class PiRuntime {
     this.#started = true; this.#rpc.start();
     const initial = await this.#readState(null, this.#startupTimeout());
     if (prelaunch) requireValue(initial.sessionId === prelaunch.header.id, 'Pi replaced the retained session');
-    // The retained prefix must hash identically after Pi loaded it; only an initialization suffix may follow.
     const loaded = await scanHistory(o.sessionFile, o.cwd, prelaunch); this.#assertCurrent(null);
     const materialized = loaded.history;
     requireValue(materialized.header.id === initial.sessionId, 'Pi did not materialize the bound session header');
@@ -446,7 +414,6 @@ export class PiRuntime {
     this.#checkInitSuffix(prelaunch?.lastId ?? null, loaded.suffix, initial.thinkingLevel);
     await this.#compareTail(materialized, null); this.#assertCurrent(null);
     this.#history = materialized;
-    // CLI model selection may be fuzzy. An exact setter followed by exact reads is mandatory.
     await this.#send('set_model', { provider: o.spec.provider, modelId: o.spec.model }, null);
     const modelState = await this.#readState(null);
     const afterModel = await this.#extend(materialized, null);
@@ -462,8 +429,7 @@ export class PiRuntime {
     const readiness = await this.#bridgeCommand('probe', null);
     this.#assertCurrent(null); this.#ready = true; this.#wake(); return readiness;
   }
-  /** Entries Pi appended while loading the session or applying the exact model/effort setters.
-   * @param {string | null} parentId last verified entry before the suffix @param {RecordValue[]} suffix @param {string} initialThinking */
+  /** @param {string | null} parentId @param {RecordValue[]} suffix @param {string} initialThinking */
   #checkInitSuffix(parentId, suffix, initialThinking) {
     requireValue(suffix.length <= 4, 'Session history has an unexpected initialization suffix');
     /** @type {unknown} */ let parent = parentId;
@@ -472,10 +438,13 @@ export class PiRuntime {
       requireValue((entry.type === 'model_change' && entry.provider === this.#options.spec.provider && entry.modelId === this.#options.spec.model) || (entry.type === 'thinking_level_change' && entry.thinkingLevel === initialThinking), 'Unexpected session initialization entry');
     }
   }
-  /** Pi's in-memory entries after `since` (all entries when null), validated against the facts
-   * of everything before them; the active leaf may only advance along its own branch.
-   * @param {string | null} since @param {Map<string, EntryFact>} known @param {Map<string, string | null>} parents
-   * @param {Activation | null} activation @returns {Promise<RecordValue[]>} */
+  /**
+   * @param {string | null} since
+   * @param {Map<string, EntryFact>} known
+   * @param {Map<string, string | null>} parents
+   * @param {Activation | null} activation
+   * @returns {Promise<RecordValue[]>}
+   */
   async #entriesSince(since, known, parents, activation) {
     const data = record(await this.#send('get_entries', since === null ? {} : { since }, activation), 'RPC entries');
     requireValue(Array.isArray(data.entries), 'RPC entries missing');
@@ -489,9 +458,7 @@ export class PiRuntime {
     if (leafId !== null) this.#leaf = leafId;
     return entries;
   }
-  /** Compare the verified tail of the persisted session with Pi's in-memory history. The
-   * `since` anchor must exist in Pi's history, and every entry after it must be identical.
-   * @param {VerifiedHistory} verified @param {Activation | null} activation */
+  /** @param {VerifiedHistory} verified @param {Activation | null} activation */
   async #compareTail(verified, activation) {
     if (verified.bytes <= FULL_COMPARE_BYTES) { await this.#compareAll(verified, activation); return; }
     const tail = verified.tail, full = verified.count <= tail.length;
@@ -500,9 +467,7 @@ export class PiRuntime {
     const entries = await this.#entriesSince(full ? null : String(tail[0].id), known, verified.parents, activation);
     requireValue(isDeepStrictEqual(entries, expected), 'Pi history differs from prelaunch/materialized history');
   }
-  /** Verify only what was appended since `base`: the persisted prefix hashes identically, and the
-   * persisted suffix equals Pi's in-memory entries after the same anchor.
-   * @param {VerifiedHistory} base @param {Activation | null} activation */
+  /** @param {VerifiedHistory} base @param {Activation | null} activation */
   async #extend(base, activation) {
     const scanned = await scanHistory(this.#options.sessionFile, this.#options.cwd, base); this.#assertCurrent(activation);
     requireValue(isDeepStrictEqual(scanned.history.header, base.header), 'Bound session header changed/disappeared');
@@ -511,9 +476,7 @@ export class PiRuntime {
     if (scanned.history.bytes <= FULL_COMPARE_BYTES) await this.#compareAll(scanned.history, activation);
     return scanned;
   }
-  /** Entry-for-entry comparison of the whole persisted session with Pi's whole in-memory
-   * history, for sessions small enough to transfer in one frame.
-   * @param {VerifiedHistory} verified @param {Activation | null} activation */
+  /** @param {VerifiedHistory} verified @param {Activation | null} activation */
   async #compareAll(verified, activation) {
     const all = await scanHistory(this.#options.sessionFile, this.#options.cwd, null, true); this.#assertCurrent(activation);
     requireValue(all.history.sha256 === verified.sha256, 'Session history changed during verification');
@@ -574,17 +537,14 @@ export class PiRuntime {
     } finally { this.#bridge = false; }
   }
 
-  /** Check the persisted file and append-only tree again before any work. Cost is proportional
-   * to what was appended since the last verification, plus one streaming hash of the prefix.
-   * @param {Activation | null} activation
-   */
+  /** @param {Activation | null} activation */
   async #verifyRetainedHistory(activation) {
     requireValue(this.#history, 'Bound session history is unavailable');
     const extended = await this.#extend(this.#history, activation); this.#assertCurrent(activation);
     this.#history = extended.history;
   }
 
-  /** Synchronous reservation MUST precede the Controller's first await. @param {ActivationIdentity} identity @returns {Activation} */
+  /** @param {ActivationIdentity} identity @returns {Activation} */
   reserveActivation(identity) {
     this.#assertCurrent(null);
     requireValue(identity.workerGeneration === this.workerGeneration && text(identity.taskId) && text(identity.attemptId) && text(identity.leaseId), 'Invalid activation identity');
@@ -605,16 +565,10 @@ export class PiRuntime {
       requireValue(this.#activation && !this.#activation.attempted, 'Activation already attempted');
       this.#activation.prepared = true; return readiness;
     } catch (error) {
-      // Report/pause/cancel owns a revoked token; stale completion must not fault
-      // the retained runtime. Protocol faults independently enter #hold via observers.
       this.#assertCurrent(activation); this.#hold(error); throw error;
     }
   }
-  /** Exactly one work prompt; acceptance is not settlement. The optional validity
-   * callback is a cheap synchronous fence evaluated in the RPC write guard
-   * immediately before prompt bytes leave, so navigation during the runtime's
-   * own later awaits (bridge load, state read) cannot send a stale prompt.
-   * @param {Activation} activation @param {string} message @param {() => boolean} [validity] @returns {Promise<void>} */
+  /** @param {Activation} activation @param {string} message @param {() => boolean} [validity] @returns {Promise<void>} */
   async activate(activation, message, validity) {
     try {
       this.#assertCurrent(activation); const active = this.#activation;
@@ -624,24 +578,18 @@ export class PiRuntime {
       const state = await this.#readState(activation); this.#exactState(state);
       requireValue(this.#lifecycleIdle(), 'Worker ceased to be idle before work');
       this.#promptPending = true;
-      // Pi acknowledges a prompt only after its preflight, which may include a threshold
-      // compaction (an LLM call) and blocking before_agent_start hooks such as Fovea's sync.
-      // Allow the startup deadline, extended while a compaction or retry is observably running.
       const busy = () => this.#compactions.size > 0 || this.#summaryRetrying || this.#retrying;
       await this.#rpc.send('prompt', { message }, Math.max(this.#requestTimeout(), this.#startupTimeout()), { signal: active.controller.signal, observeAfterWrite: true, extend: busy, maxWaitMs: 30 * 60_000, guard: () => {
         if (!this.#current(activation) || !this.#lifecycleIdle() || (validity !== undefined && !validity())) return false;
-        // Bind session activity before bytes leave. Events are NEVER correlated to prompt id.
         this.#unsettled = true; this.#idleKnown = false; this.#revision++; return true;
       } });
       this.#assertCurrent(activation); active.accepted = true;
     } catch (error) {
-      // Report/pause/cancel owns a revoked token; stale completion must not fault
-      // the retained runtime. Protocol faults independently enter #hold via observers.
       this.#assertCurrent(activation); this.#hold(error); throw error;
     }
     finally { this.#promptPending = false; this.#wake(); }
   }
-  /** Immediate effect-free revocation of authority and UI scope. @param {string} reason */
+  /** @param {string} reason */
   revoke(reason) {
     this.#scope++; this.#activation?.controller.abort(reason); this.#activation = null;
     this.#invalidateDialogs();
@@ -671,13 +619,12 @@ export class PiRuntime {
     if (this.#observations.length >= OBS_COUNT || this.#observationBytes + bytes > OBS_BYTES) { this.#hold(new RpcUncertainError('Runtime observation capacity exceeded; activation held')); return; }
     this.#observations.push(event); this.#observationBytes += bytes; this.#wake();
   }
-  /** Update lifecycle FIRST, before retaining any bounded observation. @param {RecordValue} event */
+  /** @param {RecordValue} event */
   #observe(event) {
     const type = String(event.type);
     if (!['message_update', 'tool_execution_update', 'extension_ui_request', 'entry_appended', 'session_info_changed'].includes(type)) this.#revision++;
     const activity = /^(agent_|turn_|message_|tool_execution_|compaction_|auto_retry_|summarization_retry_)/.test(type);
     if (type === 'extension_error') { this.#hold(new RpcUncertainError(`Worker extension_error: ${reasonOf(event.error)}`)); return; }
-    // Revocation permits terminal events already in flight, never a new turn/run/tool.
     const startsWork = ['agent_start', 'turn_start', 'tool_execution_start', 'compaction_start', 'auto_retry_start', 'summarization_retry_scheduled', 'summarization_retry_attempt_start'].includes(type);
     const unauthorizedActivity = (activity && this.#bridge) || (startsWork && !this.#closing && !this.#abortPromise && (!this.#activation?.attempted || this.#activation.settled || !this.#current(this.#activation.token)));
     const activityError = () => this.#rejectActivity(type, event);
@@ -703,8 +650,6 @@ export class PiRuntime {
         requireValue(typeof event.reason === 'string' && COMPACTION_REASONS.has(event.reason), 'Invalid compaction reason');
         requireValue(typeof event.aborted === 'boolean' && typeof event.willRetry === 'boolean', 'Invalid compaction outcome');
         const n = this.#compactions.get(event.reason) || 0;
-        // Pi emits this terminal failure after the single overflow compact-and-retry,
-        // without emitting another compaction_start. It is not a second compaction.
         const exhausted = n === 0 && this.#overflowRecovery && event.reason === 'overflow' && event.result === undefined && event.aborted === false && event.willRetry === false && text(event.errorMessage);
         requireValue(n > 0 || exhausted, 'Unmatched compaction end');
         if (n === 1) this.#compactions.delete(event.reason); else if (n > 1) this.#compactions.set(event.reason, n - 1);
@@ -736,8 +681,6 @@ export class PiRuntime {
         validateContent(record(event.result, 'Tool result').content, 'toolResult');
         this.#tools.delete(event.toolCallId); observation.toolCallId = event.toolCallId;
         if (this.#strayTools.delete(event.toolCallId)) {
-          // Blocked by the worker's Pair gate: nothing executed, the turn is already being aborted.
-          // Anything else ran without a lease and may have had effects: hold this generation.
           const content = record(event.result, 'Tool result').content;
           const first = Array.isArray(content) ? content.find(block => isRpcRecord(block) && block.type === 'text') : null;
           const message = isRpcRecord(first) && typeof first.text === 'string' ? first.text : '';
@@ -758,15 +701,9 @@ export class PiRuntime {
     this.#enqueue(observation);
   }
 
-  /** Activity nobody authorized. During a bridge command the generation is held. Otherwise the
-   * run is aborted (another extension started it; the worker's own gates refuse to let it act,
-   * and killing a healthy retained worker would lose the conversation for nothing). An unleased
-   * tool is judged when it ends: blocked by the Pair gate is harmless, anything that ran holds.
-   * @param {string} type @param {RecordValue} event */
+  /** @param {string} type @param {RecordValue} event */
   #rejectActivity(type, event) {
     if (this.#bridge) { this.#hold(new RpcUncertainError('Agent activity during bridge command; no work prompt authorized')); return; }
-    // Pi emits tool_execution_start BEFORE the worker's tool_call gate runs, so a start alone
-    // proves nothing ran. Remember it and decide at tool_execution_end.
     if (type === 'tool_execution_start' && text(event.toolCallId)) this.#strayTools.add(event.toolCallId);
     this.#enqueue({ type: 'notify', at: Date.now(), error: `Worker ${type.replace(/_/g, ' ')} began without a Pair lease (probably another extension); Pair aborted it.`, notifyType: 'warning' });
     if (this.#rejecting || this.closed) return;
@@ -802,7 +739,6 @@ export class PiRuntime {
   }
   /** @param {Dialog} dialog */
   #dialogCurrent(dialog) {
-    // A late dialog from revoked work must not acquire a fresh generation-only scope.
     const admitted = dialog.startup
       ? this.#started && !this.#ready && !this.#revokedStartup && !this.#startupController.signal.aborted
       : dialog.activation !== null && this.#activation?.token === dialog.activation && this.#activation.attempted && !this.#activation.settled;
@@ -813,7 +749,6 @@ export class PiRuntime {
     const dialog = this.#dialogs.values().next().value; if (!dialog) return;
     if (!this.#dialogCurrent(dialog)) { this.#cancelDialog(dialog); return; }
     this.#displayed = true;
-    // Main callbacks never block the session event handler or control lane.
     void Promise.resolve().then(async () => {
       if (!this.#dialogCurrent(dialog)) return;
       const response = await this.#options.promptUser?.(this.#options.workerId, dialog.event, { signal: dialog.controller.signal, timeout: Math.max(1, dialog.deadline - Date.now()) });
@@ -853,8 +788,6 @@ export class PiRuntime {
     while (Date.now() < deadline) {
       this.#assertCurrent(activation);
       requireValue(this.#waiters.size < 32, 'Runtime idle waiter capacity exceeded');
-      // Arm BEFORE get_state: a terminal event can wake us during its await,
-      // invalidate that snapshot, and otherwise be lost before waiter registration.
       let finishWait = () => {};
       const changed = new Promise(resolve => {
         const done = () => { clearTimeout(timer); this.#waiters.delete(done); resolve(undefined); };
@@ -862,8 +795,6 @@ export class PiRuntime {
         finishWait = done;
       });
       try {
-        // Pi clears isStreaming before awaiting its agent_settled extension handlers:
-        // an idle get_state response/ACK is not settlement. Keep #unsettled event-owned.
         if (!this.#streaming && !this.#unsettled && !this.#compactions.size && !this.#retrying && !this.#summaryRetrying && !this.permission) {
           const state = await this.#readState(activation, Math.max(1, deadline - Date.now())); this.#exactState(state, false);
           if (this.#lifecycleIdle() && !this.#promptPending && !this.#bridge) return;
@@ -895,8 +826,6 @@ export class PiRuntime {
         await this.#rpc.send('clear_queue', {}, this.#requestTimeout(), { control: true, guard });
         await this.#rpc.send('abort', {}, this.#requestTimeout(), { control: true, guard });
         this.#assertCurrent(null);
-        // abort() can ACK before agent_settled extension handlers finish.
-        // Retention requires the bounded event-owned settle boundary, not an immediate snapshot.
         await this.#waitIdle(this.#requestTimeout(), null);
       } catch (error) { this.#hold(error); await this.abortAndStop(reason); throw error; }
     }).finally(() => { this.#abortPromise = null; this.#wake(); });
@@ -924,7 +853,3 @@ export class PiRuntime {
   }
 }
 
-// Offline limit: without an externally retained fingerprint, a valid V3 file already
-// truncated/replaced BEFORE this generation's snapshot cannot be distinguished from
-// legitimate short history. Within launch we compare EVERY old entry (all branches),
-// never only get_messages/leaf/current context; oversized/unverifiable history holds.

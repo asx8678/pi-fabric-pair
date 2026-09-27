@@ -1,19 +1,11 @@
-/** Local guards keep this SDK adapter independent of storage/contracts (which
- * validate its diagnostic records). No runtime import cycle through util.js.
- * @param {unknown} condition @param {string} message @returns {asserts condition}
- */
+/** @param {unknown} condition @param {string} message @returns {asserts condition} */
 function assert(condition, message) { if (!condition) throw new TypeError(message); }
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function plain(value) { return value !== null && typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null); }
 
 /** @typedef {{supported: boolean, requested: boolean, held: boolean, error: string | null}} WarmingObservation */
-/** Proposed public SDK capability; optional for compatibility with older Pi versions.
- * @typedef {{sessionManager: {getSessionId: () => string}, acquireCacheWarming?: (mode: 'streaming' | 'idle') => (() => void)}} WarmingContext
- */
+/** @typedef {{sessionManager: {getSessionId: () => string}, acquireCacheWarming?: (mode: 'streaming' | 'idle') => (() => void)}} WarmingContext */
 
-/** Nonpersistent ownership only. Native Pi owns scheduling, costs, TTLs and safety
- * windows. Reconciliation never starts a request or restarts a native warming run.
- */
 export class ScopedCacheWarming {
   constructor() {
     /** @type {(() => void) | null} */ this.releaseLease = null;
@@ -28,10 +20,7 @@ export class ScopedCacheWarming {
     this.observation.requested = false; this.observation.held = false;
     try { release?.(); } catch (error) { this.observation.error = `Native lease release failed: ${String(error).slice(0, 1000)}`; }
   }
-  /** A stable binding key, not the identity of per-event context objects.
-   * @param {WarmingContext | null | undefined} ctx @param {boolean} requested @param {string} binding
-   * @returns {WarmingObservation}
-   */
+  /** @param {WarmingContext | null | undefined} ctx @param {boolean} requested @param {string} binding @returns {WarmingObservation} */
   reconcile(ctx, requested, binding) {
     const key = ctx ? `${binding}:${ctx.sessionManager.getSessionId()}` : '';
     if (!requested || this.key && this.key !== key) this.release();
@@ -52,9 +41,7 @@ export class ScopedCacheWarming {
   }
 }
 
-/** Diagnostic validation only, never warming or implementation authority.
- * @param {unknown} value @returns {WarmingObservation}
- */
+/** @param {unknown} value @returns {WarmingObservation} */
 export function validateWarmingObservation(value) {
   assert(plain(value), 'Invalid scoped warming observation');
   assert(Object.keys(value).every(k => ['supported', 'requested', 'held', 'error'].includes(k)), 'Unknown scoped warming field');

@@ -171,9 +171,9 @@ budgets exclude Main usage and native warming. See the
 
 Pair provides workflow controls; OS and tool permissions remain your security
 boundary. Unattended operation, automatic crash recovery, and multiple writers
-are outside this MVP. The package ships no automated test suite; verify changes
-by inspection and the retained static checks (`npm run typecheck`,
-`npm run pack:check`).
+are outside this MVP. Verify changes with the offline suite (`npm test`, no
+model requests or profile writes; see `tests/README.md`) and the static checks
+(`npm run typecheck`, `npm run pack:check`).
 
 [Quickstart](docs/QUICKSTART.md) |
 [Architecture](docs/ARCHITECTURE.md) |

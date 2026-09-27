@@ -176,10 +176,10 @@ qualifies the extension. On macOS/arm64, the optional `npm run build:host` /
 ([private storage contract](H1-PERSISTENT-STORAGE-CONTRACT.md)) and are not
 installation or packaging prerequisites. Install from the committed lockfile
 with `npm ci --ignore-scripts --no-audit --no-fund`; lifecycle scripts stay
-disabled, so that setup does not qualify native components. There is no
-bundled automated test suite; changes require manual review, and the package
-must not be represented as release-qualified, natively certified, or safe for
-unattended work.
+disabled, so that setup does not qualify native components. The offline suite
+(`npm test`) covers the transport, runtime startup, controller recovery and
+evidence paths; it makes no model requests, so passing it does not make the
+package release-qualified, natively certified, or safe for unattended work.
 Tool capture, settlement, permissions, compaction, Fovea continuation and session
 reuse remain behavioral requirements, not currently certified outcomes. Separate
 owner authorization is required for future runtime evidence. Do not weaken a

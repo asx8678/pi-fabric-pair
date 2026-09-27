@@ -16,12 +16,8 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const POLICY_KEYS = ['mode', 'finalReview', 'maxRevisions', 'maxRevisionsPerStep', 'summaryDetail', 'maxStepFiles'];
 const LIMIT_KEYS = ['maxTurnsPerStep', 'taskTimeoutMs', 'activeStepTimeoutMs', 'maxQueuedTasks', 'maxQueuedReviews', 'maxReportsPerTask', 'maxReportBytes', 'maxAutomaticReportRepairs', 'maxAutomaticRecoveryAttempts', 'maxReportedCostUsd', 'maxOutputTokens'];
 const LIMIT_BOUNDS = Object.freeze({ maxReportsPerTask: [1, 1000], maxReportBytes: [1, 1048576], maxAutomaticReportRepairs: [0, 20] });
-/** Deprecated queue/recovery limits: valid when present (older snapshots), absent in new tasks. */
 const DEPRECATED_LIMIT_BOUNDS = Object.freeze({ maxQueuedTasks: [0, 128], maxQueuedReviews: [0, 128], maxAutomaticRecoveryAttempts: [0, 20] });
-// 'activating' is a granted-but-not-yet-sent attempt: running intent is persisted before the
-// work prompt is written, so a task found 'activating' after a crash provably never received it.
 const TASK_STATUSES = ['activating', 'running', 'awaiting_settle', 'question', 'blocked', 'review', 'paused', 'interrupted', 'completed', 'cancelled'];
-// startUnlocked also retains an unresolved task's status as a worker observation.
 const WORKER_STATUSES = ['stopped', 'starting', 'ready', 'working', 'settling', 'question', 'blocked', 'review', 'paused', 'attention', 'error', 'running', 'awaiting_settle', 'interrupted'];
 const AUTHORITY_PHASES = ['idle', 'running', 'waiting', 'paused', 'stopped'];
 const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEpoch', 'workerGeneration', 'nonce', 'sessionId', 'leaseId', 'attemptId', 'attemptNumber', 'planRevision', 'payload', 'payloadHash', 'createdAt'];
@@ -31,24 +27,16 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 
 /** @typedef {'final-only' | 'milestones' | 'every-step'} ReviewMode */
 /** @typedef {'minimal' | 'normal' | 'detailed'} SummaryDetail */
-/** maxStepFiles (every-step only) caps the files one step may change; older policies omit it.
- * @typedef {{mode: ReviewMode, finalReview: true, maxRevisions: number, maxRevisionsPerStep: number, summaryDetail: SummaryDetail, maxStepFiles?: number}} TaskPolicy */
+/** @typedef {{mode: ReviewMode, finalReview: true, maxRevisions: number, maxRevisionsPerStep: number, summaryDetail: SummaryDetail, maxStepFiles?: number}} TaskPolicy */
 /** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, maxRevisionsPerStep?: number, summaryDetail: SummaryDetail}} LegacyTaskPolicy */
-/** Removed per-step turn and overall task-duration limits. Legacy snapshots and
- * authority files may still carry them; they are validated but never enforced. */
 /** @typedef {{maxTurnsPerStep?: number, taskTimeoutMs?: number}} DeprecatedTurnTaskLimits */
 /** @typedef {{maxReportedCostUsd: number | null, maxOutputTokens: number | null}} BaseTaskLimits */
 /** @typedef {{activeStepTimeoutMs: number, maxQueuedTasks: number, maxQueuedReviews: number, maxReportsPerTask: number, maxReportBytes: number, maxAutomaticReportRepairs: number, maxAutomaticRecoveryAttempts: number}} DeferredTaskLimits */
-/** Limits of the live V1 controller: the queue and automatic-recovery limits are deprecated
- * (absent in new tasks, still valid in older snapshots). DeferredTaskLimits/TaskLimits keep the
- * full shape the parked actor layer (coordination.js) was designed against.
- * @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & {activeStepTimeoutMs: number, maxReportsPerTask: number, maxReportBytes: number, maxAutomaticReportRepairs: number, maxQueuedTasks?: number, maxQueuedReviews?: number, maxAutomaticRecoveryAttempts?: number}} CurrentTaskLimits */
+/** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & {activeStepTimeoutMs: number, maxReportsPerTask: number, maxReportBytes: number, maxAutomaticReportRepairs: number, maxQueuedTasks?: number, maxQueuedReviews?: number, maxAutomaticRecoveryAttempts?: number}} CurrentTaskLimits */
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & DeferredTaskLimits} TaskLimits */
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & Partial<DeferredTaskLimits>} LegacyTaskLimits */
 /** @typedef {{id: string, title: string, instructions: string, acceptance?: string[]}} Step */
-/** Every thinking level Pi defines, lowest first (Pi's ModelThinkingLevel). Which ones a
- * given model accepts comes from its registry entry, not from this list.
- * @typedef {'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'} Effort */
+/** @typedef {'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'} Effort */
 /** @type {readonly Effort[]} */
 export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 /** @typedef {{id: string, provider: string, model: string, effort: Effort, cwd: string | null, readOnly: boolean}} WorkerSpec */
@@ -77,41 +65,27 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {'activating' | 'running' | 'awaiting_settle' | 'question' | 'blocked' | 'review' | 'paused' | 'interrupted' | 'completed' | 'cancelled'} TaskStatus */
 /** @typedef {'stopped' | 'starting' | 'ready' | 'working' | 'settling' | 'question' | 'blocked' | 'review' | 'paused' | 'attention' | 'error' | 'running' | 'awaiting_settle' | 'interrupted'} WorkerStatus */
 /** @typedef {{hash: string, taskId: string, workerId: string, acceptedAt: number, status: string}} StoredRequestV1 */
-/** Delivery receipts are truthful offers, never confirmed comprehension: offeredAt/channel name the channel that received the report; observedAt records an explicit Main read. Legacy 'delivered' remains readable but is never newly written (sendMessage is fire-and-forget).
- * observedBranch pins the persisted conversation-branch counter the report was last inspected on; a decision on a different branch is stale and needs fresh inspection.
- * @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual' | 'auto' | 'prompt', observedAt?: number, observedBranch?: number, autoAttempts?: number, error?: string}} HistoricalNoticeV1 */
+/** @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual' | 'auto' | 'prompt', observedAt?: number, observedBranch?: number, autoAttempts?: number, error?: string}} HistoricalNoticeV1 */
 /** @typedef {HistoricalNoticeV1 & {ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} StoredNoticeV1 */
-/** Explicit, nonauthorizing Main logical-phase marker. It only channels report delivery after an explicit yield; it never grants worker or Main authority, and a missing marker never implies readiness or yield. revision is a real monotonic phase token; runToken binds a yield to the exact Main agent run that recorded it.
- * The armed flag records whether an empty yield may receive one future automatic boundary offer; activity is the logical activity epoch captured with the yield.
- * @typedef {{status: 'open' | 'yielded', since: number, ownerSession: string, ownerEpoch: number, revision?: number, runToken?: string | null, armed?: boolean, activity?: number}} StoredMainPhaseV1 */
+/** @typedef {{status: 'open' | 'yielded', since: number, ownerSession: string, ownerEpoch: number, revision?: number, runToken?: string | null, armed?: boolean, activity?: number}} StoredMainPhaseV1 */
 /** @typedef {{id: string, status: string, file: string}} StoredHistoryV1 */
 /** @typedef {{direction: 'main→worker' | 'worker→main', kind: string, at: number}} StoredExchangeV1 */
 /** @typedef {{reportId: string, reason: string, at: number}} StoredStaleReportV1 */
-/** External extension fields are retained as unknown, never treated as readiness or accounting evidence.
- * @typedef {Record<string, unknown> & {tokens: number | null, contextWindow: number, percent: number | null}} StoredContextUsage
- */
+/** @typedef {Record<string, unknown> & {tokens: number | null, contextWindow: number, percent: number | null}} StoredContextUsage */
 /** @typedef {{provider: string, id: string}} StoredModel */
 /** @typedef {{toolCallId: string, toolName: string, pid: number | null, detectedAt: number}} StoredDetachedEffectV1 */
-/** Measured assistant generation-speed aggregate published with current telemetry. */
 /** @typedef {{tokens: number, seconds: number}} StoredSpeedV1 */
 /** @typedef {{version: 1, nonce: string, workerId: string, pid: number, sessionId: string, context: StoredContextUsage | null, currentTool: string | null, lastUsage: UsageObservation | null, compacting: boolean, detachedEffect: StoredDetachedEffectV1 | null, phase: AuthorityPhase, model: StoredModel | null, at: number}} HistoricalTelemetryV1 */
 /** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number, warming?: import('./warming.js').WarmingObservation, speed?: StoredSpeedV1 | null, currentTarget?: string | null}} StoredTelemetryV1 */
 /** @typedef {{agentDir: string, piCompaction: unknown, cacheWarming: unknown, fabricCompaction: unknown, fabricShellHangMs: number | null, fabricAgentMaxDepth: number | null, prewalkDisabled: boolean, prewalkConfigured: boolean, note: string}} StoredNativeSettings */
-/** sessionFile is omitted by JSON serialization when Pi has no session file (Pi SessionManager API).
- * @typedef {{protocol: 1, pairVersion: string, pid: number, cwd: string, trusted: boolean, sessionId: string, sessionFile?: string, model: (StoredModel & {contextWindow: number}) | null, thinkingLevel: Effort | 'max' | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}, sourcePaths: string[], context: StoredContextUsage | null, native: StoredNativeSettings, checkedAt: number, scope: string, nonce: string, workerId: string, ownerSession: string}} HistoricalProbeV1
- */
-/** meshRoot is the live private-mesh environment observation; probes retained before the field existed may lack it.
- * @typedef {HistoricalProbeV1 & {ownerEpoch: number, workerGeneration: number, meshRoot?: string}} StoredProbeV1 */
-/** Exact 7583104 envelope omissions; this is not a partially-filled current envelope.
- * @typedef {Omit<ReportEnvelope, 'ownerEpoch' | 'workerGeneration' | 'attemptId' | 'attemptNumber'>} HistoricalReportEnvelopeV1
- */
+/** @typedef {{protocol: 1, pairVersion: string, pid: number, cwd: string, trusted: boolean, sessionId: string, sessionFile?: string, model: (StoredModel & {contextWindow: number}) | null, thinkingLevel: Effort | 'max' | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}, sourcePaths: string[], context: StoredContextUsage | null, native: StoredNativeSettings, checkedAt: number, scope: string, nonce: string, workerId: string, ownerSession: string}} HistoricalProbeV1 */
+/** @typedef {HistoricalProbeV1 & {ownerEpoch: number, workerGeneration: number, meshRoot?: string}} StoredProbeV1 */
+/** @typedef {Omit<ReportEnvelope, 'ownerEpoch' | 'workerGeneration' | 'attemptId' | 'attemptNumber'>} HistoricalReportEnvelopeV1 */
 /** @typedef {HistoricalReportEnvelopeV1 & {checkpoint: Checkpoint, snapshotRef: string, inspectedAt?: number}} HistoricalFinalizedReportV1 */
 /** @typedef {Omit<ContinuationDecisionFields, 'ownerEpoch' | 'workerGeneration' | 'attemptId' | 'deliveryOperationId'> & DecisionCheckpoint} HistoricalContinuationDecisionV1 */
 /** @typedef {CancelDecision | HistoricalContinuationDecisionV1} HistoricalDecisionV1 */
 /** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, summaryDetail: SummaryDetail}} PreDeferredPolicyV1 */
-/** 7583104 config.js accepts final/milestones/strict/adaptive; adaptive is structurally checked but never recognized.
- * @typedef {Omit<PreDeferredPolicyV1, 'mode'> & {mode: 'final' | 'milestones' | 'strict'}} HistoricalTaskPolicyV1
- */
+/** @typedef {Omit<PreDeferredPolicyV1, 'mode'> & {mode: 'final' | 'milestones' | 'strict'}} HistoricalTaskPolicyV1 */
 /** @typedef {PreDeferredPolicyV1 & {maxRevisionsPerStep: number}} StoredPolicyV1 */
 /** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number}} StoredTaskFieldsV1 */
 /** @typedef {StoredTaskFieldsV1 & {workerId: string, attemptId: string, attemptNumber: number, pendingReport: ReportEnvelope | null, report: FinalizedReport | null, decisions: Record<string, StoredDecision>} & ({policy: StoredPolicyV1, limits: TaskLimits} | {policy: PreDeferredPolicyV1, limits: BaseTaskLimits})} StoredTaskV1 */
@@ -119,8 +93,7 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null, pid?: number, spawnedAt?: number}} StoredWorkerFieldsV1 */
 /** @typedef {StoredWorkerFieldsV1 & {workerGeneration: number, task: StoredTaskV1 | null}} StoredWorkerV1 */
 /** @typedef {StoredWorkerFieldsV1 & {task: HistoricalTaskV1 | null}} HistoricalWorkerV1 */
-/** state.branch is a persisted monotonic conversation-branch counter (normal turns and compaction never bump it); it only fences stale branch decisions, never authorizes anything.
- * @typedef {{version: 1, ownerSession: string, ownerEpoch: number, cwd: string, workers: Record<string, StoredWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, StoredNoticeV1>, mainPhase?: StoredMainPhaseV1, branch?: number}} StoredStateV1 */
+/** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, cwd: string, workers: Record<string, StoredWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, StoredNoticeV1>, mainPhase?: StoredMainPhaseV1, branch?: number}} StoredStateV1 */
 /** @typedef {{version: 1, ownerSession: string, cwd: string, workers: Record<string, HistoricalWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, HistoricalNoticeV1>, mainPhase?: StoredMainPhaseV1, branch?: number}} HistoricalStateV1 */
 /** @typedef {'invalid-field' | 'missing-required-field' | 'mixed-identity' | 'partial-policy-layout' | 'hash-mismatch' | 'inconsistent-reference' | 'unsupported-version' | 'unsupported-shape' | 'unsupported-policy'} StoredIssueCode */
 /** @typedef {{code: StoredIssueCode, path: string, message: string}} StoredIssue */
@@ -130,23 +103,25 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {{taskLayouts: StoredTaskLayout[], diagnosticLayouts: StoredDiagnosticLayout[], reconciliationReasons: ReconciliationReason[], unsupported: StoredIssue[]}} ProfileFacts */
 /** @typedef {{nonAuthorizing: true, original: unknown} & ({kind: 'recognized', identityLayout: 'pre-identity' | 'identity-bearing', taskLayouts: readonly StoredTaskLayout[], diagnosticLayouts: readonly StoredDiagnosticLayout[], storedBinding: {ownerSession: string, cwd: string}, bindingStatus: 'unchecked', reconciliationReasons: readonly ReconciliationReason[]} | {kind: 'rejected', category: 'corrupt' | 'unsupported', issue: StoredIssue})} StoredStateClassification */
 
-/** Only known validation failures are caught by classification. Programming/I/O errors escape. */
 class StoredValidationError extends Error {
   /** @param {StoredIssueCode} code @param {string} path @param {string} message @param {'corrupt' | 'unsupported'} [category] */
   constructor(code, path, message, category = 'corrupt') {
     super(message); this.name = 'StoredValidationError'; this.code = code; this.path = path; this.category = category;
   }
 }
-/** @param {unknown} condition @param {string} message @param {string} [path] @param {StoredIssueCode} [code] @returns {asserts condition} */
+/**
+ * @param {unknown} condition
+ * @param {string} message
+ * @param {string} [path]
+ * @param {StoredIssueCode} [code]
+ * @returns {asserts condition}
+ */
 function invariant(condition, message, path = 'state', code = 'invalid-field') {
   if (!condition) throw new StoredValidationError(code, path, message);
 }
 /** @param {unknown} value @returns {string} */
 function payloadDigest(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
-/** Check inert JSON without reading accessors, invoking proxies/toJSON, or serializing it.
- * Iterative ancestor tracking rejects cycles without turning a RangeError into a data diagnosis.
- * @param {unknown} value @param {string} path
- */
+/** @param {unknown} value @param {string} path */
 function assertInertJSON(value, path) {
   /** @type {{value: unknown, path: string, leave?: object}[]} */
   const stack = [{ value, path }];
@@ -340,9 +315,7 @@ function validateWorkerSpec(value, label) { assertWorkerSpec(value, label); retu
 
 /** @returns {ProfileFacts} */
 function profileFacts() { return { taskLayouts: [], diagnosticLayouts: [], reconciliationReasons: [], unsupported: [] }; }
-/** Delayed until the whole selected structural profile and its retained references are checked.
- * @param {ProfileFacts} facts
- */
+/** @param {ProfileFacts} facts */
 function rejectUnsupported(facts) {
   const issue = facts.unsupported[0];
   if (issue) throw new StoredValidationError(issue.code, issue.path, issue.message, 'unsupported');
@@ -380,7 +353,6 @@ function checkStoredPolicy(task, label, historical, facts) {
 function checkContext(value, label) {
   if (value === null) return;
   const context = object(value, label);
-  // Pi ContextUsage (installed declaration and supplied 0.87.1 source). Extension slots stay unknown.
   const tokens = required(context, 'tokens', label), percent = required(context, 'percent', label);
   const window = nonnegative(required(context, 'contextWindow', label), `${label}.contextWindow`);
   invariant(window > 0, `${label}.contextWindow must be positive`, `${label}.contextWindow`);
@@ -395,16 +367,13 @@ function checkModel(value, label, probe) {
   text(required(model, 'provider', label), `${label}.provider`, 999); text(required(model, 'id', label), `${label}.id`, 999);
   if (probe) nonnegative(required(model, 'contextWindow', label), `${label}.contextWindow`);
 }
-/** worker.js stores null until a shell job outlives its call; this is not a readiness flag.
- * @param {unknown} value @param {string} label
- */
+/** @param {unknown} value @param {string} label */
 function checkDetachedEffect(value, label) {
   if (value === null) return;
   const effect = object(value, label); keys(effect, ['toolCallId', 'toolName', 'pid', 'detectedAt'], label);
   text(required(effect, 'toolCallId', label), `${label}.toolCallId`, 10000);
   text(required(effect, 'toolName', label), `${label}.toolName`, 10000);
   const pid = required(effect, 'pid', label);
-  // The producer retains any integer supplied in tool details, not a verified OS PID.
   if (pid !== null) invariant(typeof pid === 'number' && Number.isInteger(pid), `${label}.pid must be an integer or null`, `${label}.pid`);
   integer(required(effect, 'detectedAt', label), `${label}.detectedAt`);
 }
@@ -418,8 +387,7 @@ function diagnosticHistorical(record, label, kind, facts) {
   facts.reconciliationReasons.push({ code: 'diagnostic-provenance-unchecked', path: label });
   return historical;
 }
-/** Measured assistant generation-speed aggregate; a weighted sum (tokens/seconds), never an average of rates.
- * @param {unknown} value @param {string} label */
+/** @param {unknown} value @param {string} label */
 function checkSpeed(value, label) {
   const speed = object(value, label); keys(speed, ['tokens', 'seconds'], label);
   for (const key of ['tokens', 'seconds']) invariant(typeof speed[key] === 'number' && Number.isFinite(speed[key]) && speed[key] > 0, `${label}.${key} must be a positive finite number`, `${label}.${key}`);
@@ -431,7 +399,6 @@ function checkTelemetry(value, label, workerId, ownerSession, facts) {
   keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration', 'warming', 'speed', 'currentTarget'])], label);
   if (!historical && Object.hasOwn(record, 'warming')) validateWarmingObservation(record.warming);
   if (!historical && Object.hasOwn(record, 'speed') && record.speed !== null) checkSpeed(record.speed, `${label}.speed`);
-  // What the current tool acts on, for display: a workspace-relative path or a shell program name.
   if (!historical && Object.hasOwn(record, 'currentTarget') && record.currentTarget !== null) text(record.currentTarget, `${label}.currentTarget`, 200);
   knownVersion(required(record, 'version', label), `${label}.version`, 1);
   text(required(record, 'nonce', label), `${label}.nonce`, 10000); text(required(record, 'sessionId', label), `${label}.sessionId`, 10000);
@@ -446,10 +413,7 @@ function checkTelemetry(value, label, workerId, ownerSession, facts) {
   bool(required(record, 'compacting', label), `${label}.compacting`); checkDetachedEffect(required(record, 'detachedEffect', label), `${label}.detachedEffect`);
   choice(required(record, 'phase', label), AUTHORITY_PHASES, `${label}.phase`); checkModel(required(record, 'model', label), `${label}.model`, false);
 }
-/** Intrinsic current-profile validation only; no runtime provenance is established.
- * The borrowed original is returned unchanged, including opaque context fields.
- * @param {unknown} value @param {string} label @returns {asserts value is StoredTelemetryV1}
- */
+/** @param {unknown} value @param {string} label @returns {asserts value is StoredTelemetryV1} */
 function assertCurrentTelemetry(value, label) {
   assertInertJSON(value, label);
   const record = object(value, label), facts = profileFacts();
@@ -460,14 +424,12 @@ function assertCurrentTelemetry(value, label) {
   for (const key of ['ownerSession', 'nonce', 'sessionId']) invariant(text(record[key], `${label}.${key}`, 10000).length > 0, `${label}.${key} must not be empty`, `${label}.${key}`);
   rejectUnsupported(facts);
 }
-/** Validate the complete current telemetry record, not its live owner/session binding.
- * @param {unknown} value @param {string} [label] @returns {StoredTelemetryV1}
- */
+/** @param {unknown} value @param {string} [label] @returns {StoredTelemetryV1} */
 export function validateCurrentTelemetry(value, label = 'telemetry') { assertCurrentTelemetry(value, label); return value; }
 
-/** Intrinsic snapshot validation preserves entry order AND each entry's field order.
- * It does not prove storage ownership, blob contents, or a live repository binding.
- * @param {unknown} value @param {{maxFiles: number, maxTotalBytes: number}} limits
+/**
+ * @param {unknown} value
+ * @param {{maxFiles: number, maxTotalBytes: number}} limits
  * @returns {asserts value is import('./evidence.js').Snapshot}
  */
 function assertSnapshot(value, limits) {
@@ -502,10 +464,7 @@ function assertSnapshot(value, limits) {
   integer(required(snapshot, 'capturedAt', label), `${label}.capturedAt`);
   invariant(hash(required(snapshot, 'hash', label), `${label}.hash`) === payloadDigest({ root, head, entries }), 'Snapshot identity hash mismatch', `${label}.hash`, 'hash-mismatch');
 }
-/** Return the borrowed, fully checked snapshot without sorting or reconstructing it.
- * @param {unknown} value @param {{maxFiles: number, maxTotalBytes: number}} limits
- * @returns {import('./evidence.js').Snapshot}
- */
+/** @param {unknown} value @param {{maxFiles: number, maxTotalBytes: number}} limits @returns {import('./evidence.js').Snapshot} */
 export function validateSnapshot(value, limits) { assertSnapshot(value, limits); return value; }
 
 /** @param {unknown} value @param {string} label */
@@ -513,7 +472,6 @@ function checkNativeSettings(value, label) {
   const native = object(value, label);
   keys(native, ['agentDir', 'piCompaction', 'cacheWarming', 'fabricCompaction', 'fabricShellHangMs', 'fabricAgentMaxDepth', 'prewalkDisabled', 'prewalkConfigured', 'note'], label);
   text(required(native, 'agentDir', label), `${label}.agentDir`, 10000); text(required(native, 'note', label), `${label}.note`, 10000);
-  // These are raw external configuration JSON, not locally validated policy objects.
   for (const key of ['piCompaction', 'fabricCompaction', 'cacheWarming']) required(native, key, label);
   for (const key of ['fabricShellHangMs', 'fabricAgentMaxDepth']) {
     const number = required(native, key, label); if (number !== null) integer(number, `${label}.${key}`);
@@ -528,9 +486,6 @@ function checkProbe(value, label, workerId, ownerSession, facts) {
   knownVersion(required(probe, 'protocol', label), `${label}.protocol`, 1); integer(required(probe, 'pid', label), `${label}.pid`, 1);
   for (const key of ['pairVersion', 'cwd', 'sessionId', 'scope', 'nonce']) text(required(probe, key, label), `${label}.${key}`, 10000);
   if (Object.hasOwn(probe, 'sessionFile')) text(probe.sessionFile, `${label}.sessionFile`, 10000);
-  // Live probes always carry the private mesh root observation; retained probes
-  // written before this field existed may legitimately lack it. Presence must
-  // still be well formed; live readiness additionally requires an exact match.
   if (Object.hasOwn(probe, 'meshRoot')) {
     const meshRoot = text(required(probe, 'meshRoot', label), `${label}.meshRoot`, 10000);
     invariant(path.isAbsolute(meshRoot), `${label}.meshRoot must be an absolute path`, `${label}.meshRoot`);
@@ -544,18 +499,23 @@ function checkProbe(value, label, workerId, ownerSession, facts) {
   const capabilities = object(required(probe, 'capabilities', label), `${label}.capabilities`); keys(capabilities, ['fabric', 'fovea', 'pairReport'], `${label}.capabilities`);
   for (const key of ['fabric', 'fovea', 'pairReport']) bool(required(capabilities, key, `${label}.capabilities`), `${label}.capabilities.${key}`);
   const versions = object(required(probe, 'versions', label), `${label}.versions`); keys(versions, ['fabric', 'fovea'], `${label}.versions`);
-  // packageVersion reads arbitrary package JSON, including an absent version which
-  // JSON serialization omits. Neither extension slot has a consumed concrete domain.
   array(required(probe, 'sourcePaths', label), `${label}.sourcePaths`).forEach((entry, index) => text(entry, `${label}.sourcePaths[${index}]`, 10000));
   checkContext(required(probe, 'context', label), `${label}.context`); checkNativeSettings(required(probe, 'native', label), `${label}.native`);
 }
-/** @param {JSONObject} report @param {string} label @param {JSONObject} task @param {string} workerId @param {Set<string>} stepIds @param {boolean} current @param {boolean} historical */
+/**
+ * @param {JSONObject} report
+ * @param {string} label
+ * @param {JSONObject} task
+ * @param {string} workerId
+ * @param {Set<string>} stepIds
+ * @param {boolean} current
+ * @param {boolean} historical
+ */
 function validateTaskReportIdentity(report, label, task, workerId, stepIds, current, historical) {
   const payload = object(report.payload, `${label}.payload`);
   reference(payload.taskId === task.id, `${label}.payload.taskId`, 'Report targets a different task');
   reference(report.workerId === workerId, `${label}.workerId`, 'Report targets a different worker');
   reference(typeof payload.stepId === 'string' && stepIds.has(payload.stepId), `${label}.payload.stepId`, 'Report targets a step outside the task plan');
-  // Matching attempt IDs cannot contradict their tuple, even in resolved history.
   if (current || !historical && report.attemptId === task.attemptId) {
     for (const key of historical ? ['planRevision', 'leaseId'] : ['attemptId', 'attemptNumber', 'planRevision', 'leaseId']) reference(report[key] === task[key], `${label}.${key}`, 'Report contradicts its task attempt');
   }
@@ -598,8 +558,6 @@ function checkStoredTask(value, label, workerId, historical, facts) {
     checkReport(value, at, historical, key === 'report'); const report = object(value, at), reportId = id(report.reportId, `${at}.reportId`);
     const waiting = ['question', 'blocked', 'review'].includes(status);
     const suspended = status === 'paused' || status === 'interrupted';
-    // previousStatus survives resume/attempt rotation: it cannot bind old evidence
-    // to the new attempt. A suspended report is current only with a matching fence.
     const sameAttempt = historical ? report.leaseId === task.leaseId && report.planRevision === task.planRevision : report.attemptId === task.attemptId;
     const decided = Object.hasOwn(decisions, reportId), current = key === 'pendingReport' || !decided && (waiting || suspended && sameAttempt);
     validateTaskReportIdentity(report, at, task, workerId, stepIds, current, historical);
@@ -631,7 +589,14 @@ function checkStoredTask(value, label, workerId, historical, facts) {
 function assertStoredTask(value, label, workerId) { const facts = profileFacts(); checkStoredTask(value, label, workerId, false, facts); rejectUnsupported(facts); }
 /** @param {unknown} value @param {string} label @param {string} workerId @returns {StoredTaskV1} */
 function validateStoredTask(value, label, workerId) { assertStoredTask(value, label, workerId); return value; }
-/** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @param {boolean} historical @param {ProfileFacts} facts */
+/**
+ * @param {unknown} value
+ * @param {string} label
+ * @param {string} workerId
+ * @param {string} ownerSession
+ * @param {boolean} historical
+ * @param {ProfileFacts} facts
+ */
 function checkWorkerRecord(value, label, workerId, ownerSession, historical, facts) {
   const record = object(value, label);
   keys(record, ['id', 'cwd', 'repoRoot', 'status', 'sessionId', 'sessionFile', 'bound', 'task', 'history', 'usage', 'error', 'diagnosticFile', 'lastObservation', 'lastExchange', 'staleReports', 'probe', 'pid', 'spawnedAt', ...(historical ? [] : ['workerGeneration'])], label);
@@ -650,7 +615,6 @@ function checkWorkerRecord(value, label, workerId, ownerSession, historical, fac
   validateUsageTotals(required(record, 'usage', label), `${label}.usage`);
   if (Object.hasOwn(record, 'error')) nullableText(record.error, `${label}.error`);
   if (Object.hasOwn(record, 'diagnosticFile')) text(record.diagnosticFile, `${label}.diagnosticFile`, 10000);
-  // Process identity of the current generation, recorded at spawn for exit proof after a crash.
   if (Object.hasOwn(record, 'pid')) integer(record.pid, `${label}.pid`, 1);
   if (Object.hasOwn(record, 'spawnedAt')) integer(record.spawnedAt, `${label}.spawnedAt`);
   if (Object.hasOwn(record, 'lastObservation')) checkTelemetry(record.lastObservation, `${label}.lastObservation`, workerId, ownerSession, facts);
@@ -664,12 +628,18 @@ function checkWorkerRecord(value, label, workerId, ownerSession, historical, fac
     stale.forEach((entry, index) => { const at = `${label}.staleReports[${index}]`, report = object(entry, at); keys(report, ['reportId', 'reason', 'at'], at); id(required(report, 'reportId', at), `${at}.reportId`); text(required(report, 'reason', at), `${at}.reason`, 10000); integer(required(report, 'at', at), `${at}.at`); });
   }
 }
-/** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @returns {asserts value is StoredWorkerV1} */
+/**
+ * @param {unknown} value
+ * @param {string} label
+ * @param {string} workerId
+ * @param {string} ownerSession
+ * @returns {asserts value is StoredWorkerV1}
+ */
 function assertWorkerRecord(value, label, workerId, ownerSession) { const facts = profileFacts(); checkWorkerRecord(value, label, workerId, ownerSession, false, facts); rejectUnsupported(facts); }
 /** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @returns {StoredWorkerV1} */
 function validateWorkerRecord(value, label, workerId, ownerSession) { assertWorkerRecord(value, label, workerId, ownerSession); return value; }
 
-/** Add only fields absent from the known pre-identity state shape. Present malformed values are preserved for validation failure. @param {unknown} value @param {() => string} createAttemptId */
+/** @param {unknown} value @param {() => string} createAttemptId */
 export function migrateStoredState(value, createAttemptId) {
   const state = structuredClone(object(value, 'state')); let migrated = false;
   invariant(state.version === STATE_VERSION, `Unsupported Pair state version ${String(state.version)}`);
@@ -697,9 +667,7 @@ export function migrateStoredState(value, createAttemptId) {
   return { state, migrated };
 }
 
-/** Select once by own-property markers; failures never retry a weaker layout.
- * @param {JSONObject} state @returns {boolean} true for the proven pre-identity layout
- */
+/** @param {JSONObject} state @returns {boolean} */
 function selectIdentityLayout(state) {
   const version = integer(required(state, 'version', 'state'), 'state.version');
   if (version !== STATE_VERSION) throw new StoredValidationError('unsupported-version', 'state.version', 'Unsupported Pair state version', 'unsupported');
@@ -734,21 +702,15 @@ function checkNotice(value, label, reportId, historical) {
   if (!historical) for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(notice, key, label), `${label}.${key}`, 1);
   choice(required(notice, 'status', label), ['pending', 'delivery_pending', 'offered', 'delivered', 'delivery_failed', 'resolved', 'superseded'], `${label}.status`);
   integer(required(notice, 'createdAt', label), `${label}.createdAt`);
-  // Receipts survive subsequent status changes; no status is an observation receipt.
   if (Object.hasOwn(notice, 'deliveredAt')) integer(notice.deliveredAt, `${label}.deliveredAt`);
   if (Object.hasOwn(notice, 'error')) text(notice.error, `${label}.error`, 2000);
-  // Offer receipts name the delivery channel that received the report; observedAt
-  // records an explicit Main read. Neither confirms the model comprehended it.
   if (Object.hasOwn(notice, 'offeredAt')) integer(notice.offeredAt, `${label}.offeredAt`);
   if (Object.hasOwn(notice, 'channel')) choice(notice.channel, ['tool-result', 'boundary', 'manual', 'auto', 'prompt'], `${label}.channel`);
-  // Unconfirmed automatic delivery attempts; bounded retries fall back to the inbox.
   if (Object.hasOwn(notice, 'autoAttempts')) integer(notice.autoAttempts, `${label}.autoAttempts`, 0);
   if (Object.hasOwn(notice, 'observedAt')) integer(notice.observedAt, `${label}.observedAt`);
-  // The branch the report was last inspected on; only fences stale decisions.
   if (Object.hasOwn(notice, 'observedBranch')) integer(notice.observedBranch, `${label}.observedBranch`, 0);
 }
-/** Explicit Main-phase marker: readable in current and legacy profiles, never authorizing.
- * @param {unknown} value @param {string} label */
+/** @param {unknown} value @param {string} label */
 function checkMainPhase(value, label) {
   const phase = object(value, label);
   keys(phase, ['status', 'since', 'ownerSession', 'ownerEpoch', 'revision', 'runToken', 'armed', 'activity'], label);
@@ -756,16 +718,12 @@ function checkMainPhase(value, label) {
   integer(required(phase, 'since', label), `${label}.since`);
   text(required(phase, 'ownerSession', label), `${label}.ownerSession`, 10000);
   integer(required(phase, 'ownerEpoch', label), `${label}.ownerEpoch`, 1);
-  // Interim-shape compatibility: absent revision/runToken stays readable but is
-  // recovered conservatively (never boundary-eligible), never authorizing.
   if (Object.hasOwn(phase, 'revision')) integer(phase.revision, `${label}.revision`, 0);
   if (Object.hasOwn(phase, 'runToken') && phase.runToken !== null) text(phase.runToken, `${label}.runToken`, 200);
   if (Object.hasOwn(phase, 'armed')) bool(phase.armed, `${label}.armed`);
   if (Object.hasOwn(phase, 'activity')) integer(phase.activity, `${label}.activity`, 0);
 }
-/** Cross-check only retained identities. No filesystem checks or obligations inferred from absence.
- * @param {JSONObject} state @param {boolean} historical
- */
+/** @param {JSONObject} state @param {boolean} historical */
 function checkRetainedReferences(state, historical) {
   /** @type {Map<string, {workerId: string, task?: JSONObject}>} */
   const tasks = new Map();
@@ -839,7 +797,6 @@ function checkRetainedReferences(state, historical) {
     const decided = decisions.get(reportId);
     if (decided) {
       reference(notice.workerId === decided.workerId && notice.taskId === decided.task.id, at, 'Notice contradicts its retained decision');
-      // Decision owner/generation can change when Main resolves a wait after restart.
       if (!historical && decided.decision.action !== 'cancel') reference(notice.attemptId === decided.decision.attemptId, `${at}.attemptId`, 'Notice contradicts its retained decision attempt');
     }
   }
@@ -860,9 +817,7 @@ function checkStoredStateProfile(value, historical, facts) {
   for (const [requestId, request] of Object.entries(requests)) checkRequest(request, `state.requests.${id(requestId, 'state.requests key')}`);
   const notices = object(required(state, 'notices', 'state'), 'state.notices');
   for (const [reportId, notice] of Object.entries(notices)) checkNotice(notice, `state.notices.${reportId}`, id(reportId, 'state.notices key'), historical);
-  // Optional in every profile: absent legacy/current data never implies yield.
   if (Object.hasOwn(state, 'mainPhase')) checkMainPhase(state.mainPhase, 'state.mainPhase');
-  // Persisted conversation-branch counter: readable in every profile, never authorizing.
   if (Object.hasOwn(state, 'branch')) integer(state.branch, 'state.branch', 0);
   checkRetainedReferences(state, historical);
   if (historical) for (const diagnostic of facts.diagnosticLayouts) {
@@ -884,10 +839,7 @@ export function validateStoredState(value, expected) {
   reference(value.cwd === expected.cwd, 'state.cwd', 'Stored Pair state belongs to a different workspace');
   return value;
 }
-/** Pure recognition of inert decoded JSON, never admission, normalization, migration or backup.
- * The borrowed original is not a promise of preserved JSON bytes or trusted provenance.
- * @param {unknown} value @returns {StoredStateClassification}
- */
+/** @param {unknown} value @returns {StoredStateClassification} */
 export function classifyStoredState(value) {
   try {
     assertInertJSON(value, 'state');
@@ -921,9 +873,7 @@ function assertReportPayload(value, label = 'report payload') {
 /** @param {unknown} value @param {string} [label] @returns {ReportPayload} */
 export function validateReportPayload(value, label = 'report payload') { assertReportPayload(value, label); return value; }
 
-/** Shared exact current/pre-identity envelope profile. The payload itself is never rebuilt.
- * @param {unknown} value @param {string} label @param {boolean} historical @param {boolean} finalized
- */
+/** @param {unknown} value @param {string} label @param {boolean} historical @param {boolean} finalized */
 function checkReport(value, label, historical, finalized) {
   const report = object(value, label), envelopeKeys = historical ? REPORT_KEYS.filter(key => !['ownerEpoch', 'workerGeneration', 'attemptId', 'attemptNumber'].includes(key)) : REPORT_KEYS;
   keys(report, finalized ? [...envelopeKeys, 'checkpoint', 'snapshotRef', 'inspectedAt'] : envelopeKeys, label);

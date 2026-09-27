@@ -20,31 +20,18 @@ export function normalizedUsage(usage) {
   const cost = usage.cost && finiteNumber(usage.cost.total) && usage.cost.total >= 0 ? usage.cost.total : null;
   return { input, cacheRead, cacheWrite, totalInput, output, cacheRatio: totalInput ? cacheRead / totalInput : null, cost, observedAt: Date.now() };
 }
-/** Select display telemetry only; accounting still consumes every normalized response.
- * Report-stop/error placeholders with no measured input must not erase a sample or
- * refresh its timestamp. A real request with zero cache reads IS a new measurement.
- * Callers own lifecycle resets: Worker retains through compaction/model changes and
- * resets on session start; Main keeps its own reset policy.
- * @param {unknown} previous
- * @param {Parameters<typeof normalizedUsage>[0]} usage
- * @returns {UsageObservation | null}
- */
+/** @param {unknown} previous @param {Parameters<typeof normalizedUsage>[0]} usage @returns {UsageObservation | null} */
 export function selectLastMeasuredUsage(previous, usage) {
   const next = normalizedUsage(usage);
   if (next && Number.isFinite(next.totalInput) && next.totalInput > 0) return next;
   const retained = validateUsageObservation(previous ?? null, 'Last measured usage');
   return retained && retained.totalInput > 0 ? retained : null;
 }
-/** Fold one measured assistant response into the streaming-throughput aggregate.
- * Timing spans the worker's message_start→message_end monotonic clock; Pi emits
- * message_start when the provider response begins streaming, so pre-response
- * request/prefill latency is excluded, and tool execution or idle gaps are
- * never counted: nothing between responses is counted. Unmatched starts, zero-output
- * responses and nonpositive/nonfinite durations are dropped and never
- * overwrite a good aggregate; the result is a weighted sum
- * (tokens/seconds), never an arithmetic mean of request rates.
+/**
  * @param {{tokens: number, seconds: number} | null} speed
- * @param {number | null} start @param {number} end @param {unknown} usage
+ * @param {number | null} start
+ * @param {number} end
+ * @param {unknown} usage
  * @returns {{tokens: number, seconds: number} | null}
  */
 export function addSpeedSample(speed, start, end, usage) {
@@ -73,12 +60,7 @@ export function addUsage(total = {}, usage) {
   out.cacheRatio = out.totalInput ? out.cacheRead / out.totalInput : null;
   return out;
 }
-/** Enforced task budgets: reported inference cost and output tokens only. The former
- * per-step turn limit and overall task duration limit were removed and are never
- * checked here, even when a legacy snapshot still carries their values.
- * @param {{usage?: Partial<UsageTotals> | null}} task
- * @param {import('./contracts.js').BaseTaskLimits} limits @returns {string | null}
- */
+/** @param {{usage?: Partial<UsageTotals> | null}} task @param {import('./contracts.js').BaseTaskLimits} limits @returns {string | null} */
 export function limitExceeded(task, limits) {
   if (limits.maxReportedCostUsd !== null && (task.usage?.reportedCost || 0) >= limits.maxReportedCostUsd) return 'Reported inference-cost budget reached';
   if (limits.maxOutputTokens !== null && (task.usage?.output || 0) >= limits.maxOutputTokens) return 'Output-token budget reached';

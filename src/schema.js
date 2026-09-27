@@ -6,7 +6,6 @@ import { validateReportPayload } from './contracts.js';
 /** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel', feedback: string, checkpointHash?: string, steps?: Step[]}} DecisionShape */
 /** @typedef {DecisionShape & ({action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'cancel'})} DecisionPayload */
 
-// The JSON Schema subset understood by validate; these types add no schema fields.
 /** @typedef {{description?: string, enum?: readonly unknown[]}} SchemaOptions */
 /** @typedef {SchemaOptions & {type: 'string', minLength?: number, maxLength?: number}} StringSchema */
 /** @typedef {SchemaOptions & {type: 'boolean'}} BooleanSchema */
@@ -14,12 +13,21 @@ import { validateReportPayload } from './contracts.js';
 /** @typedef {SchemaOptions & {type: 'object', properties: Record<string, Schema>, required?: readonly string[], additionalProperties?: boolean}} ObjectSchema */
 /** @typedef {StringSchema | BooleanSchema | ArraySchema | ObjectSchema} Schema */
 
-// Standard JSON Schema is also a valid TypeBox schema. No runtime dependency is needed.
-/** @param {string} description @param {number} [maxLength] @returns {{type: 'string', description: string, minLength: 1, maxLength: number}} */
+/**
+ * @param {string} description
+ * @param {number} [maxLength]
+ * @returns {{type: 'string', description: string, minLength: 1, maxLength: number}}
+ */
 const string = (description, maxLength = 24000) => ({ type: 'string', description, minLength: 1, maxLength });
 /** @template {Schema} Item @param {Item} items @param {number} [maxItems] @returns {{type: 'array', items: Item, maxItems: number}} */
 const array = (items, maxItems = 64) => ({ type: 'array', items, maxItems });
-/** @template {Record<string, Schema>} Properties @template {keyof Properties & string} Key @param {Properties} properties @param {Key[]} required @returns {{type: 'object', properties: Properties, required: Key[], additionalProperties: false}} */
+/**
+ * @template {Record<string, Schema>} Properties
+ * @template {keyof Properties & string} Key
+ * @param {Properties} properties
+ * @param {Key[]} required
+ * @returns {{type: 'object', properties: Properties, required: Key[], additionalProperties: false}}
+ */
 const object = (properties, required) => ({ type: 'object', properties, required, additionalProperties: false });
 /** @template {string} Value @param {Value[]} values @returns {{type: 'string', enum: Value[]}} */
 const enumOf = values => ({ type: 'string', enum: values });
@@ -62,8 +70,6 @@ export function validate(schema, value, label = 'input') {
     assert(isObject(value), `${label} must be an object`);
     for (const key of schema.required || []) assert(Object.hasOwn(value, key), `${label}.${key} is required`);
     for (const [key, v] of Object.entries(value)) { assert(Object.hasOwn(schema.properties, key), `${label}.${key} is not allowed`); validate(schema.properties[key], v, `${label}.${key}`); }
-    // Decoded JSON has enumerable own fields, but callers can supply objects
-    // with inherited or non-enumerable declared fields. Check those too.
     for (const [key, fieldSchema] of Object.entries(schema.properties)) {
       if (!(key in value)) continue;
       assert(Object.hasOwn(value, key), `${label}.${key} must be an own property`);
@@ -72,7 +78,6 @@ export function validate(schema, value, label = 'input') {
   } else if (schema.type === 'array') {
     assert(isArray(value), `${label} must be an array`);
     assert(value.length >= (schema.minItems || 0) && value.length <= (schema.maxItems ?? Infinity), `${label}: invalid number of items`);
-    // forEach skips holes; every slot must be present and validated.
     for (let i = 0; i < value.length; i++) {
       assert(Object.hasOwn(value, i), `${label}[${i}] is required`);
       validate(schema.items, value[i], `${label}[${i}]`);
@@ -83,9 +88,6 @@ export function validate(schema, value, label = 'input') {
   return value;
 }
 
-// Each shape assertion validates every required and optional field through the
-// corresponding public schema, including nested steps/acceptance and enums.
-// Keep the original object: copying/defaulting would change idempotency hashes.
 /** @param {unknown} input @returns {asserts input is DispatchPayload} */
 function assertDispatchShape(input) { validate(dispatchSchema, input); }
 /** @param {unknown} input @returns {asserts input is DecisionShape} */
@@ -110,11 +112,9 @@ export function validateDispatch(input) {
 }
 /** @param {unknown} input @returns {ReportPayload} */
 export function validateReport(input) { return validateReportPayload(input); }
-/** UTF-8 byte ceiling for one report payload, checked by both the worker and the controller.
- * @param {string | undefined} summaryDetail */
+/** @param {string | undefined} summaryDetail */
 export function reportByteLimit(summaryDetail) { return { minimal: 4000, normal: 12000, detailed: 32000 }[summaryDetail || 'normal'] || 12000; }
-/** The summary policy sets the ceiling; limits.maxReportBytes can only lower it.
- * @param {unknown} payload @param {string | undefined} summaryDetail @param {object | null} [limits] */
+/** @param {unknown} payload @param {string | undefined} summaryDetail @param {object | null} [limits] */
 export function assertReportSize(payload, summaryDetail, limits = null) {
   const bytes = limits && 'maxReportBytes' in limits ? limits.maxReportBytes : undefined;
   const configured = typeof bytes === 'number' ? bytes : Infinity;

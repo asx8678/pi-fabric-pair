@@ -3,7 +3,6 @@ import path from 'node:path';
 import { agentDir, assert, atomicJSON, digest, exists, merge, plain, readJSON as readUntypedJSON, safeId } from './util.js';
 import { EFFORT_LEVELS } from './contracts.js';
 
-// Keep readJSON's argument-count semantics (a missing required file still throws).
 /** @type {(file: string, fallback?: unknown, maxBytes?: number) => Promise<unknown>} */
 const readJSON = readUntypedJSON;
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
@@ -13,7 +12,7 @@ function isArray(value) { return Array.isArray(value); }
 
 /** @typedef {'global' | 'project'} ConfigScope */
 /** @typedef {'minimal' | 'compact' | 'off'} Indicator */
-/** Cosmetic indicator modes: minimal = status line + active-plan widget, compact = status line only. @type {readonly Indicator[]} */
+/** @type {readonly Indicator[]} */
 export const INDICATORS = ['minimal', 'compact', 'off'];
 /** @param {unknown} value @returns {value is Indicator} */
 export function isIndicator(value) { return INDICATORS.some(mode => mode === value); }
@@ -58,16 +57,10 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
 const NESTED = ['supervision', 'runtime', 'requirements', 'limits', 'verification', 'evidence'];
 /** @type {Record<string, import('./contracts.js').ReviewMode | undefined>} */
 const POLICY_ALIASES = { final: 'final-only', strict: 'every-step', 'final-only': 'final-only', milestones: 'milestones', 'every-step': 'every-step' };
-/** Removed per-step turn and overall task-duration limits: no longer enforced,
- * advertised, or persisted. Legacy files that still declare them stay readable —
- * present values are checked then dropped; unrelated unknown settings stay errors. */
-/** Pair V1 has one unresolved assignment and never recovers automatically, so the queue and
- * recovery limits it once carried are deprecated the same way: accepted in old files and backups
- * (bounds-checked), then dropped. */
 const DEPRECATED_LIMIT_KEYS = ['maxTurnsPerStep', 'taskTimeoutMs', 'maxQueuedTasks', 'maxQueuedReviews', 'maxAutomaticRecoveryAttempts'];
 /** @type {Record<string, [number, number]>} */
 const DEPRECATED_LIMIT_BOUNDS = { maxTurnsPerStep: [1, Number.MAX_SAFE_INTEGER], taskTimeoutMs: [1, Number.MAX_SAFE_INTEGER], maxQueuedTasks: [0, 128], maxQueuedReviews: [0, 128], maxAutomaticRecoveryAttempts: [0, 20] };
-/** @param {Record<string, unknown>} limits @returns {boolean} whether a deprecated key was dropped */
+/** @param {Record<string, unknown>} limits @returns {boolean} */
 function dropDeprecatedLimits(limits) {
   let dropped = false;
   for (const key of DEPRECATED_LIMIT_KEYS) if (Object.hasOwn(limits, key)) { delete limits[key]; dropped = true; }
@@ -100,7 +93,6 @@ export function validateConfig(raw = {}) {
   return c;
 }
 
-// Validate the actual merged value before giving it a production config type.
 /** @param {unknown} c @returns {asserts c is PairConfig} */
 function assertMergedConfig(c) {
   assert(isObject(c), 'Pair configuration must be an object');
@@ -167,7 +159,12 @@ export function validateConfigLayer(raw) {
   return layer;
 }
 
-/** @param {Record<string, unknown>} target @param {Record<string, unknown>} before @param {Record<string, unknown>} after @returns {boolean} */
+/**
+ * @param {Record<string, unknown>} target
+ * @param {Record<string, unknown>} before
+ * @param {Record<string, unknown>} after
+ * @returns {boolean}
+ */
 function applyChangedFields(target, before, after) {
   let changed = false;
   for (const key of Object.keys(after)) {
@@ -180,8 +177,7 @@ function applyChangedFields(target, before, after) {
   return changed;
 }
 
-/** Apply only effective fields changed in the dialog to the selected raw scope layer.
- * @param {unknown} currentLayer @param {unknown} beforeEffective @param {unknown} afterEffective @returns {ConfigLayer} */
+/** @param {unknown} currentLayer @param {unknown} beforeEffective @param {unknown} afterEffective @returns {ConfigLayer} */
 export function updateConfigLayer(currentLayer, beforeEffective, afterEffective) {
   const before = validateConfig(beforeEffective), after = validateConfig(afterEffective);
   const next = currentLayer && Object.keys(currentLayer).length ? validateConfigLayer(currentLayer) : { version: CONFIG_VERSION };
@@ -272,7 +268,13 @@ function mark(value, source, provenance, prefix = '') {
     for (const [key, child] of Object.entries(value)) mark(child, source, provenance, prefix ? `${prefix}.${key}` : key);
   } else if (prefix) provenance[prefix] = source;
 }
-/** @param {Record<string, unknown>} base @param {Record<string, unknown>} layer @param {ConfigProvenance[string]} source @param {ConfigProvenance} provenance @param {string} [prefix] */
+/**
+ * @param {Record<string, unknown>} base
+ * @param {Record<string, unknown>} layer
+ * @param {ConfigProvenance[string]} source
+ * @param {ConfigProvenance} provenance
+ * @param {string} [prefix]
+ */
 function overlay(base, layer, source, provenance, prefix = '') {
   for (const [key, value] of Object.entries(layer)) {
     const name = prefix ? `${prefix}.${key}` : key;
@@ -303,8 +305,14 @@ function backupNameMatches(file, target, legacy) {
     return new RegExp(`^${escaped}\\.v1\\.bak(?:\\.[1-9][0-9]{0,2})?$`).test(name);
   });
 }
-/** Preview deferred values from one explicitly selected, retained V1 backup.
- * @param {string} cwd @param {boolean} trusted @param {string} scope @param {string} backupFile @param {NodeJS.ProcessEnv} [env] @returns {Promise<BackupImportPreview>} */
+/**
+ * @param {string} cwd
+ * @param {boolean} trusted
+ * @param {string} scope
+ * @param {string} backupFile
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {Promise<BackupImportPreview>}
+ */
 export async function previewBackupImport(cwd, trusted, scope, backupFile, env = process.env) {
   assert(scope !== 'project' || trusted, 'Project backup import requires a trusted project');
   assert(typeof backupFile === 'string' && path.isAbsolute(backupFile), 'Choose an absolute V1 backup path');
@@ -329,8 +337,7 @@ export async function previewBackupImport(cwd, trusted, scope, backupFile, env =
   validateConfigLayer(layer);
   return { kind: 'handoff-v1-backup', scope, sourceFile, targetFile, sourceHash: digest(raw), targetHash: digest(current), layer, fields, origins };
 }
-/** Apply an unchanged preview atomically; the selected backup remains as migration history.
- * @param {BackupImportPreview} preview */
+/** @param {BackupImportPreview} preview */
 export async function saveBackupImport(preview) {
   assert(plain(preview) && preview.kind === 'handoff-v1-backup', 'Invalid backup import preview');
   const targetFile = path.resolve(preview.targetFile), sourceFile = path.resolve(preview.sourceFile);
@@ -343,8 +350,12 @@ export async function saveBackupImport(preview) {
   if (changed) await atomicJSON(targetFile, layer);
   return { config: structuredClone(layer), changed, sourceFile, fields: structuredClone(preview.fields), origins: structuredClone(preview.origins) };
 }
-/** @param {string} cwd @param {boolean} trusted @param {NodeJS.ProcessEnv} [env]
- * @returns {Promise<{config: PairConfig, files: ConfigPaths, scope: ConfigScope, provenance: ConfigProvenance, migrations: ConfigMigration[], layers: {global: ConfigLayer, project: ConfigLayer}}>} */
+/**
+ * @param {string} cwd
+ * @param {boolean} trusted
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {Promise<{config: PairConfig, files: ConfigPaths, scope: ConfigScope, provenance: ConfigProvenance, migrations: ConfigMigration[], layers: {global: ConfigLayer, project: ConfigLayer}}>}
+ */
 export async function loadConfig(cwd, trusted, env = process.env) {
   const files = configPaths(cwd, env);
   const global = await readLayer(files.global, files.legacyGlobal, 'global');
@@ -359,11 +370,7 @@ export async function loadConfig(cwd, trusted, env = process.env) {
   if (typeof ui === 'object' && 'indicator' in ui && ui.indicator !== undefined) { assert(isIndicator(ui.indicator), 'Invalid indicator preference'); config.indicator = ui.indicator; provenance.indicator = 'ui'; }
   return { config: validateConfig(config), files, scope: trusted ? 'project' : 'global', provenance, migrations: [global.migration, project.migration].filter(migration => migration !== null), layers: { global: structuredClone(global.layer), project: structuredClone(project.layer) } };
 }
-/** Values shown while editing a layer. Global editing must never copy effective
- * project defaults; project editing includes global inheritance. UI is separate.
- * @param {Awaited<ReturnType<typeof loadConfig>>} loaded @param {ConfigScope} scope
- * @returns {PairConfig}
- */
+/** @param {Awaited<ReturnType<typeof loadConfig>>} loaded @param {ConfigScope} scope @returns {PairConfig} */
 export function configForScope(loaded, scope) {
   const config = merge(DEFAULTS, loaded.layers.global);
   const selected = scope === 'project' ? merge(config, loaded.layers.project) : config;
@@ -375,7 +382,12 @@ async function backupPath(file, version) {
   for (let i = 1; i < 1000; i++) { const candidate = `${base}.${i}`; if (!await exists(candidate)) return candidate; }
   throw new Error(`Too many migration backups for ${file}`);
 }
-/** @param {string} file @param {unknown} config @param {SaveConfigOptions} [options] @returns {Promise<{config: PairConfig | ConfigLayer, backup: string | null}>} */
+/**
+ * @param {string} file
+ * @param {unknown} config
+ * @param {SaveConfigOptions} [options]
+ * @returns {Promise<{config: PairConfig | ConfigLayer, backup: string | null}>}
+ */
 export async function saveConfig(file, config, { migration = null, layer = false } = {}) {
   const valid = layer ? validateConfigLayer(config) : validateConfig(config);
   /** @type {string | null} */
@@ -393,8 +405,6 @@ export async function saveConfig(file, config, { migration = null, layer = false
       /** @type {string} */
       const failure = error instanceof Error ? error.message : String(error);
       try {
-        // Keep an independent, byte-for-byte backup. Exclusive creation also
-        // refuses a source recreated after the migration rename (including a symlink).
         await fs.copyFile(backup, sourceFile, fs.constants.COPYFILE_EXCL);
       } catch (restoreError) {
         throw new AggregateError([error, restoreError],
@@ -407,8 +417,7 @@ export async function saveConfig(file, config, { migration = null, layer = false
   return { config: structuredClone(valid), backup };
 }
 
-/** Cosmetic preferences live outside the workspace so toggling them cannot stale a code checkpoint.
- * @param {string} file @param {string} indicator */
+/** @param {string} file @param {string} indicator */
 export async function saveIndicator(file, indicator) {
   assert(isIndicator(indicator), 'Invalid indicator preference');
   await atomicJSON(file, { version: CONFIG_VERSION, indicator });

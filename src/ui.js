@@ -11,9 +11,7 @@ import { warmingLabel } from './warming.js';
 /** @typedef {(next: import('./config.js').PairConfig, scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>} ApplySettings */
 /** @typedef {{loadScope?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig>, migrate?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>}} SettingsOptions */
 
-/** Read controller's unknown observation boundary through the actual SDK shape.
- * @param {unknown} value @returns {Readonly<import('@earendil-works/pi-coding-agent').ContextUsage> | null}
- */
+/** @param {unknown} value @returns {Readonly<import('@earendil-works/pi-coding-agent').ContextUsage> | null} */
 function contextUsage(value) {
   if (value == null) return null;
   assert(typeof value === 'object' && !Array.isArray(value), 'Invalid Main context observation');
@@ -31,18 +29,11 @@ export function symbol(status) {
   if (status === 'ready') return '●';
   return '○';
 }
-/** Semantic activity colors; every name must exist in the active Pi theme.
- * @typedef {'accent' | 'success' | 'warning' | 'error' | 'muted' | 'dim' | 'text'} IndicatorColor */
+/** @typedef {'accent' | 'success' | 'warning' | 'error' | 'muted' | 'dim' | 'text'} IndicatorColor */
 
-/** The activity pulse stops after this long without worker telemetry/exchange
- * events; long model turns are legitimate, so this is deliberately generous. */
 export const PULSE_MAX_AGE_MS = 120000;
-/** Beyond this silence the worker is flagged stale for explicit reconciliation. */
 export const STALE_AGE_MS = 300000;
-/** Milliseconds since the worker's most recent observed activity (telemetry or
- * exchange). Zero before the first event: a just-started worker is not stale.
- * @param {PairSummary['workers'][number]} worker @param {number} [now]
- * @returns {number} */
+/** @param {PairSummary['workers'][number]} worker @param {number} [now] @returns {number} */
 export function activityAge(worker, now = Date.now()) {
   const last = Math.max(worker.observation?.at || 0, worker.lastExchange?.at || 0);
   return last > 0 ? Math.max(0, now - last) : 0;
@@ -54,71 +45,51 @@ export function ageLabel(ageMs) {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${seconds % 60}s`;
 }
-/** Active workers silent past STALE_AGE_MS; for one-shot alerting, not rendering.
- * @param {PairSummary} summary @param {number} [now]
- * @returns {{id: string, ageMs: number}[]} */
+/** @param {PairSummary} summary @param {number} [now] @returns {{id: string, ageMs: number}[]} */
 export function staleWorkers(summary, now = Date.now()) {
   return summary.workers
     .filter(w => ['working', 'settling', 'starting'].includes(w.status) && activityAge(w, now) >= STALE_AGE_MS)
     .map(w => ({ id: w.id, ageMs: activityAge(w, now) }));
 }
 
-/** Average measured assistant streaming throughput for the worker row: summed
- * provider-reported output tokens over summed message_start→message_end seconds.
- * message_start fires when the provider response begins streaming, so
- * pre-response request/prefill latency is excluded along with tool execution
- * and idle gaps; unusable samples never touch the aggregate. Unavailable is
- * explicit, never a fabricated zero.
- * @param {{tokens?: unknown, seconds?: unknown} | null | undefined} speed
- * @returns {string} */
+/** @param {{tokens?: unknown, seconds?: unknown} | null | undefined} speed @returns {string} */
 export function speedLabel(speed) {
   const tokens = speed?.tokens, seconds = speed?.seconds;
   if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0
     || typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return 'avg — tok/s';
   return `avg ${(tokens / seconds).toFixed(1)} tok/s`;
 }
-/** Read the optional current-telemetry streaming-throughput aggregate from a worker
- * observation; historical/legacy observations have none and stay unavailable.
+/**
  * @param {PairSummary['workers'][number]['observation']} observation
- * @returns {{tokens?: unknown, seconds?: unknown} | null | undefined} */
+ * @returns {{tokens?: unknown, seconds?: unknown} | null | undefined}
+ */
 function observedSpeed(observation) {
   return observation && typeof observation === 'object' && 'speed' in observation
     ? /** @type {{tokens?: unknown, seconds?: unknown} | null | undefined} */ (observation.speed) : undefined;
 }
-/** One line of worker-supplied or plan text for inline display: control and escape
- * sequences stripped, whitespace (including newlines) collapsed, length bounded.
- * @param {unknown} value @param {number} [max] @returns {string} */
+/** @param {unknown} value @param {number} [max] @returns {string} */
 function inline(value, max = 200) { return cleanText(value, 4000).replace(/\s+/g, ' ').trim().slice(0, max); }
-/** Reported cost in one format everywhere it is summarized. A tiny nonzero cost is
- * shown as an upper bound rather than rounded to a fabricated zero.
- * @param {number} cost @returns {string} */
+/** @param {number} cost @returns {string} */
 export function costLabel(cost) {
   if (cost >= 0.1) return `$${cost.toFixed(2)}`;
   return cost >= 0.001 ? `$${cost.toFixed(3)}` : '<$0.001';
 }
-/** Whether a worker has a provider and model chosen; the summary joins them as `provider/model`.
- * @param {PairSummary['workers'][number]} worker @returns {boolean} */
+/** @param {PairSummary['workers'][number]} worker @returns {boolean} */
 function hasModel(worker) { return /^[^/]+\/.+$/.test(worker.model); }
-/** Compact token count: 272000 → 272k, 1500000 → 1.5M.
- * @param {number | null | undefined} tokens @returns {string} */
+/** @param {number | null | undefined} tokens @returns {string} */
 function tokenLabel(tokens) {
   if (typeof tokens !== 'number' || !Number.isFinite(tokens)) return 'unknown';
   if (tokens >= 1e6) return `${Number((tokens / 1e6).toFixed(1))}M`;
   return tokens >= 1000 ? `${Number((tokens / 1000).toFixed(1))}k` : String(tokens);
 }
-/** The next thing a person can do for a worker that is not running, if any. A worker
- * without a model needs settings first, and one whose workspace is not in Git cannot start.
- * @param {PairSummary['workers'][number]} worker @returns {string} */
+/** @param {PairSummary['workers'][number]} worker @returns {string} */
 function nextAction(worker) {
   if (['stopped', 'not_started'].includes(worker.status) && !worker.pid) return !hasModel(worker) ? '/pair to set up' : worker.workspaceGit === false ? 'not a Git repo' : '/pair start';
   if (['paused', 'interrupted'].includes(worker.status) || ['paused', 'interrupted'].includes(worker.task?.status || '')) return '/pair resume';
   if (['attention', 'error'].includes(worker.status)) return /^EXIT_UNCONFIRMED/.test(worker.error || '') ? '/pair reconcile' : '/pair';
   return '';
 }
-/** Last measured cache-read share per actor for the status line, whole percent
- * rounded down so a near-miss is never shown as 100%. Unknown shares are omitted;
- * labels are assigned before filtering so W1/W2 stay stable.
- * @param {PairSummary} summary @returns {string} */
+/** @param {PairSummary} summary @returns {string} */
 function cacheBadge(summary) {
   const actors = [{ label: 'M', usage: summary.main?.lastUsage ?? null },
     ...summary.workers.map(w => ({ label: workerLabel(summary, w.id), usage: w.observation?.lastUsage ?? null }))]
@@ -128,8 +99,7 @@ function cacheBadge(summary) {
     });
   return actors.length ? `cache ${actors.join(' ')}` : '';
 }
-/** What a worker tool call is doing, in words, with its target when the worker reported one.
- * @param {string | null | undefined} tool @param {string | null | undefined} target @returns {string} */
+/** @param {string | null | undefined} tool @param {string | null | undefined} target @returns {string} */
 function activityLabel(tool, target) {
   const name = inline(tool, 40).replace(/^extensions\./, '');
   if (!name) return '';
@@ -139,10 +109,13 @@ function activityLabel(tool, target) {
   const what = inline(target, 60);
   return what && !/^(running Fabric code|reporting to Main)$/.test(verb) ? `${verb} ${what}` : verb;
 }
-/** One worker's stage in plain words: who has the work and what is happening, the color and
- * icon for it, and the details that follow it on the status line (most important first).
- * @param {PairSummary} summary @param {PairSummary['workers'][number]} w @param {boolean} mainBusy @param {number} now
- * @returns {{icon: string, color: IndicatorColor, text: string, details: {text: string, color: IndicatorColor}[], active: boolean}} */
+/**
+ * @param {PairSummary} summary
+ * @param {PairSummary['workers'][number]} w
+ * @param {boolean} mainBusy
+ * @param {number} now
+ * @returns {{icon: string, color: IndicatorColor, text: string, details: {text: string, color: IndicatorColor}[], active: boolean}}
+ */
 export function workerStage(summary, w, mainBusy, now) {
   /** @param {string} text @param {IndicatorColor} [color] */
   const d = (text, color = 'muted') => ({ text, color });
@@ -150,8 +123,7 @@ export function workerStage(summary, w, mainBusy, now) {
   const step = t ? `step ${t.step}/${t.steps}` : '';
   const title = t ? inline(t.stepList?.find(s => ['active', 'review', 'held'].includes(s.state))?.title, 48) : '';
   const cost = typeof w.task?.reportedCost === 'number' && w.task.reportedCost > 0 ? [d(costLabel(w.task.reportedCost))] : [];
-  // Where a report stands once it is with Main.
-  /** @param {string} doing what Main does with it while busy */
+  /** @param {string} doing */
   const withMain = doing => {
     const waiting = summary.waitingReports || 0;
     if (waiting && summary.autoDeliverReports === false) return d('waiting · pair_yield or /pair yield', 'warning');
@@ -184,18 +156,13 @@ export function workerStage(summary, w, mainBusy, now) {
   const next = nextAction(w);
   return { icon: '○', color: next === 'not a Git repo' ? 'warning' : 'dim', text: 'Worker stopped', details: next ? [d(next, next === 'not a Git repo' ? 'warning' : 'dim')] : [], active: false };
 }
-/** Pair's one-line status for Pi's footer (`setStatus`), in plain words: what is happening
- * and who has the work (the worker working on a step, a checkpoint or question waiting for
- * Main, the worker ready or stopped, setup missing), then the current step, what the worker
- * is doing right now (for example `editing src/app.ts` or `running npm`), speed, context
- * pressure and cost, and finally last cache reads. An active worker's icon blinks on a
- * two-second heartbeat that stops after PULSE_MAX_AGE_MS; past STALE_AGE_MS the line says so.
- * No elapsed task time, turn count or numeric activity age is ever displayed. Pi truncates the
- * footer from the right, so the most important words come first.
- * @param {PairSummary} summary @param {boolean} mainBusy
+/**
+ * @param {PairSummary} summary
+ * @param {boolean} mainBusy
  * @param {{fg(color: IndicatorColor, text: string): string}} [theme]
  * @param {number} [now]
- * @returns {string} */
+ * @returns {string}
+ */
 export function indicator(summary, mainBusy, theme, now = Date.now()) {
   /** @param {IndicatorColor} color @param {string} text @returns {string} */
   const paint = (color, text) => (theme ? theme.fg(color, text) : text);
@@ -216,30 +183,28 @@ export function indicator(summary, mainBusy, theme, now = Date.now()) {
   if (cache) parts.push(paint('dim', cache));
   return parts.join(dot);
 }
-/** Stable widget label for a configured worker: `W` alone, otherwise `W1`, `W2`…
- * @param {PairSummary} summary @param {string} id @returns {string} */
+/** @param {PairSummary} summary @param {string} id @returns {string} */
 function workerLabel(summary, id) {
   return summary.workers.length === 1 ? 'W' : `W${summary.workers.findIndex(w => w.id === id) + 1}`;
 }
-/** The worker whose plan the widget shows: one that is working or waiting on Main
- * first, so a second worker's active plan is never hidden behind an idle first one.
- * @param {PairSummary} summary @returns {PairSummary['workers'][number] | undefined} */
+/** @param {PairSummary} summary @returns {PairSummary['workers'][number] | undefined} */
 export function planWorker(summary) {
   const planned = summary.workers.filter(w => Array.isArray(w.task?.stepList) && w.task.stepList.length > 0);
   return planned.find(w => ['working', 'settling', 'starting', 'question', 'review', 'blocked'].includes(w.status)) || planned[0];
 }
-/** Compact plan progress: one bar cell per step up to maxCells, then proportional.
- * Filled cells are approved steps only; the step under review/hold stays empty.
- * @param {number} done @param {number} total @param {number} [maxCells]
- * @returns {{filled: number, empty: number, label: string, percent: number}} */
+/**
+ * @param {number} done
+ * @param {number} total
+ * @param {number} [maxCells]
+ * @returns {{filled: number, empty: number, label: string, percent: number}}
+ */
 export function progressBar(done, total, maxCells = 10) {
   const cells = Math.min(Math.max(1, total), Math.max(1, maxCells));
   const filled = total > 0 ? Math.min(cells, Math.round((cells * done) / total)) : 0;
   return { filled, empty: cells - filled, label: `${done}/${total}`, percent: total > 0 ? Math.round((100 * done) / total) : 0 };
 }
 
-/** Derived plan-step display states, matching controller's summary stepList.
- * @typedef {'done' | 'active' | 'review' | 'held' | 'todo'} StepState */
+/** @typedef {'done' | 'active' | 'review' | 'held' | 'todo'} StepState */
 
 /** @param {StepState} state @returns {string} */
 export function stepSymbol(state) {
@@ -256,17 +221,9 @@ export function stepColor(state) {
   if (state === 'review' || state === 'held') return 'warning';
   return 'dim';
 }
-/** Row prefix for one plan step: completed steps are labeled explicitly so a
- * lone checkmark is never ambiguous; every other state keeps its bare symbol.
- * stepSymbol itself stays unchanged as public API.
- * @param {StepState} state @returns {string} */
+/** @param {StepState} state @returns {string} */
 function stepPrefix(state) { return state === 'done' ? `complete ${stepSymbol(state)}` : stepSymbol(state); }
-/** One-line view of the displayed worker's plan for the widget: the approved/total
- * bar, then the current step. The `n/total` label counts approved steps, so a lone
- * checkmark never has to carry that meaning. The full step list is in /pair status.
- * @param {PairSummary} summary
- * @param {{fg(color: IndicatorColor, text: string): string}} [theme]
- * @returns {string | null} */
+/** @param {PairSummary} summary @param {{fg(color: IndicatorColor, text: string): string}} [theme] @returns {string | null} */
 export function planLine(summary, theme) {
   const worker = planWorker(summary);
   const list = worker?.task?.stepList;
@@ -286,23 +243,17 @@ export function planLine(summary, theme) {
   } else if (done === list.length) parts.push(paint('success', 'all steps approved'));
   return parts.join(paint('dim', ' · '));
 }
-/** Last measured request share only, never cumulative usage or a residency
- * estimate. The sample timestamp remains validated and retained internally for
- * staleness handling and boundary resets, but no age timer is displayed beside
- * the percentage. Legacy zero-input diagnostics keep an explicit unknown share.
- * @param {unknown} value @returns {string} */
+/** @param {unknown} value @returns {string} */
 function lastCacheRead(value) {
   const usage = validateUsageObservation(value, 'Last cache-read usage');
   if (!usage) return 'unknown';
   return usage.cacheRatio === null ? 'unknown' : `${(100 * usage.cacheRatio).toFixed(1)}%`;
 }
-/** Persistent plan widget. It is mounted once and reads the latest summary snapshot
- * on every render, so ticks and state changes only request a redraw instead of
- * rebuilding the component. It renders nothing while no plan is active. Lines
- * truncate, never wrap.
+/**
  * @param {() => PairSummary | null} current
  * @param {{fg(color: IndicatorColor, text: string): string}} theme
- * @returns {import('@earendil-works/pi-tui').Component} */
+ * @returns {import('@earendil-works/pi-tui').Component}
+ */
 export function planWidget(current, theme) {
   return {
     render(width) {
@@ -313,10 +264,12 @@ export function planWidget(current, theme) {
     invalidate() {},
   };
 }
-/** Human status view in the panel markup (see panelFormat): each worker's state, task,
- * plan and live activity first, then reports waiting for Main and Main itself, with
- * identities, warming and accounting under Details and a short legend at the end.
- * @param {PairSummary} summary @param {Readonly<Awaited<ReturnType<typeof import('./native.js').nativeSettings>>> | null} [native] @param {number} [now] @returns {string} */
+/**
+ * @param {PairSummary} summary
+ * @param {Readonly<Awaited<ReturnType<typeof import('./native.js').nativeSettings>>> | null} [native]
+ * @param {number} [now]
+ * @returns {string}
+ */
 export function statusText(summary, native = null, now = Date.now()) {
   /** @param {string} key @param {string} value */
   const row = (key, value) => `  ${key.padEnd(10)}  ${value}`;
@@ -386,15 +339,14 @@ export function statusText(summary, native = null, now = Date.now()) {
     `> ${summary.cacheNote}`);
   return lines.map(line => cleanText(line, 20000)).join('\n');
 }
-/** Pi theme colors Pair's panels use; every name exists in the active Pi theme.
- * @typedef {IndicatorColor | 'border' | 'borderMuted' | 'borderAccent' | 'text' | 'mdHeading'} PanelColor */
+/** @typedef {IndicatorColor | 'border' | 'borderMuted' | 'borderAccent' | 'text' | 'mdHeading'} PanelColor */
 /** @typedef {{fg(color: PanelColor, text: string): string, bold?(text: string): string}} PanelTheme */
-/** Pi's native dialog layout (ExtensionSelectorComponent, /settings): a full-width rule in the
- * theme's border color, the accent title, an optional muted subtitle, the body, one line of key
- * hints and a closing rule, with one column of left padding. Pair's views render inline in the
- * editor area like Pi's own dialogs, not as floating boxes.
- * @param {string[]} body @param {number} width
- * @param {{title: string, subtitle?: string[], hints?: string, theme?: PanelTheme | null}} options @returns {string[]} */
+/**
+ * @param {string[]} body
+ * @param {number} width
+ * @param {{title: string, subtitle?: string[], hints?: string, theme?: PanelTheme | null}} options
+ * @returns {string[]}
+ */
 export function chrome(body, width, { title, subtitle = [], hints = '', theme }) {
   /** @param {PanelColor} color @param {string} text */
   const fg = (color, text) => (theme ? theme.fg(color, text) : text);
@@ -403,33 +355,22 @@ export function chrome(body, width, { title, subtitle = [], hints = '', theme })
   const pad = (/** @type {string} */ line) => ` ${truncateToWidth(line, Math.max(1, width - 2), '')}`;
   return [rule, '', pad(fg('accent', bold(title))), ...subtitle.map(line => pad(fg('muted', line))), '', ...body.map(pad), '', ...(hints ? [pad(hints), ''] : []), rule];
 }
-/** Key hints in Pi's own style: keys dim, actions muted, and remapped keys shown as remapped.
- * @param {...[string, string]} pairs `[keybinding id or literal key, action]`; ids contain a dot.
- * @returns {string} */
+/** @param {...[string, string]} pairs @returns {string} */
 function hints(...pairs) {
   return pairs.map(([key, action]) => (key.includes('.') ? keyHint(/** @type {import('@earendil-works/pi-tui').Keybinding} */ (key), action) : rawKeyHint(key, action))).join('  ');
 }
-/** Wrap one styled line to `span` columns, continuing under its own indent, after a
- * leading bullet or step symbol, or under a key/value row's value, never at the left edge.
- * @param {string} raw plain source line @param {string} styled the same line after styling
- * @param {number} span @returns {string[]} */
+/** @param {string} raw @param {string} styled @param {number} span @returns {string[]} */
 function wrapHanging(raw, styled, span) {
   const indent = /^ */.exec(raw)?.[0].length || 0;
   const marker = /^ *(?:complete ✔|[•✔✖○▶◐⏸!-]|\d+\.) /.exec(raw);
-  // A `Key  value` row (see panelFormat) continues under its value column.
   const row = indent <= 2 ? /^ *[A-Za-z][\w ./()-]{0,22}? {2,}(?=\S)/.exec(raw) : null;
   const hang = Math.min(Math.floor(span / 2), marker ? marker[0].length : row ? row[0].length : indent);
   const lead = /^ */.exec(styled)?.[0].length || 0;
-  // The first row uses the full width after its indent; the rest re-wrap under `hang`.
   const [first = '', ...rest] = wrapTextWithAnsi(styled.slice(lead), Math.max(10, span - indent));
   const more = rest.length ? wrapTextWithAnsi(rest.join(' '), Math.max(10, span - hang)) : [];
   return [' '.repeat(indent) + first, ...more.map(part => ' '.repeat(hang) + part)];
 }
-/** Lightweight markup for Pair's own panel text, readable as plain text too:
- * `## Heading`; `Key<2+ spaces>value` rows at indent 0 or 2 (dim key); `> note` (dim);
- * `! warning`; lines starting with a step or check symbol take its color. Lines indented
- * four or more spaces carry worker or repository text and are never styled.
- * @param {PanelTheme | null | undefined} theme @returns {(line: string) => string} */
+/** @param {PanelTheme | null | undefined} theme @returns {(line: string) => string} */
 export function panelFormat(theme) {
   /** @param {PanelColor} color @param {string} text */
   const fg = (color, text) => (theme ? theme.fg(color, text) : text);
@@ -446,20 +387,15 @@ export function panelFormat(theme) {
     return line;
   };
 }
-/** `panel` styles Pair's own panel markup (panelFormat); `paint` colors whole lines; `format` styles each line.
- * @typedef {{panel?: boolean, paint?: (line: string) => IndicatorColor | null, format?: (line: string) => string, section?: RegExp}} TextViewOptions */
+/** @typedef {{panel?: boolean, paint?: (line: string) => IndicatorColor | null, format?: (line: string) => string, section?: RegExp}} TextViewOptions */
 /** @typedef {{matches(data: string, id: string): boolean}} KeyMatcher */
-/** Scrollable read-only panel shared by status, inbox, report, diff, transcript, yield and
- * doctor views: a bordered box with the title on top and position and key hints in the
- * bottom edge. Keys go through the keybinding manager first (so remapped keys work),
- * with raw sequences and vi-style letters as fallbacks.
+/**
  * @param {string[]} raw
  * @param {{title: string, theme?: PanelTheme | null, keys?: KeyMatcher | null, rows?: () => number | undefined, close: () => void} & TextViewOptions} options
- * @returns {{render(width: number): string[], handleInput(data: string): void}} */
+ * @returns {{render(width: number): string[], handleInput(data: string): void}}
+ */
 export function createTextView(raw, { title, theme, keys, rows = () => undefined, close, paint, format, section }) {
   let offset = 0, width = 80, message = '', lastQuery = '';
-  // Raw line of the last search/section jump. A jump near the end is clamped to the
-  // last page, so the top visible line is not where the next search should resume.
   /** @type {number | null} */ let cursor = null;
   /** @type {string | null} */ let query = null;
   /** @type {{width: number, lines: string[], starts: number[]}} */ let cache = { width: -1, lines: [], starts: [] };
@@ -472,17 +408,14 @@ export function createTextView(raw, { title, theme, keys, rows = () => undefined
     const span = Math.max(16, width - 2);
     for (const line of raw) {
       starts.push(lines.length);
-      // wrapTextWithAnsi measures display columns, so wide characters never overflow.
       lines.push(...(line ? wrapHanging(line, styleLine(line), span) : ['']));
     }
     return cache = { width, lines, starts };
   };
-  // Body rows: the terminal minus the dialog chrome (8 rows) and Pi's footer (about 4).
   const page = () => Math.max(6, (rows() || 28) - 12);
   const maxOffset = () => Math.max(0, layout().lines.length - page());
   const currentLine = () => { if (cursor !== null) return cursor; const { starts } = layout(); let i = 0; while (i + 1 < starts.length && starts[i + 1] <= offset) i++; return i; };
-  /** Jump to the next raw line matching `test`, scanning in `step` direction and wrapping once.
-   * @param {(line: string) => boolean} test @param {1 | -1} step @param {boolean} inclusive @param {string} missing */
+  /** @param {(line: string) => boolean} test @param {1 | -1} step @param {boolean} inclusive @param {string} missing */
   const jump = (test, step, inclusive, missing) => {
     const from = currentLine(), n = raw.length;
     for (let k = inclusive ? 0 : 1; k <= n; k++) {
@@ -546,15 +479,12 @@ export async function textView(ctx, title, text, options = {}) {
     return component;
   });
 }
-/** One row of a Pair menu: a section heading, or a selectable item with an optional
- * current value (and its color) and a one-line hint shown while it is selected.
- * @typedef {{section: string} | {id: string, label: string, value?: string, tone?: PanelColor, hint?: string}} MenuEntry */
-/** Interactive menu drawn like Pi's /settings list: the accent `→ ` cursor, labels padded to one
- * column, values muted (accent when selected, warning when they need attention), optional muted
- * section labels, and the selected row's description dim below the list, inside Pi's dialog chrome.
+/** @typedef {{section: string} | {id: string, label: string, value?: string, tone?: PanelColor, hint?: string}} MenuEntry */
+/**
  * @param {MenuEntry[]} entries
  * @param {{title: string, subtitle?: string[], confirm?: string, cancel?: string, initial?: string, theme?: PanelTheme | null, keys?: KeyMatcher | null, rows?: () => number | undefined, done: (id: string | undefined) => void}} options
- * @returns {{render(width: number): string[], handleInput(data: string): void}} */
+ * @returns {{render(width: number): string[], handleInput(data: string): void}}
+ */
 export function createMenuView(entries, { title, subtitle = [], confirm = 'select', cancel = 'close', initial, theme, keys, rows = () => undefined, done }) {
   /** @param {PanelColor} color @param {string} text */
   const fg = (color, text) => (theme ? theme.fg(color, text) : text);
@@ -576,8 +506,6 @@ export function createMenuView(entries, { title, subtitle = [], confirm = 'selec
         body.push(`${current ? fg('accent', '→ ') : '  '}${current ? fg('accent', label) : label}${value}`);
       });
       const hint = /** @type {{hint?: string}} */ (entries[items[selected]]).hint;
-      // Keep the selected row visible when the list is taller than the space Pi leaves.
-      // Dialog chrome takes 8 rows and Pi's footer about 4; the rest is the list.
       const room = Math.max(6, (rows() || 28) - 12 - subtitle.length - (hint ? 3 : 0));
       const start = body.length <= room ? 0 : Math.min(body.length - room, Math.max(0, selectedRow - Math.floor(room / 2)));
       const visible = body.slice(start, start + room);
@@ -593,11 +521,12 @@ export function createMenuView(entries, { title, subtitle = [], confirm = 'selec
     },
   };
 }
-/** Show a Pair menu inline, like Pi's own select dialog, and return the chosen item's id, or
- * undefined on Escape. In RPC and other non-TUI modes it falls back to Pi's standard select
- * dialog with `Label: value` rows and an explicit close row.
- * @param {UIContext} ctx @param {MenuEntry[]} entries
- * @param {{title: string, subtitle?: string[], confirm?: string, cancel?: string, initial?: string}} options @returns {Promise<string | undefined>} */
+/**
+ * @param {UIContext} ctx
+ * @param {MenuEntry[]} entries
+ * @param {{title: string, subtitle?: string[], confirm?: string, cancel?: string, initial?: string}} options
+ * @returns {Promise<string | undefined>}
+ */
 export async function menu(ctx, entries, options) {
   const items = /** @type {{id: string, label: string, value?: string}[]} */ (entries.filter(entry => 'id' in entry));
   if (!items.length) return undefined;
@@ -613,10 +542,7 @@ export async function menu(ctx, entries, options) {
     return component;
   });
 }
-/** Rewrite a stored checkpoint patch for people: real file names instead of Pair's
- * blob-store paths, and added files shown as `+` lines instead of only a hash.
- * Main's pair_inspect output is unchanged; this is display only.
- * @param {string} patch @param {Map<string, string | null>} [added] @returns {string} */
+/** @param {string} patch @param {Map<string, string | null>} [added] @returns {string} */
 export function humanPatch(patch, added = new Map()) {
   /** @type {string[]} */ const out = [];
   /** @type {string | null} */ let file = null, skip = false;
@@ -642,8 +568,7 @@ export function humanPatch(patch, added = new Map()) {
   while (out.length && out[0] === '') out.shift();
   return out.join('\n');
 }
-/** Unified-diff line coloring for the checkpoint viewer.
- * @param {string} line @returns {IndicatorColor | null} */
+/** @param {string} line @returns {IndicatorColor | null} */
 export function diffLineColor(line) {
   if (line.startsWith('### ') || line.startsWith('diff --git ')) return 'warning';
   if (line.startsWith('+++ ') || line.startsWith('--- ') || line.startsWith('index ')) return 'muted';
@@ -656,10 +581,7 @@ export function diffLineColor(line) {
 const KIND_LABEL = /** @type {const} */ ({ question: 'Question', checkpoint: 'Checkpoint', blocked: 'Blocker', final_review: 'Final review' });
 /** @param {string} kind @returns {string} */
 export function kindLabel(kind) { return Reflect.get(KIND_LABEL, kind) || kind; }
-/** Human-readable card for one retained report, in the panel markup. Controller-captured
- * evidence (changed paths, configured checks) is kept apart from the worker's own claims,
- * and worker-written text is indented four spaces so it is never styled.
- * @param {ReportView} view @returns {string[]} */
+/** @param {ReportView} view @returns {string[]} */
 export function reportCardLines(view) {
   /** @param {string} key @param {string} value */
   const row = (key, value) => `  ${key.padEnd(10)}  ${value}`;
@@ -683,24 +605,17 @@ export function reportCardLines(view) {
   return lines;
 }
 /** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'reconcile' | 'enable' | 'model' | 'effort' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more', workerId?: string, section: string, hint: string, value?: string, tone?: PanelColor}} DashboardItem */
-/** Dashboard summary lines: one per worker in the same words as the status line, then
- * waiting reports.
- * @param {PairSummary} summary @returns {string[]} */
+/** @param {PairSummary} summary @returns {string[]} */
 export function dashboardHeader(summary) {
   const many = summary.workers.length > 1;
   const workers = summary.workers.map(w => {
     const stage = workerStage(summary, w, !!summary.main?.busy, Date.now());
-    // `/pair …` hints point at the dashboard itself, so they are left out here.
     return [`${many ? `${workerLabel(summary, w.id)} ` : ''}${stage.icon} ${stage.text}`, ...stage.details.map(detail => detail.text).filter(text => !text.startsWith('/pair'))].join(' · ');
   });
   const waiting = summary.waitingReports || 0;
   return [...workers, ...(waiting ? [`◐ ${waiting} report${waiting === 1 ? '' : 's'} not yet read by Main`] : [])];
 }
-/** Dashboard entries for the current state: what needs a human first, then setup that is
- * still missing (Pair off, no worker model), then each worker's model and effort (editable
- * in place) and the lifecycle actions that apply right now, then Pair's views. Rarely
- * needed maintenance actions live under More… (dashboardMoreItems). Escape closes.
- * @param {PairSummary} summary @returns {DashboardItem[]} */
+/** @param {PairSummary} summary @returns {DashboardItem[]} */
 export function dashboardItems(summary) {
   /** @type {DashboardItem[]} */ const items = [];
   const many = summary.workers.length > 1;
@@ -736,26 +651,19 @@ export function dashboardItems(summary) {
     { section: 'Pair', label: 'More…', action: 'more', hint: 'Restart the worker, reload configuration, run doctor.' });
   return items;
 }
-/** Maintenance actions behind the dashboard's More… entry. Escape goes back.
- * @param {PairSummary} summary @returns {DashboardItem[]} */
+/** @param {PairSummary} summary @returns {DashboardItem[]} */
 export function dashboardMoreItems(summary) {
   const many = summary.workers.length > 1;
-  // Restart rereads saved settings first and keeps any retained conversation, so it applies in every state.
   return [...summary.workers.map(w => /** @type {DashboardItem} */ ({ section: 'Maintenance', label: many ? `Restart worker (${w.id})` : 'Restart worker', action: 'restart', workerId: w.id, hint: 'Reread settings and replace the worker process. Its conversation is kept.' })),
     { section: 'Maintenance', label: 'Reload configuration', action: 'reload', hint: 'Reread saved Pair settings without restarting Main or starting a worker.' },
     { section: 'Maintenance', label: 'Doctor', action: 'doctor', hint: 'Check Fabric, Fovea and Pair setup. No inference.' }];
 }
-/** Menu rows for dashboard items, with a heading wherever the section changes.
- * @param {DashboardItem[]} items @returns {MenuEntry[]} */
+/** @param {DashboardItem[]} items @returns {MenuEntry[]} */
 export function dashboardMenu(items) {
   return items.flatMap((item, i) => [...(i === 0 || items[i - 1].section !== item.section ? [{ section: item.section }] : []), { id: String(i), label: item.label, value: item.value, tone: item.tone, hint: item.hint }]);
 }
-/** One unresolved report as the inbox lists it; `view` is its current card when the
- * report is still the worker's live one.
- * @typedef {{workerId: string, reportId: string, status: string, observedAt?: number, view?: ReportView | null}} InboxEntry */
-/** Inbox panel in the panel markup: one card per unresolved report, or an explanation
- * of what the inbox holds when it is empty.
- * @param {InboxEntry[]} entries @param {boolean} autoDeliver @returns {string} */
+/** @typedef {{workerId: string, reportId: string, status: string, observedAt?: number, view?: ReportView | null}} InboxEntry */
+/** @param {InboxEntry[]} entries @param {boolean} autoDeliver @returns {string} */
 export function inboxText(entries, autoDeliver) {
   /** @param {string} key @param {string} value */
   const row = (key, value) => `  ${key.padEnd(8)}  ${value}`;
@@ -771,10 +679,10 @@ export function inboxText(entries, autoDeliver) {
   }
   return lines.join('\n');
 }
-/** Readable doctor report: the checks that decide whether Pair can run, then the raw
- * diagnostic data for bug reports.
+/**
  * @param {{main: {model?: {provider: string, id: string} | null, thinkingLevel?: unknown, trusted?: boolean, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}}, pair: PairSummary, configuration: {version?: unknown, scope?: unknown, pendingMigrations?: readonly unknown[]}, blockers: string[], raw: unknown, notes?: string[]}} data
- * @returns {string} */
+ * @returns {string}
+ */
 export function doctorText({ main, pair, configuration, blockers, raw, notes = [] }) {
   /** @param {boolean} ok @param {string} text */
   const check = (ok, text) => `  ${ok ? '✔' : '✖'} ${text}`;
@@ -796,45 +704,60 @@ export function doctorText({ main, pair, configuration, blockers, raw, notes = [
     '## Raw data', '> For bug reports.', ...JSON.stringify(raw, null, 2).split('\n').map(line => `    ${line}`)];
   return lines.join('\n');
 }
-/** Pick one option in a Pair menu, with the current one marked and a hint per option.
- * Only an offered option can be returned.
+/**
  * @template {string} Value
- * @param {UIContext} ctx @param {string} title @param {readonly {value: Value, hint?: string}[]} options @param {Value} [current]
- * @returns {Promise<Value | undefined>} */
+ * @param {UIContext} ctx
+ * @param {string} title
+ * @param {readonly {value: Value, hint?: string}[]} options
+ * @param {Value} [current]
+ * @returns {Promise<Value | undefined>}
+ */
 async function chooseValue(ctx, title, options, current) {
-  // Pi's own pickers mark the current choice with a check in front of its label.
   const id = await menu(ctx, options.map(option => ({ id: option.value, label: `${option.value === current ? '✓' : ' '} ${option.value}`, hint: option.hint })),
     { title, initial: current, confirm: 'choose', cancel: 'back' });
   return options.find(option => option.value === id)?.value;
 }
 /** @param {boolean} value @returns {string} */
 function onOff(value) { return value ? 'On' : 'Off'; }
-/** What each cosmetic indicator mode shows. @type {Readonly<Record<import('./config.js').Indicator, string>>} */
+/** @type {Readonly<Record<import('./config.js').Indicator, string>>} */
 const INDICATOR_LABEL = { minimal: 'status line + current plan step', compact: 'status line only', off: 'hidden' };
 
 /** @typedef {Readonly<{optional?: boolean, scale?: number, accepts: (value: number) => boolean, expected: string}>} NumberInputOptions */
-/** @overload @param {UIContext} ctx @param {string} title @param {number} current @param {NumberInputOptions & {optional?: false}} options @returns {Promise<number>} */
-/** @overload @param {UIContext} ctx @param {string} title @param {number | null} current @param {NumberInputOptions & {optional: true}} options @returns {Promise<number | null>} */
-/** @param {UIContext} ctx @param {string} title @param {number | null} current @param {NumberInputOptions} options @returns {Promise<number | null>} */
+/**
+ * @overload
+ * @param {UIContext} ctx
+ * @param {string} title
+ * @param {number} current
+ * @param {NumberInputOptions & {optional?: false}} options
+ * @returns {Promise<number>}
+ */
+/**
+ * @overload
+ * @param {UIContext} ctx
+ * @param {string} title
+ * @param {number | null} current
+ * @param {NumberInputOptions & {optional: true}} options
+ * @returns {Promise<number | null>}
+ */
+/**
+ * @param {UIContext} ctx
+ * @param {string} title
+ * @param {number | null} current
+ * @param {NumberInputOptions} options
+ * @returns {Promise<number | null>}
+ */
 async function numberInput(ctx, title, current, { optional = false, scale = 1, accepts, expected }) {
-  // Pi input's second argument is a placeholder, not a prefilled value.
   const placeholder = current == null ? 'none' : String(current / scale);
   const input = await ctx.ui.input(`${title} (blank keeps current${optional ? '; none/off disables' : ''})`, placeholder);
   const text = input?.trim();
-  // Preserve storage units exactly: even an unchanged minutes -> ms round trip
-  // can introduce a fraction (e.g. 59 ms). Only convert actual edits.
   if (!text || text === placeholder) return current;
   if (optional && /^(none|off)$/i.test(text)) return null;
   const value = Number(text) * scale;
   assert(Number.isFinite(value) && accepts(value), `${title}: ${expected}`);
   return value;
 }
-/** The model fields that decide its effort levels, as Pi's registry reports them.
- * @typedef {{id: string, provider: string, name?: string, reasoning?: boolean, thinkingLevelMap?: Partial<Record<string, string | null>>}} EffortModel */
-/** Effort levels a model accepts, by Pi's own rule (pi-ai getSupportedThinkingLevels) applied
- * to its registry entry: a model without reasoning supports only `off`; otherwise every level
- * its thinkingLevelMap does not set to null, with `xhigh` and `max` only when explicitly mapped.
- * @param {EffortModel} model @returns {import('./contracts.js').Effort[]} */
+/** @typedef {{id: string, provider: string, name?: string, reasoning?: boolean, thinkingLevelMap?: Partial<Record<string, string | null>>}} EffortModel */
+/** @param {EffortModel} model @returns {import('./contracts.js').Effort[]} */
 export function supportedEfforts(model) {
   if (!model.reasoning) return ['off'];
   return EFFORT_LEVELS.filter(level => {
@@ -843,22 +766,17 @@ export function supportedEfforts(model) {
     return level === 'xhigh' || level === 'max' ? mapped !== undefined : true;
   });
 }
-/** The requested effort if the model supports it, otherwise the nearest supported level above
- * it, then below it, like Pi's clampThinkingLevel.
- * @param {EffortModel} model @param {import('./contracts.js').Effort} effort @returns {import('./contracts.js').Effort} */
+/** @param {EffortModel} model @param {import('./contracts.js').Effort} effort @returns {import('./contracts.js').Effort} */
 export function clampEffort(model, effort) {
   const levels = supportedEfforts(model), at = EFFORT_LEVELS.indexOf(effort);
   if (levels.includes(effort)) return effort;
   return EFFORT_LEVELS.slice(at + 1).find(level => levels.includes(level)) || EFFORT_LEVELS.slice(0, Math.max(0, at)).reverse().find(level => levels.includes(level)) || levels[0] || 'off';
 }
-/** The registry entry for a worker's chosen model, if Pi knows it.
- * @param {UIContext} ctx @param {import('./contracts.js').WorkerSpec} worker @returns {EffortModel | undefined} */
+/** @param {UIContext} ctx @param {import('./contracts.js').WorkerSpec} worker @returns {EffortModel | undefined} */
 function workerModel(ctx, worker) {
   return worker.provider && worker.model ? ctx.modelRegistry?.find(worker.provider, worker.model) : undefined;
 }
-/** Pick a worker's effort from the levels its model supports (all of Pi's levels while the
- * model is unknown), with what each level is sent to the provider as.
- * @param {UIContext} ctx @param {import('./contracts.js').WorkerSpec} worker @returns {Promise<void>} */
+/** @param {UIContext} ctx @param {import('./contracts.js').WorkerSpec} worker @returns {Promise<void>} */
 async function pickEffort(ctx, worker) {
   const known = workerModel(ctx, worker), levels = known ? supportedEfforts(known) : EFFORT_LEVELS;
   /** @param {import('./contracts.js').Effort} level */
@@ -869,19 +787,24 @@ async function pickEffort(ctx, worker) {
   };
   worker.effort = await chooseValue(ctx, `Worker effort · ${known ? `${known.provider}/${known.id}` : 'model not chosen'}`, levels.map(value => ({ value, hint: hint(value) })), worker.effort) || worker.effort;
 }
-/** Change one worker's model from the dashboard: pick it, move the effort to a level the new
- * model supports, and return the validated configuration, or undefined when nothing changed.
- * @param {UIContext} ctx @param {import('./config.js').PairConfig} config @param {string} workerId
- * @returns {Promise<import('./config.js').PairConfig | undefined>} */
+/**
+ * @param {UIContext} ctx
+ * @param {import('./config.js').PairConfig} config
+ * @param {string} workerId
+ * @returns {Promise<import('./config.js').PairConfig | undefined>}
+ */
 export async function chooseWorkerModel(ctx, config, workerId) {
   const next = clone(config), w = next.workers.find(worker => worker.id === workerId) || next.workers[0];
   const before = JSON.stringify(w);
   await pickModel(ctx, w);
   return JSON.stringify(w) === before ? undefined : validateConfig(next);
 }
-/** Change one worker's effort from the dashboard; undefined when nothing changed.
- * @param {UIContext} ctx @param {import('./config.js').PairConfig} config @param {string} workerId
- * @returns {Promise<import('./config.js').PairConfig | undefined>} */
+/**
+ * @param {UIContext} ctx
+ * @param {import('./config.js').PairConfig} config
+ * @param {string} workerId
+ * @returns {Promise<import('./config.js').PairConfig | undefined>}
+ */
 export async function chooseWorkerEffort(ctx, config, workerId) {
   const next = clone(config), w = next.workers.find(worker => worker.id === workerId) || next.workers[0];
   const before = w.effort;
@@ -937,7 +860,6 @@ async function pickModel(ctx, worker) {
       return component;
     });
   } else {
-    // RPC supports standard dialogs, but cannot render custom terminal components.
     answer = await ctx.ui.select(title, models.map(m => `${m.provider}/${m.id}`));
   }
   const model = models.find(m => `${m.provider}/${m.id}` === answer);
@@ -948,16 +870,17 @@ async function pickModel(ctx, worker) {
     worker.effort = effort;
   }
 }
-/** Own command-scoped dialogs only: never replaces Fabric's settings/dashboard/footer.
+/**
  * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx
- * @param {import('./config.js').PairConfig} original @param {import('./config.js').ConfigScope} initialScope
- * @param {ApplySettings} onApply @param {SettingsOptions} [options] @returns {Promise<void>}
+ * @param {import('./config.js').PairConfig} original
+ * @param {import('./config.js').ConfigScope} initialScope
+ * @param {ApplySettings} onApply
+ * @param {SettingsOptions} [options]
+ * @returns {Promise<void>}
  */
 export async function settingsUI(ctx, original, initialScope, onApply, options = {}) {
   let saved = clone(original), scope = initialScope, selected = saved.workers[0].id, advanced = false, lastEdited = 4;
   for (;;) {
-    // Each interaction gets a disposable draft. Invalid input and failed writes
-    // cannot contaminate the next edit or appear as a saved value.
     const draft = clone(saved);
     const w = draft.workers.find(w => w.id === selected) || draft.workers[0]; selected = w.id;
     const model = w.provider && w.model ? `${w.provider}/${w.model}` : '';

@@ -7,21 +7,15 @@ import { WIRE_VERSION } from './contracts.js';
 
 export const VERSION = '0.1.0';
 export const PROTOCOL = WIRE_VERSION;
-/** Data-only view for typed clone callers: retain arrays/optional fields and Dates,
- * but do not promise to preserve declared methods or callable values. Opaque unknown
- * fields stay unknown and are still subject to structuredClone's runtime checks.
+/**
  * @template T
  * @typedef {T extends Date ? Date : T extends (...args: never[]) => unknown ? never : T extends object ? {[K in keyof T]: CloneData<T[K]>} : T} CloneData
  */
-/** Native structured clone, not a JSON round trip. Unsupported values still throw;
- * callers must not depend on custom prototypes, accessors or property descriptors.
- * @template T @param {T & CloneData<T>} value @returns {T}
- */
+/** @template T @param {T & CloneData<T>} value @returns {T} */
 export const clone = value => structuredClone(value);
 /** @param {unknown} value @returns {string} */
 export const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
-/** Key-order independent JSON for identity hashes: object keys sorted recursively, arrays kept in order.
- * @param {unknown} value @returns {string} */
+/** @param {unknown} value @returns {string} */
 export function stableJSON(value) {
   if (Array.isArray(value)) return `[${value.map(item => stableJSON(item === undefined ? null : item)).join(',')}]`;
   if (value !== null && typeof value === 'object') {
@@ -44,10 +38,7 @@ export function safeId(value, label = 'id') {
 }
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 export function plain(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
-/** Matches the public native PI_CODING_AGENT_DIR semantics: `~` expands to the
- * home directory and `~/...` (or `~\\...` on Windows) joins it; every other
- * value resolves as before. Profiles are never touched.
- * @param {NodeJS.ProcessEnv} [env] */
+/** @param {NodeJS.ProcessEnv} [env] */
 export function agentDir(env = process.env) {
   const raw = env.PI_CODING_AGENT_DIR;
   const base = !raw ? path.join(os.homedir(), '.pi', 'agent')
@@ -90,8 +81,7 @@ export async function atomicJSON(file, value) {
     await syncDirectory(path.dirname(file));
   } finally { await handle?.close().catch(() => {}); await fs.unlink(tmp).catch(() => {}); }
 }
-/** Make a completed rename durable. Platforms that cannot open or fsync a directory
- * (Windows) keep the previous best-effort behaviour. @param {string} dir */
+/** @param {string} dir */
 export async function syncDirectory(dir) {
   /** @type {import('node:fs/promises').FileHandle | undefined} */
   let handle;
@@ -99,32 +89,28 @@ export async function syncDirectory(dir) {
   catch (e) { if (!(plain(e) && ['EISDIR', 'EPERM', 'EACCES', 'EINVAL', 'ENOTSUP', 'EBADF'].includes(String(e.code)))) throw e; }
   finally { await handle?.close().catch(() => {}); }
 }
-/** Whether a PID may safely be signalled as a child we spawned. PID 0/1 and negatives would
- * address the whole process group or every process of this user (kill(-1) signals everything),
- * and this process or its parent must never be targeted. @param {unknown} pid @returns {pid is number} */
+/** @param {unknown} pid @returns {pid is number} */
 export function signallablePid(pid) {
   return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid && pid !== process.ppid;
 }
-/** Signal a spawned child's process group (or the child alone on Windows). Refuses any PID that
- * is not a plausible child, so a bad value can never become kill(-1). @param {number | undefined} pid
- * @param {NodeJS.Signals | 0} signal @param {{kill?: (signal: NodeJS.Signals) => boolean} | null} [child] @returns {boolean} whether a signal was sent */
+/**
+ * @param {number | undefined} pid
+ * @param {NodeJS.Signals | 0} signal
+ * @param {{kill?: (signal: NodeJS.Signals) => boolean} | null} [child]
+ * @returns {boolean}
+ */
 export function signalGroup(pid, signal, child = null) {
   if (!signallablePid(pid)) return false;
   if (process.platform === 'win32') { if (child && signal !== 0) child.kill?.(signal); else process.kill(pid, signal); return true; }
   process.kill(-pid, signal); return true;
 }
-/** Liveness of a process ID: 'dead' (no such process), 'alive', or 'foreign' (exists but
- * owned by another user, so it cannot be a process this user spawned). @param {number} pid
- * @returns {'dead' | 'alive' | 'foreign'} */
+/** @param {number} pid @returns {'dead' | 'alive' | 'foreign'} */
 export function processState(pid) {
-  // Negative values name a process group; never probe the special groups 0 and -1.
   if (!Number.isSafeInteger(pid) || Math.abs(pid) <= 1) return 'alive';
   try { process.kill(pid, 0); return 'alive'; }
   catch (e) { return plain(e) && e.code === 'ESRCH' ? 'dead' : plain(e) && e.code === 'EPERM' ? 'foreign' : 'alive'; }
 }
-/** Wall-clock start time of a live process, or null when it cannot be observed
- * (no `ps`, Windows, or the process is gone). Used to detect PID reuse.
- * @param {number} pid @returns {Promise<number | null>} */
+/** @param {number} pid @returns {Promise<number | null>} */
 export async function processStartedAt(pid) {
   if (process.platform === 'win32' || !Number.isSafeInteger(pid) || pid <= 0) return null;
   const { execFile } = await import('node:child_process');
@@ -135,24 +121,17 @@ export async function processStartedAt(pid) {
     });
   });
 }
-/** Start time of this process, recorded in lock owners so a recycled PID is not mistaken for the owner. */
 export const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
-/** Whether a lock owner record still names a live process. A live PID whose start time is
- * provably later than the recorded owner start is a recycled PID, not the owner.
- * @param {unknown} owner @returns {Promise<boolean>} */
+/** @param {unknown} owner @returns {Promise<boolean>} */
 export async function ownerAlive(owner) {
   if (!plain(owner) || typeof owner.pid !== 'number') return false;
   const state = processState(owner.pid);
   if (state !== 'alive') return false;
   if (typeof owner.startedAt !== 'number') return true;
   const started = await processStartedAt(owner.pid);
-  // `ps` reports whole seconds; allow for that and for clock rounding.
   return started === null || started <= owner.startedAt + 2000;
 }
-/** Parsed data is unvalidated; callers must narrow at their domain boundary.
- * The presence of the fallback argument (including explicit undefined) is significant.
- * @param {string} file @param {unknown} [fallback] @param {number} [maxBytes] @returns {Promise<unknown>}
- */
+/** @param {string} file @param {unknown} [fallback] @param {number} [maxBytes] @returns {Promise<unknown>} */
 export async function readJSON(file, fallback, maxBytes = 16 * 1024 * 1024) {
   /** @type {import('node:fs/promises').FileHandle | undefined} */
   let handle;
@@ -170,7 +149,7 @@ export async function exists(file) { try { await fs.access(file); return true; }
 export async function canonical(dir) { return fs.realpath(path.resolve(dir)); }
 /** @param {string} root @param {string} file */
 export function inside(root, file) { const rel = path.relative(root, file); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); }
-/** Merging does not validate a configuration shape.
+/**
  * @param {Record<string, unknown> | null | undefined} a
  * @param {Record<string, unknown> | null | undefined} b
  * @returns {Record<string, unknown>}
@@ -184,7 +163,6 @@ export function merge(a, b) {
   }
   return out;
 }
-// JSON-with-comments reader, without eval. Used only to inspect native settings.
 /** @param {string} text @returns {unknown} */
 function parseJSONC(text) {
   let out = '', quoted = false, escaped = false;
@@ -195,7 +173,6 @@ function parseJSONC(text) {
     if (c === '/' && text[i + 1] === '/') { while (i < text.length && text[i] !== '\n') i++; out += '\n'; continue; }
     if (c === '/' && text[i + 1] === '*') { i += 2; while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++; assert(i < text.length, 'Unterminated JSON comment'); i++; out += ' '; continue; }
     if (c === ',') {
-      // Remove trailing commas in a second pass after comments have been removed.
       out += c; continue;
     }
     out += c;
@@ -221,14 +198,13 @@ export class Serial {
   run(fn) { const p = this.#tail.then(fn); this.#tail = p.catch(() => {}); return p; }
   async drain() { await this.#tail; }
 }
-/** A lock directory without an owner record older than this is a crashed acquisition. */
 const ORPHAN_LOCK_MS = 60_000;
-/** Exclusive directory lock. The owner record is written into a private temporary
- * directory that is then renamed into place, so a lock never exists without its owner.
- * A lock whose owner process is gone (or whose PID was recycled) is broken.
- * @param {string} dir @param {Record<string, unknown>} owner
+/**
+ * @param {string} dir
+ * @param {Record<string, unknown>} owner
  * @param {{name?: string, conflict?: (owner: Record<string, unknown>) => string}} [options]
- * @returns {Promise<() => Promise<void>>} */
+ * @returns {Promise<() => Promise<void>>}
+ */
 export async function acquireLock(dir, owner, { name = '.owner-lock', conflict } = {}) {
   await mkdirPrivate(dir);
   const lock = path.join(dir, name);
@@ -243,11 +219,9 @@ export async function acquireLock(dir, owner, { name = '.owner-lock', conflict }
       return async () => { if (!released) { released = true; await fs.rm(lock, { recursive: true, force: true }); } };
     } catch (e) {
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
-      // rename(2) onto an existing non-empty directory fails with ENOTEMPTY or EEXIST.
       if (!plain(e) || !['EEXIST', 'ENOTEMPTY'].includes(String(e.code))) throw e;
       const previous = await readJSON(path.join(lock, 'owner.json'), null);
       if (previous === null) {
-        // Legacy/crashed acquisition: a directory with no owner record.
         const stat = await fs.stat(lock).catch(() => null);
         assert(!stat || Date.now() - stat.mtimeMs > ORPHAN_LOCK_MS, 'Another Pair controller is initializing. Retry after it finishes.');
       } else {

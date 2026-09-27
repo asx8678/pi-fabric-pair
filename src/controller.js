@@ -13,7 +13,7 @@ import { incrementCounter, migrateStoredState, STATE_VERSION, validateAuthority,
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
 import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, digest, inside, mkdirPrivate, processStartedAt, processState, PROTOCOL, signalGroup, signallablePid, readJSON, safeId, Serial, stableDigest, uid } from './util.js';
 
-/** AR-02: Controller owns durable intent; PiRuntime alone owns process/observation/UI state.
+/**
  * @typedef {import('./contracts.js').StoredWorkerV1} WorkerRecord
  * @typedef {import('./contracts.js').StoredTaskV1} TaskRecord
  * @typedef {ReturnType<PiRuntime['reserveActivation']>} Activation
@@ -28,36 +28,28 @@ import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonic
 /** @typedef {{notice: import('./contracts.js').StoredNoticeV1, channel: 'manual' | 'auto', control: Control, message: string, details: NoticeDetails}} Delivery */
 /** @typedef {{notifyUser?: (message: string, level: 'info'|'warning'|'error') => void, notifyMain?: (message: string, details: NoticeDetails, options: {requireIdle: boolean}) => void | Promise<void>, reportReady?: (notice: import('./contracts.js').StoredNoticeV1) => void, promptUser?: import('./actor-runtime.js').RuntimeOptions['promptUser'], mainBusy?: () => boolean, mainHasDelivery?: (deliveryOperationId: string) => boolean, noticeMain?: (message: string) => void}} ControllerCallbacks */
 const TERMINAL = new Set(['completed', 'cancelled']);
-/** Unconfirmed automatic deliveries per report before it falls back to the inbox. */
 const MAX_AUTO_ATTEMPTS = 3;
-/** Completed/cancelled tasks whose evidence is retained; older evidence is collected at the next dispatch. */
 const RETAINED_TASKS = 5;
-/** Idempotency records kept for dispatch retries; older request IDs are forgotten. */
 const RETAINED_REQUESTS = 200;
-/** Workspace-drift retries while freezing a checkpoint before the report is held. */
 const FREEZE_ATTEMPTS = 3;
-/** Delivery log rotation size. */
 const DELIVERY_LOG_BYTES = 1024 * 1024;
-/** Main must not be interrupted: a delivery that would start a run while Main is occupied is
- * postponed to its next safe boundary. Not a failure, and not counted as an attempt. */
 export class DeliveryDeferred extends Error {
   /** @param {string} message */
   constructor(message) { super(message); this.name = 'DeliveryDeferred'; }
 }
-/** Rules repeated in every report, so runs started by a report (which skip before_agent_start) still carry them. */
 const REVIEW_RULES = 'Review rules: call pair_inspect on the checkpoint before approving; never approve failed configured checks or stale code; if anything is wrong or incomplete, pair_decide action "revise" with specific fixes; answer question reports with "answer"; do not edit the worker\'s code yourself while its task is active.';
 const ENTRY = fileURLToPath(new URL('./extension.js', import.meta.url));
-/** every-step supervision reviews small steps: a checkpoint changing more files than
- * policy.maxStepFiles cannot be approved (Main revises it into smaller steps).
- * @param {{policy: object}} task @param {{changed: string[]}} checkpoint @returns {string | null} */
+/** @param {{policy: object}} task @param {{changed: string[]}} checkpoint @returns {string | null} */
 function stepTooLarge(task, checkpoint) {
   const policy = /** @type {{mode?: unknown, maxStepFiles?: unknown}} */ (task.policy);
   if (policy.mode !== 'every-step' || typeof policy.maxStepFiles !== 'number' || checkpoint.changed.length <= policy.maxStepFiles) return null;
   return `STEP_TOO_LARGE: this every-step checkpoint changes ${checkpoint.changed.length} files (limit ${policy.maxStepFiles}). Revise: ask the worker to split it, or change the plan into smaller steps.`;
 }
-/** Derived per-step display state for summaries; never persisted and never a lease.
- * @param {{stepIndex: number, status: string, steps: {id: string, title: string}[]}} task @param {number} index
- * @returns {'done' | 'active' | 'review' | 'held' | 'todo'} */
+/**
+ * @param {{stepIndex: number, status: string, steps: {id: string, title: string}[]}} task
+ * @param {number} index
+ * @returns {'done' | 'active' | 'review' | 'held' | 'todo'}
+ */
 function stepState(task, index) {
   if (index < task.stepIndex || task.status === 'completed') return 'done';
   if (index > task.stepIndex) return 'todo';
@@ -66,15 +58,13 @@ function stepState(task, index) {
   return 'active';
 }
 /**
- * Narrow task presence only: callers may subsequently change its status.
  * @param {import('./contracts.js').StoredWorkerV1 | null | undefined} record
  * @returns {record is import('./contracts.js').StoredWorkerV1 & {task: import('./contracts.js').StoredTaskV1}}
  */
 const activeTask = record => !!(record?.task && !TERMINAL.has(record.task.status));
 /** @param {number} ms */
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-/** Terminate a worker's process group (workers are spawned detached as group leaders): SIGTERM,
- * then SIGKILL. The caller re-checks exit. @param {number} pid */
+/** @param {number} pid */
 async function terminateProcessGroup(pid) {
   if (!signallablePid(pid)) return; // never kill(-1), this process or its parent
   for (const signal of /** @type {const} */ (['SIGTERM', 'SIGKILL'])) {
@@ -83,40 +73,32 @@ async function terminateProcessGroup(pid) {
   }
 }
 
-/** Controller state is separate from conversation context and survives compaction. */
 export class PairController extends EventEmitter {
   /** @param {{config: Parameters<typeof validateConfig>[0], cwd: string, ownerSession: string, sourcePaths?: string[], storageDir?: string, scanIntervalMs?: number, callbacks?: ControllerCallbacks, rpcFactory?: (options: import('./rpc.js').RpcOptions) => PiRpc}} options */
   constructor({ config, cwd, ownerSession, sourcePaths = [], storageDir, scanIntervalMs = 2000, callbacks = {}, rpcFactory = opts => new PiRpc(opts) }) {
     super();
     /** @type {PairConfig} */ this.config = validateConfig(config);
-    /** Persisted requested runtime settings; live authority keeps its original profile until explicit idle reconciliation. @type {PairConfig | null} */
+    /** @type {PairConfig | null} */
     this.pendingConfig = null; this.cwd = cwd; this.ownerSession = String(ownerSession);
     /** @type {import('./contracts.js').StoredStateV1} */ this.state = { version: STATE_VERSION, ownerSession: this.ownerSession, ownerEpoch: 0, cwd, workers: {}, requests: {}, notices: {} };
     /** @type {Evidence | null} */ this._evidence = null;
     this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory;
-    /** Whether each resolved worker workspace is inside a Git working tree. Display and autostart
-     * only; start() still runs its own authoritative check. @type {Map<string, boolean>} */
+    /** @type {Map<string, boolean>} */
     this.workspaceGit = new Map();
     this.storageDir = storageDir; this.dir = storageDir || '';
-    // Runtime wakes (every RPC event, including the worker's report notify) drive scans;
-    // this interval is only a backstop for file changes that arrive without an event.
     this.scanIntervalMs = Number.isFinite(scanIntervalMs) && scanIntervalMs > 0 ? scanIntervalMs : 2000;
     /** @type {Map<string, PiRuntime>} */ this.handles = new Map();
-    /** Worker-only replacements share one operation; stop/close can still revoke it. @type {Map<string, Promise<WorkerRecord>>} */ this.restarts = new Map();
+    /** @type {Map<string, Promise<WorkerRecord>>} */ this.restarts = new Map();
     /** @type {WeakMap<PiRuntime, RuntimeData>} */ this.runtimeData = new WeakMap();
-    /** Synchronous cancellation/intent fences, never runtime lifecycle mirrors. @type {Map<string, number>} */ this.intents = new Map();
+    /** @type {Map<string, number>} */ this.intents = new Map();
     /** @type {Promise<void> | null} */ this.scanPromise = null;
     /** @type {Promise<void> | null} */ this.closePromise = null;
-    /** Coordinated fallback containment publications, not a second lifecycle owner. @type {Set<Promise<void>>} */ this.containmentWork = new Set();
+    /** @type {Set<Promise<void>>} */ this.containmentWork = new Set();
     this.serial = new Serial(); this.persistSerial = new Serial(); this.operationAbort = new AbortController(); this.closing = false; this.scanQueued = false; this.scanAgain = false; this.mainObservation = null;
-    /** Volatile logical-activity epoch: bumped on every observed new Main work
-     * (input, non-Pair tool admission, new agent run). Never authority; it only
-     * stales outstanding yields/offers, including consumed ones. */
     this.activity = 0;
-    /** Background activations (dispatch/decision continuations) joined at close. @type {Set<Promise<void>>} */
+    /** @type {Set<Promise<void>>} */
     this.activations = new Set();
-    /** Repository writer locks held while this controller has an unresolved task, by repository root.
-     * @type {Map<string, () => Promise<void>>} */
+    /** @type {Map<string, () => Promise<void>>} */
     this.repoLocks = new Map();
   }
   async init() {
@@ -129,13 +111,8 @@ export class PairController extends EventEmitter {
     const migrated = migrateStoredState(loaded, () => uid('attempt'));
     this.state = validateStoredState(migrated.state, { ownerSession: this.ownerSession, cwd: this.cwd });
     this.state.ownerEpoch = incrementCounter(this.state.ownerEpoch, 'state.ownerEpoch');
-    // A delivery interrupted between its two transactions is retried (at-least-once);
-    // decisions are idempotent per report, so a repeated report turn is harmless.
-    // Before any resend the delivery path checks Main's session for this operation ID.
     for (const notice of Object.values(this.state.notices)) if (notice.status === 'delivery_pending') notice.status = 'pending';
     for (const record of Object.values(this.state.workers)) {
-      // Only a durably confirmed normal stop, or a proven exit of the recorded process,
-      // is reusable. An unprovable exit stays quarantined until /pair reconcile.
       if (record.status !== 'stopped') {
         const proof = await this.exitProof(record);
         if (proof.exited) { record.status = 'stopped'; record.error = null; }
@@ -144,15 +121,9 @@ export class PairController extends EventEmitter {
           record.error = `EXIT_UNCONFIRMED: ${proof.reason} Run /pair reconcile ${record.id} to prove its exit or stop it.`;
         }
       }
-      // Running intent is persisted before the work prompt is written, so an attempt still
-      // 'activating' never received its prompt: nothing to inspect for this attempt.
       if (record.task?.status === 'activating') {
         record.task.status = 'interrupted'; record.task.interruption = 'Controller restarted before this attempt\'s work prompt was sent; the worker did not receive it. Resume to send it.';
       }
-      // A paused question/review/blocker is a retained decision wait, not
-      // in-flight implementation: it survives controller replacement as a hold
-      // (with its finalized report and notice) so an explicit resume — not a
-      // fresh lease — restores it. Everything else is interrupted as before.
       const waitingHold = record.task?.status === 'paused' && ['question', 'review', 'blocked'].includes(String(record.task.previousStatus));
       if (!waitingHold && activeTask(record) && ['running', 'awaiting_settle', 'paused'].includes(record.task.status)) {
         record.task.status = 'interrupted'; record.task.interruption = 'Controller restarted. Inspect retained reports and changes; no automatic replay is authorized.';
@@ -167,19 +138,15 @@ export class PairController extends EventEmitter {
     } catch (error) { await this.releaseLock?.(); this.releaseLock = null; throw error; }
   }
   get evidence() { assert(this._evidence, 'Controller is not initialized'); return this._evidence; }
-  /** A worker's workspace as start() resolves it, before canonicalization.
-   * @param {import('./contracts.js').WorkerSpec} spec @returns {string} */
+  /** @param {import('./contracts.js').WorkerSpec} spec @returns {string} */
   workspaceFor(spec) { return spec.cwd ? path.resolve(this.cwd, spec.cwd) : this.cwd; }
-  /** Refresh the display-only Git check for every configured workspace. Never throws. */
   async checkWorkspaces() {
     const paths = [...new Set(this.config.workers.map(spec => this.workspaceFor(spec)))];
     const results = await Promise.all(paths.map(async cwd => /** @type {[string, boolean]} */ ([cwd, await repositoryRoot(cwd).then(() => true, () => false)])));
     this.workspaceGit = new Map(results);
     if (!this.closing) this.emit('change', this.summary());
   }
-  /** Keep Serial's single queue but give results their exact type without changing util.js.
-   * @template T @param {() => T | Promise<T>} action @returns {Promise<T>}
-   */
+  /** @template T @param {() => T | Promise<T>} action @returns {Promise<T>} */
   transaction(action) {
     return new Promise((resolve, reject) => {
       (this.serial.run)(async () => { try { resolve(await action()); } catch (error) { reject(error); } }).catch(reject);
@@ -192,7 +159,6 @@ export class PairController extends EventEmitter {
   /** @param {string} id */
   workerDir(id) { return path.join(this.dir, 'workers', safeId(id)); }
   async persist() {
-    // After close released ownership, a late completion must never overwrite the next owner's state.
     assert(!this.closePromise || this.releaseLock, 'Pair controller is closed; state is owned elsewhere');
     for (const r of Object.values(this.state.workers)) { if (r.task && this.state.requests[r.task.requestId]) this.state.requests[r.task.requestId].status = r.task.status; }
     const snapshot = clone(this.state);
@@ -226,20 +192,13 @@ export class PairController extends EventEmitter {
     const next = validateConfig(config), changed = this.configHash(next) !== this.configHash();
     const retained = this.handles.size > 0 || Object.values(this.state.workers).some(r => activeTask(r) || r.status !== 'stopped');
     this.pendingConfig = changed && retained ? next : null;
-    // No revoke, spawn or scanner wake for a settings edit. Runtime-affecting
-    // fields remain exactly those attested by the current generation. New-task
-    // policy/limits are snapshots; disabling still prevents new assignments.
     this.config = this.pendingConfig ? { ...next, runtime: this.config.runtime, requirements: this.config.requirements, workers: this.config.workers, evidence: this.config.evidence } : next;
     this.evidence.limits = this.config.evidence;
     this.emit('change', this.summary());
     void this.checkWorkspaces(); // a workspace setting may have changed
     return previousWarming === this.warmingPolicy() ? Promise.resolve() : this.refreshWarmingPolicy();
   }
-  /** Nonauthorizing native-warming preference, deliberately outside configHash. */
   warmingPolicy() { return this.config.enabled && this.config.cacheWarming === 'active' ? 'active' : 'off'; }
-  /** Publish only the warming preference; preserve the exact current authority tuple
-   * and phase. A policy edit is not a work grant, report transition or budget reset.
-   */
   async refreshWarmingPolicy() {
     try {
       await this.transaction(async () => {
@@ -254,15 +213,11 @@ export class PairController extends EventEmitter {
         }
       });
     } catch (error) {
-      // Never leave a potentially paid stale opt-in in an owned live process
-      // after failed publication. Existing stop containment retains all evidence.
       await Promise.allSettled([...this.handles.keys()].map(id => this.stop(id)));
       throw error;
     }
   }
 
-  /** Explicit /pair start or restart boundary only. Never change an active assignment or
-   * turn a report/unknown exit into permission to replay work. */
   async reconcileConfig() {
     const pending = this.pendingConfig;
     if (!pending) return;
@@ -275,8 +230,6 @@ export class PairController extends EventEmitter {
       }
       return [...this.handles.keys()];
     });
-    // Keep the old profile during shutdown. The scanner sees ordinary stopped
-    // authority/pending controls, not unexplained config-hash drift.
     for (const id of ids) await this.stop(id);
     await this.transaction(() => {
       const latest = this.pendingConfig;
@@ -291,7 +244,7 @@ export class PairController extends EventEmitter {
   configHash(config = this.config) { return digest({ runtime: config.runtime, requirements: config.requirements, workers: config.workers, evidence: config.evidence }); }
   /** @param {string} id @returns {number} */
   intent(id) { return this.intents.get(id) || 0; }
-  /** Revoke before any queue/await, including an as-yet unpublished dispatch. @param {string} id @param {string} reason */
+  /** @param {string} id @param {string} reason */
   revoke(id, reason) {
     this.intents.set(id, this.intent(id) + 1);
     const h = this.handles.get(id);
@@ -310,9 +263,7 @@ export class PairController extends EventEmitter {
   launchCurrent(launch) {
     return this.state.workers[launch.id] === launch.record && this.intent(launch.id) === launch.intent && this.handles.get(launch.id) === launch.runtime && launch.configHash === this.configHash() && this.runtimeCurrent(launch.runtime, null);
   }
-  /** Reservation only: never starts a runtime or waits for RPC. Caller holds serial.
-   * @param {string} id @param {boolean} [continuing] @param {boolean} [restarting] @returns {Promise<Launch>}
-   */
+  /** @param {string} id @param {boolean} [continuing] @param {boolean} [restarting] @returns {Promise<Launch>} */
   async reserveStart(id, continuing = false, restarting = false) {
     assert(restarting || !this.restarts.has(id), 'Worker restart is in progress; wait before starting or assigning work');
     assert(!this.closing && (this.config.enabled || (continuing && activeTask(this.state.workers[id]))), 'Pair is closing or disabled');
@@ -327,13 +278,10 @@ export class PairController extends EventEmitter {
       assert(this.runtimeData.get(existing)?.pendingControls === 0, 'Containment is still pending; wait before granting another lease');
       return { id, record: r0, runtime: existing, intent, configHash };
     }
-    // An unconfirmed historical generation blocks every slot, not only its own file.
     assert(Object.values(this.state.workers).every(r => r.status === 'stopped'), 'EXIT_UNCONFIRMED: a retained generation is not reliably stopped; all new worker launches are held.');
     assert([...this.handles.values()].every(h => h.closed), 'UNSUPPORTED_PROFILE: Fabric Pair V1 supports one live/starting/stopping worker.');
     const cwd = await canonical(spec.cwd ? path.resolve(this.cwd, spec.cwd) : this.cwd);
     assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked');
-    // Custom launchers/arguments can change the worker environment; do not
-    // pretend Main's file view is authoritative for those profiles.
     if (config.requirements.fabric && config.runtime.command === 'pi' && config.runtime.commandArgs.length === 0) {
       const preflight = await preflightNativeProfile(cwd, config.requirements);
       assert(!preflight.blocked, preflight.message);
@@ -352,37 +300,28 @@ export class PairController extends EventEmitter {
     const dir = this.workerDir(id), freshSession = !r0;
     r.sessionFile ||= path.join(dir, 'sessions', `${uid('pair-session')}.jsonl`);
     r.bound = spec; r.error = null; r.status = 'starting'; r.workerGeneration = incrementCounter(r.workerGeneration, `state.workers.${id}.workerGeneration`);
-    // Process identity belongs to one generation; the new one is recorded when it spawns.
     delete r.pid; delete r.spawnedAt;
     const generation = r.workerGeneration;
     this.state.workers[id] = r;
     try {
-      // Reservation is durable BEFORE PiRuntime may create the empty file or spawn.
       await this.persist();
       assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked before runtime construction');
       await this.writeAuthority(id, 'paused');
       assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked before runtime construction');
-      // The private Fabric mesh namespace is created before spawn; existing
-      // shared mesh state is never copied or migrated into it.
       await Promise.all(['sessions', 'inbox', 'archive', 'fabric/mesh'].map(name => mkdirPrivate(path.join(dir, name))));
       assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked before runtime construction');
       const nonce = uid('instance');
       const args = [...config.runtime.commandArgs, '--mode', 'rpc', '--provider', spec.provider, '--model', spec.model, '--session-dir', path.join(dir, 'sessions'), '--session', r.sessionFile];
       if (!config.runtime.inheritExtensions) args.push('--no-extensions');
-      // runtime.excludeExtensions removes inherited Main extensions the worker must not load (for
-      // example ones that start turns on their own); explicitly added extensions are kept.
       const inherited = config.runtime.inheritExtensions ? this.sources.filter(source => !excludedExtension(source, config.runtime.excludeExtensions)) : [];
       for (const extension of new Set([...inherited, ...config.runtime.extraExtensions, ENTRY])) args.push('-e', extension);
       for (const skill of config.runtime.extraSkills) args.push('--skill', skill);
       const runtime = new PiRuntime({ rpcOptions: { command: config.runtime.command, args, cwd, requestTimeoutMs: config.runtime.requestTimeoutMs, shutdownTimeoutMs: config.runtime.shutdownTimeoutMs,
-        // Explicit child environment overrides any inherited PI_FABRIC_MESH_ROOT;
-        // Main's process.env and PI_FABRIC_PROJECT_ROOT are never mutated here.
         env: { PI_FABRIC_MESH_ROOT: meshRootFor(dir), PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: id, PI_FABRIC_PAIR_WORKER_DIR: dir, PI_FABRIC_PAIR_OWNER: this.ownerSession, PI_FABRIC_PAIR_OWNER_EPOCH: String(this.state.ownerEpoch), PI_FABRIC_PAIR_WORKER_GENERATION: String(r.workerGeneration), PI_FABRIC_PAIR_NONCE: nonce, PI_FABRIC_PAIR_PARENT_PID: String(process.pid) } },
         rpcFactory: this.rpcFactory, ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch, workerId: id, workerGeneration: r.workerGeneration, nonce, dir, cwd,
         sessionFile: r.sessionFile, sessionId: r.sessionId, freshSession, config, spec, entryPath: ENTRY,
         promptUser: (workerId, event, options) => this.callbacks.promptUser?.(workerId, event, options) || Promise.resolve({ cancelled: true }),
         onWake: () => this.scheduleScan(), isCurrent: (h, activation) => this.runtimeCurrent(h, activation),
-        // Recorded durably so a later controller can prove this process exited after a crash.
         onSpawn: pid => {
           const spawnedAt = Date.now();
           const work = this.transaction(async () => {
@@ -395,8 +334,6 @@ export class PairController extends EventEmitter {
       this.handles.set(id, runtime);
       return { id, record: r, runtime, intent, configHash };
     } catch (error) {
-      // No PiRuntime escaped this reservation, so constructor/pre-spawn failure is provably unspawned.
-      // Keep the reserved path: a later start must still reject absent/empty retained history, not replace it.
       if (!this.handles.has(id)) {
         r.status = 'stopped'; r.error = `Launch failed before runtime construction: ${briefError(error)}`;
         try { await this.writeAuthority(id, 'stopped'); await this.persist(); }
@@ -405,7 +342,7 @@ export class PairController extends EventEmitter {
       throw error;
     }
   }
-  /** Startup and readiness are outside the root serial. @param {Launch} launch */
+  /** @param {Launch} launch */
   async startReserved(launch) {
     try {
       assert(this.launchCurrent(launch), 'Start reservation was revoked');
@@ -421,7 +358,6 @@ export class PairController extends EventEmitter {
       assert(this.launchCurrent(launch), 'Readiness was revoked');
       return launch.record;
     } catch (error) {
-      // A newer cancellation/config/stop owns containment. Never kill its later activation.
       if (!this.launchCurrent(launch)) throw error;
       launch.runtime.revoke(`Startup failed: ${briefError(error)}`);
       let containment = '';
@@ -434,7 +370,7 @@ export class PairController extends EventEmitter {
       throw error;
     }
   }
-  /** Safe config rebind closes the old generation; no hot setters. @param {string} id */
+  /** @param {string} id */
   async start(id) {
     assert(!this.restarts.has(id), 'Worker restart is in progress');
     await this.reconcileConfig();
@@ -447,9 +383,7 @@ export class PairController extends EventEmitter {
       return { id, record: r, runtime: h, intent: this.intent(id), generation: r.workerGeneration };
     });
     if (old) {
-      // Persist non-stopped intent before outside-serial containment of the old generation.
       await this.transaction(async () => { assert(this.controlCurrent(old), 'Rebind superseded'); old.record.status = 'error'; old.record.error = 'Rebinding: exit not yet confirmed'; await this.writeAuthority(id, 'stopped'); await this.persist(); });
-      // Configuration drift deliberately invalidates readiness; use bounded stop, not hot setters.
       if (!old.runtime.closed) await old.runtime.abortAndStop('Safe configuration rebind');
       await this.transaction(async () => { assert(this.controlCurrent(old) && old.runtime.closed, 'Rebind exit is unconfirmed'); old.record.status = 'stopped'; this.handles.delete(id); await this.persist(); });
       assert(this.intent(id) === old.intent && !this.closing, 'Rebind was cancelled');
@@ -457,10 +391,7 @@ export class PairController extends EventEmitter {
     const launch = await this.transaction(() => this.reserveStart(id));
     return this.startReserved(launch);
   }
-  /** Replace only the worker process, retaining history and task evidence. No
-   * activation is granted: interrupted work requires an explicit resume.
-   * @param {string} id @returns {Promise<WorkerRecord>}
-   */
+  /** @param {string} id @returns {Promise<WorkerRecord>} */
   async restart(id) {
     const existing = this.restarts.get(id);
     if (existing) return existing;
@@ -505,12 +436,10 @@ export class PairController extends EventEmitter {
     validateDispatch(input); input = clone(input);
     const reserved = await this.transaction(async () => {
       assert(!this.closing && this.config.enabled, 'Pair is closing or disabled');
-      // Key-order independent, so a retry of the same assignment is recognised however it is serialised.
       const hash = stableDigest(input), previous = this.state.requests[input.requestId];
       if (previous) { assert(previous.hash === hash || previous.hash === digest(input), 'requestId was already used for a different assignment'); return { previous }; }
       for (const r of Object.values(this.state.workers)) assert(!activeTask(r), 'UNSUPPORTED_PROFILE: Fabric Pair V1 allows one unresolved assignment; finish or cancel it first.');
       const spec = this.workerSpec(input.workerId);
-      // One writer per repository across every Pair session on this machine, held until the task resolves.
       await this.ensureRepoLock(this.state.workers[input.workerId]?.repoRoot ?? await repositoryRoot(await canonical(this.workspaceFor(spec))));
       const launch = await this.reserveStart(input.workerId), r = launch.record;
       assert(this.launchCurrent(launch), 'Dispatch was revoked before reservation');
@@ -525,23 +454,15 @@ export class PairController extends EventEmitter {
       await this.collectEvidence();
       assert(this.launchCurrent(launch), 'Dispatch was revoked while collecting evidence');
       const taskId = uid('task');
-      // The durable receipt is visible to cancel before startup, evidence capture or readiness.
-      // activating is non-authorizing; the placeholder ref is never read until populated.
       /** @type {TaskRecord} */
       const task = { id: taskId, workerId: r.id, requestId: input.requestId, objective: input.objective, context: input.context || '', constraints: input.constraints || [], steps: input.steps,
         stepIndex: 0, planRevision: 1, attemptId: uid('attempt'), attemptNumber: 1, status: 'activating', leaseId: uid('lease'), policy: clone(this.config.supervision), limits: clone(this.config.limits), verification: clone(this.config.verification),
         startedAt: Date.now(), updatedAt: Date.now(), revisions: 0, stepRevisions: 0, turns: 0, usage: null, baseSnapshotRef: path.join(this.dir, 'tasks', taskId, 'base-pending.json'), pendingReport: null, report: null, decisions: {}, lastDecision: null };
       r.task = task;
       this.state.requests[input.requestId] = { hash, taskId, workerId: r.id, acceptedAt: Date.now(), status: task.status };
-      // Retained read-only work-order scope for post-compaction restoration on the
-      // worker: a bounded copy of the originally granted task scope (objective and
-      // context), identity-bound to taskId+planRevision. It is a reference for
-      // restoration only — never a new grant, and never an authority change.
       await mkdirPrivate(this.workerDir(input.workerId));
       await atomicJSON(path.join(this.workerDir(input.workerId), 'work-order.json'),
         { version: 1, taskId, planRevision: task.planRevision, objective: task.objective, context: bounded(task.context, 24000), constraints: task.constraints, writtenAt: Date.now() });
-      // Dispatch leaves Main's explicit logical phase open: finalized reports stay
-      // in the durable inbox without automatically waking this Main model.
       this.setPhase('open');
       const work = this.reserveWork(launch, task); // synchronous, before first await after publishing task identity
       await this.persist();
@@ -550,8 +471,6 @@ export class PairController extends EventEmitter {
     if (reserved.previous) return { ...reserved.previous, duplicate: true };
     const work = reserved.work;
     assert(work, 'Missing dispatch reservation');
-    // Startup, the base capture and the prompt run in the background: Main's tool call returns
-    // as soon as the assignment is durable. A failure holds the task and tells Main and the user.
     this.backgroundActivation(work, 'work order', async () => {
       await this.fenced(work, this.startReserved(work));
       await this.fenced(work, this.prepareBase(work));
@@ -562,9 +481,7 @@ export class PairController extends EventEmitter {
     const sizing = mode === 'every-step' ? ` Supervision is every-step: each step is reviewed on its own and may change at most ${stepFiles ?? 'a few'} files, so keep each step to one small change.` : mode === 'milestones' ? ' Supervision is milestones: each step you listed is reviewed on its own, so make each step a coherent milestone.' : ' Supervision is final-only: the worker completes the whole plan before one review.';
     return { taskId: work.task.id, workerId: work.id, status: work.task.status, message: (this.config.autoDeliverReports === false ? 'Assigned; the worker starts in the background. Do not wait or poll; the report waits in Pair\'s inbox until you call pair_yield.' : 'Assigned; the worker starts in the background. Do not wait or poll; the report is delivered to you when the worker finishes and your current turn is done.') + sizing };
   }
-  /** Run an activation outside Main's tool call. A failure that holds this exact attempt is
-   * reported to the user and, as context, to Main; a revocation (cancel, stop) is not a failure.
-   * @param {Work} work @param {string} what @param {() => Promise<unknown>} action */
+  /** @param {Work} work @param {string} what @param {() => Promise<unknown>} action */
   backgroundActivation(work, what, action) {
     const run = (async () => {
       try { await action(); }
@@ -580,8 +497,7 @@ export class PairController extends EventEmitter {
     })().finally(() => this.activations.delete(run));
     this.activations.add(run);
   }
-  /** Repository writer lock: at most one unresolved Pair task writes a repository at a time,
-   * across Main sessions and processes. Reentrant for this controller. @param {string} repoRoot */
+  /** @param {string} repoRoot */
   async ensureRepoLock(repoRoot) {
     if (this.repoLocks.has(repoRoot)) return;
     const base = this.storageDir ? path.join(path.dirname(this.storageDir), 'repositories') : path.join(agentDir(), 'fabric-pair', 'repositories');
@@ -591,7 +507,7 @@ export class PairController extends EventEmitter {
     });
     this.repoLocks.set(repoRoot, release);
   }
-  /** Release repository locks once no task of this controller is unresolved. @param {boolean} [force] */
+  /** @param {boolean} [force] */
   async releaseRepoLocks(force = false) {
     if (!force && this.state && Object.values(this.state.workers).some(activeTask)) return;
     for (const [root, release] of [...this.repoLocks]) {
@@ -599,8 +515,6 @@ export class PairController extends EventEmitter {
       await release().catch(error => this.notifyUser(`Pair could not release the repository lock for ${root}: ${briefError(error)}`, 'warning'));
     }
   }
-  /** Move resolved/superseded notices out of state.json into their task's archive directory, so
-   * state.json holds only live obligations. Runs only while no task is unresolved. */
   async archiveNotices() {
     if (Object.values(this.state.workers).some(activeTask)) return;
     /** @type {Map<string, import('./contracts.js').StoredNoticeV1[]>} */ const byTask = new Map();
@@ -612,15 +526,12 @@ export class PairController extends EventEmitter {
       for (const notice of notices) delete this.state.notices[notice.reportId];
     }
   }
-  /** Keep the newest idempotency records only; the current task's record is always newest. */
   pruneRequests() {
     const requests = Object.entries(this.state.requests);
     if (requests.length <= RETAINED_REQUESTS) return;
     requests.sort((a, b) => b[1].acceptedAt - a[1].acceptedAt);
     for (const [key] of requests.slice(RETAINED_REQUESTS)) delete this.state.requests[key];
   }
-  /** Collect evidence and check artifacts of tasks older than the retained window. Runs only
-   * while no task is unresolved (dispatch), so no capture or inspection can race it. */
   async collectEvidence() {
     if (Object.values(this.state.workers).some(activeTask)) return;
     try {
@@ -631,7 +542,7 @@ export class PairController extends EventEmitter {
       for (const name of await fs.readdir(checks).catch(() => [])) if (!tasks.has(name)) await fs.rm(path.join(checks, name), { recursive: true, force: true });
     } catch (error) { this.notifyUser(`Pair evidence cleanup skipped: ${briefError(error)}`, 'warning'); }
   }
-  /** A paused pre-dispatch receipt may not yet have a baseline; capture before its first grant. @param {Work} work */
+  /** @param {Work} work */
   async prepareBase(work) {
     this.requireWork(work);
     if (work.task.baseSnapshotRef !== path.join(this.dir, 'tasks', work.task.id, 'base-pending.json')) return;
@@ -647,8 +558,7 @@ export class PairController extends EventEmitter {
       supervision: task.policy.mode, ...(task.policy.mode === 'every-step' && 'maxStepFiles' in task.policy ? { maxStepFiles: task.policy.maxStepFiles } : {}), summaryDetail: task.policy.summaryDetail, finalStep: task.policy.mode === 'final-only' || task.stepIndex === task.steps.length - 1,
       lastDecision: task.lastDecision || null })}\nUse Fabric/Fovea and finish by calling pair_report. ${task.policy.mode === 'final-only' ? 'All listed steps are authorized; request review after the complete plan, and ask questions whenever needed.' : `Only the current step is authorized. Report a checkpoint before advancing.`}`;
   }
-  /** Main's feedback travels as a JSON string field, never as free prompt text.
-   * @param {TaskRecord} task @param {{reportId: string, action: string, feedback: string, steps?: unknown[]}} input */
+  /** @param {TaskRecord} task @param {{reportId: string, action: string, feedback: string, steps?: unknown[]}} input */
   decisionMessage(task, input) {
     const revised = input.steps ? { revisedPlan: task.steps, planRevision: task.planRevision } : {};
     return `${this.workMessage(task)}\nMAIN DECISION\n${JSON.stringify({ reportId: input.reportId, action: input.action, feedback: input.feedback, ...revised })}\nThe feedback field is Main's instruction for the authorized step only; it grants nothing beyond authorizedStep.`;
@@ -663,33 +573,28 @@ export class PairController extends EventEmitter {
     const activation = launch.runtime.reserveActivation({ taskId: task.id, attemptId: task.attemptId, leaseId: task.leaseId, workerGeneration: launch.record.workerGeneration });
     return { ...launch, task, attemptId: task.attemptId, leaseId: task.leaseId, activation };
   }
-  /** Identity only: late ACKs/errors cannot overwrite a yielded/cancelled/new attempt. @param {Work} work @returns {boolean} */
+  /** @param {Work} work @returns {boolean} */
   workCurrent(work) {
     return this.launchCurrent(work) && work.record.task === work.task && work.task.attemptId === work.attemptId && work.task.leaseId === work.leaseId && ['activating', 'running'].includes(work.task.status);
   }
-  /** Await one step of an activation, then re-check that the activation is still current.
-   * @template T @param {Work} work @param {Promise<T>} pending @returns {Promise<T>} */
+  /** @template T @param {Work} work @param {Promise<T>} pending @returns {Promise<T>} */
   async fenced(work, pending) { const value = await pending; this.requireWork(work); return value; }
   /** @param {Work} work */
   requireWork(work) { assert(this.workCurrent(work) && work.runtime.activationCurrent(work.activation), 'Activation was revoked, yielded, or superseded'); }
   /** @param {Work} work @param {unknown} error */
   async activationFailed(work, error) {
-    // In particular a valid report can precede prompt ACK; that report owns the next state.
     const control = await this.transaction(async () => {
       if (!this.workCurrent(work)) return null;
       return this.interrupt(work.id, `Activation held (not retried): ${briefError(error)}`);
     });
     if (control) await this.contain(control, 'Activation failed', true);
   }
-  /** Exactly one runtime activation, outside serial. The optional guard runs AFTER
-   * the final readiness wait (prepareActivation) and immediately before renewed
-   * running authority is written, so the caller can revalidate source/context
-   * against everything the wait may have changed. The optional branch carries a
-   * cheap SYNCHRONOUS fence through transaction admission, running-intent
-   * persistence, authority publication and the runtime pre-prompt write guard:
-   * navigation observed at any point holds the renewal without sending work.
-   * @param {Work} work @param {string} message
-   * @param {{guard?: () => Promise<void>, branch?: number}} [options] @returns {Promise<boolean>} */
+  /**
+   * @param {Work} work
+   * @param {string} message
+   * @param {{guard?: () => Promise<void>, branch?: number}} [options]
+   * @returns {Promise<boolean>}
+   */
   async activate(work, message, options = {}) {
     const { guard, branch } = options;
     const branchCurrent = () => branch === undefined || (this.state.branch ?? 0) === branch;
@@ -710,7 +615,6 @@ export class PairController extends EventEmitter {
           await this.writeAuthority(work.id, 'paused'); await this.persist();
           this.notifyUser(`[${work.id}] ${reached}; no next model request was sent.`, 'warning'); return false;
         }
-        // Intent is persisted before the authorizing file. No inference until both succeed.
         t.status = 'running'; t.updatedAt = Date.now(); t.dispatchSettleSequence = work.runtime.settledSequence; r.status = 'working';
         await this.fenced(work, this.persist());
         if (!branchCurrent()) throw stale();
@@ -728,15 +632,11 @@ export class PairController extends EventEmitter {
       });
       return true;
     } catch (error) {
-      // A report accepted before ACK is authoritative; do not turn its stale ACK into interruption.
       if (work.record.task === work.task && work.task.attemptId === work.attemptId && ['awaiting_settle', 'question', 'review', 'blocked', 'completed', 'cancelled', 'paused'].includes(work.task.status)) return false;
       await this.activationFailed(work, error); throw error;
     }
   }
-  /** Drain the entire bounded runtime mailbox before budgets/checkpoint publication.
-   * No await here: the current mailbox is at most 256 compact observations.
-   * @param {string} id @param {WorkerRecord} record @param {PiRuntime} runtime
-   */
+  /** @param {string} id @param {WorkerRecord} record @param {PiRuntime} runtime */
   consumeObservations(id, record, runtime) {
     let changed = false;
     for (let batch = runtime.takeObservations(); batch.length; batch = runtime.takeObservations()) {
@@ -755,7 +655,7 @@ export class PairController extends EventEmitter {
     }
     return changed;
   }
-  /** Notifications cannot poison the scanner/containment completion chain. @param {string} message @param {'info'|'warning'|'error'} [level] */
+  /** @param {string} message @param {'info'|'warning'|'error'} [level] */
   notifyUser(message, level = 'info') { try { this.callbacks.notifyUser?.(message, level); } catch (error) { console.error(`Pair notification failed: ${briefError(error)}`); } }
   scheduleScan() {
     if (this.closing || !this.state) return;
@@ -763,7 +663,6 @@ export class PairController extends EventEmitter {
     this.scanQueued = true;
     /** @type {Array<() => Promise<void>>} */ const jobs = [];
     this.scanPromise = this.transaction(() => this.scan(jobs)).catch(error => this.notifyUser(`Pair scan: ${briefError(error)}`, 'error')).then(async () => {
-      // Always drain reserved containment, even if a later file read failed. Never await RPC in serial.
       const outcomes = await Promise.allSettled(jobs.map(job => job()));
       for (const result of outcomes) if (result.status === 'rejected') this.notifyUser(`Pair containment/evidence: ${briefError(result.reason)}`, 'error');
     }).finally(() => {
@@ -771,20 +670,14 @@ export class PairController extends EventEmitter {
       if (this.scanAgain) { this.scanAgain = false; queueMicrotask(() => this.scheduleScan()); }
     });
   }
-  /** A read/settlement fence, never an implementation grant. Acceptance revokes exactly
-   * once; a further synchronous revoke must also fence an already-pending report.
-   * @param {Control} control @param {TaskRecord | null} task @returns {boolean}
-   */
+  /** @param {Control} control @param {TaskRecord | null} task @returns {boolean} */
   reportCurrent(control, task) {
     const h = control.runtime, data = h && this.runtimeData.get(h);
     return !!(this.controlCurrent(control) && control.record.task === task && h && data && h.ready && !h.closed && !h.fault && !data.failureHandled && data.pendingControls === 0 && control.record.status !== 'error' && control.record.status !== 'stopped' && this.runtimeCurrent(h, null)
       && (task?.status !== 'running' || data.activationIntent === control.intent)
       && (task?.status !== 'awaiting_settle' || data.activationIntent + 1 === control.intent));
   }
-  /** Compare every original envelope field, not checkpoint additions or just its ID/hash.
-   * Payload key order is V1 evidence: never rebuild/canonicalize it for comparison.
-   * @param {import('./contracts.js').ReportEnvelope} incoming @param {unknown} value
-   */
+  /** @param {import('./contracts.js').ReportEnvelope} incoming @param {unknown} value */
   assertSameReport(incoming, value) {
     const original = validateReportEnvelope(value);
     assert(Object.entries(incoming).every(([key, value]) => JSON.stringify(Reflect.get(original, key)) === JSON.stringify(value)), 'Conflicting immutable report evidence');
@@ -798,13 +691,10 @@ export class PairController extends EventEmitter {
     }
     if (changed) await this.persist();
   }
-  /** One worker's reconciliation pass inside scan(). Every `return changed` replaces
-   * the former labeled `continue workers`: scan() simply moves to the next worker.
-   * @param {string} id @param {PiRuntime} h @param {Array<() => Promise<void>>} jobs @returns {Promise<boolean>} */
+  /** @param {string} id @param {PiRuntime} h @param {Array<() => Promise<void>>} jobs @returns {Promise<boolean>} */
   async #scanWorker(id, h, jobs) {
     let changed = false;
     const r = this.record(id), t = r.task, data = this.runtimeData.get(h); assert(data, 'Missing runtime bookkeeping');
-    // Counts/flags were already updated synchronously by PiRuntime before bounded observations were queued.
     changed = this.consumeObservations(id, r, h) || changed;
     if (r.status === 'error') return changed; // explicit control/start failure already owns containment
     if ((h.fault || h.closed || data.configHash !== this.configHash()) && !data.failureHandled) {
@@ -822,12 +712,8 @@ export class PairController extends EventEmitter {
       const raw = await readJSON(path.join(h.dir, 'telemetry.json'), undefined);
       if (!current()) return changed;
       if (raw !== undefined) {
-        // Intrinsic validation precedes all field consumption. A valid old-owner
-        // diagnostic is merely stale, not grounds to interrupt unrelated work.
         const telemetry = validateCurrentTelemetry(raw);
         if (telemetry.workerId === id && telemetry.workerId === r.id && telemetry.nonce === h.nonce && telemetry.pid === h.pid && telemetry.sessionId === r.sessionId && telemetry.ownerSession === this.ownerSession && telemetry.ownerEpoch === this.state.ownerEpoch && telemetry.ownerEpoch === h.ownerEpoch && telemetry.workerGeneration === r.workerGeneration && telemetry.workerGeneration === h.workerGeneration && telemetry.at !== data.telemetry?.at) {
-          // Telemetry is a volatile observation: refresh the UI, but do not rewrite state.json for it.
-          // It is persisted with the next real state change.
           data.telemetry = telemetry; r.lastObservation = telemetry; this.emit('change', this.summary());
           if (t?.status === 'running' && telemetry.model && (telemetry.model.provider !== r.bound.provider || telemetry.model.id !== r.bound.model)) {
             const held = await this.interrupt(id, 'Worker model changed outside Pair; possible extension interference.'); jobs.push(() => this.contain(held, 'Model drift', true)); return changed;
@@ -855,9 +741,7 @@ export class PairController extends EventEmitter {
         const accepted = await this.acceptReport(id, incoming, control); control = accepted.control;
         if (!current()) return changed;
         retainedReport = true;
-        // An unproven candidate stays in the inbox; only its first sighting is recorded.
         if (accepted.disposition === 'unproven') { changed = r.staleReports !== staleBefore || changed; continue; }
-        // Retain the first archived original even if publication races a retry.
         try { await fs.link(file, archive); }
         catch (error) {
           if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
@@ -875,16 +759,12 @@ export class PairController extends EventEmitter {
         return changed; // keep the offending inbox/archive bytes; containment owns this generation
       }
     }
-    // Read after the ordered inbox, but before declaring no report. If settlement
-    // arrives during this read, absence is not yet proof: the next existing scan checks it.
     const latchSequence = h.settledSequence;
     try {
       const raw = await readJSON(path.join(h.dir, 'latch.json'), undefined, 16 * 1024 * 1024);
       if (!current()) return changed;
       if (raw !== undefined) {
         const latch = validateLatch(raw); retainedReport = true;
-        // The worker never deletes its latch, so it is re-read on every scan. Only
-        // an adoption or a newly recorded stale entry changes durable state.
         const staleBefore = r.staleReports;
         const accepted = await this.acceptReport(id, latch.report, control); control = accepted.control;
         if (!current()) return changed;
@@ -909,8 +789,6 @@ export class PairController extends EventEmitter {
       }
       changed = true;
     } else if (t?.status === 'running') {
-      // activeStepTimeoutMs bounds one activation's wall-clock time (updatedAt is set when the
-      // running authority is granted); legacy tasks without the field are unbounded as before.
       const stepLimit = 'activeStepTimeoutMs' in t.limits && typeof t.limits.activeStepTimeoutMs === 'number' && Date.now() - t.updatedAt > t.limits.activeStepTimeoutMs
         ? `Step time limit reached (${Math.round(t.limits.activeStepTimeoutMs / 60000)} min without a report)` : null;
       const limit = limitExceeded(t, t.limits) || stepLimit;
@@ -924,9 +802,7 @@ export class PairController extends EventEmitter {
     }
     return changed;
   }
-  /** Caller holds serial; the returned control is captured BEFORE publication awaits.
-   * @param {string} id @param {unknown} value @param {Control} [control] @returns {Promise<ReportAcceptance>}
-   */
+  /** @param {string} id @param {unknown} value @param {Control} [control] @returns {Promise<ReportAcceptance>} */
   async acceptReport(id, value, control = this.control(id)) {
     const incoming = validateReportEnvelope(value);
     const r = this.record(id), h = this.handles.get(id), t = r.task;
@@ -949,23 +825,16 @@ export class PairController extends EventEmitter {
     }
     if (duplicate) return { control, disposition: 'duplicate' };
     if (notice || t?.decisions[incoming.reportId]) {
-      // Metadata is not original content. Only this bounded local archive name is
-      // eligible evidence; never follow historical task/checkpoint/external paths.
       const original = await readJSON(path.join(this.workerDir(id), 'archive', `${incoming.reportId}.json`), undefined, 16 * 1024 * 1024);
       if (!current()) return { control, disposition: 'revoked' };
       if (original === undefined) {
         const reason = 'Historical report identity exists but original content is unproven; reconciliation required';
         if (stale(reason)) this.notifyUser(`[${id}] ${incoming.reportId}: ${reason}`, 'warning');
-        // Keep this candidate out of the original archive. Neither it nor an old
-        // latch may manufacture duplicate proof or interrupt unrelated new work.
         return { control, disposition: 'unproven' };
       }
       this.assertSameReport(incoming, original);
       return { control, disposition: 'duplicate' };
     }
-    // A retained latch may outlive its Main session. Compare retained same-ID
-    // evidence first, but never adopt an old owner or interrupt unrelated work
-    // merely because that valid historical latch is still present.
     if (!h || incoming.ownerSession !== this.ownerSession || incoming.nonce !== h.nonce || incoming.ownerEpoch !== this.state.ownerEpoch || incoming.workerGeneration !== r.workerGeneration || incoming.sessionId !== r.sessionId || incoming.payload.taskId !== t?.id || incoming.leaseId !== t?.leaseId || incoming.attemptId !== t?.attemptId || incoming.attemptNumber !== t?.attemptNumber) {
       stale('Superseded process/session/task/lease'); return { control, disposition: 'stale' };
     }
@@ -985,14 +854,14 @@ export class PairController extends EventEmitter {
     const drainData = this.runtimeData.get(h); if (drainData) drainData.acceptDrain = drain;
     t.pendingReport = incoming; t.status = 'awaiting_settle'; t.pendingSince = Date.now(); t.abortRequested = false; r.status = 'settling';
     const accepted = this.reserveControl(id), data = this.runtimeData.get(h); assert(data, 'Missing runtime bookkeeping');
-    // Publication failure owns fallback containment; never leave a pending report
-    // eligible for checkpointing after a failed durable waiting/state write.
     await this.publishControl(accepted, 'waiting');
     data.pendingControls--;
     return { control: accepted, disposition: 'accepted' };
   }
-  /** Slow evidence and configured verification run outside serial, fenced after every await.
-   * @param {string} id @param {Control} [expected] @param {TaskRecord | null} [task]
+  /**
+   * @param {string} id
+   * @param {Control} [expected]
+   * @param {TaskRecord | null} [task]
    * @param {import('./contracts.js').ReportEnvelope | null} [pending]
    */
   async finalizeReport(id, expected = this.control(id), task = expected.record.task, pending = task?.pendingReport) {
@@ -1010,15 +879,11 @@ export class PairController extends EventEmitter {
     const current = () => !abort.signal.aborted && this.reportCurrent(control, t) && this.configHash() === reserved.configHash && t.attemptId === reserved.attemptId && t.leaseId === reserved.leaseId && t.pendingReport === incoming && t.status === 'awaiting_settle';
     const check = () => assert(current(), 'Checkpoint reservation was revoked or superseded');
     try {
-      // The abort sent at acceptance must finish first: its idle wait is part of settlement.
       check(); await data.acceptDrain?.catch(() => {}); check();
       await h.waitIdle(); check(); // a settled event alone is not a fresh native idle observation
       const r = control.record, evidence = this.evidence, checksDir = path.join(this.dir, 'checks', t.id, incoming.reportId);
       let snapshot = await evidence.capture(r.repoRoot); check();
       const signal = AbortSignal.any([this.operationAbort.signal, abort.signal]);
-      // Each configured check is bound to the checkpointed source identity. Drift between or
-      // during checks is recorded as a failed check (never as passing evidence for other
-      // source), and the report still reaches Main, where requirePassing blocks approval.
       /** @type {import('./contracts.js').VerificationResult[]} */ let verification = [];
       if (['checkpoint', 'final_review'].includes(incoming.payload.kind)) {
         let last = snapshot;
@@ -1026,7 +891,6 @@ export class PairController extends EventEmitter {
         check();
         snapshot = last; // one capture per check: the last after-state is the tree being frozen
       }
-      /** Configured checks that ran against other source than the frozen tree are marked as such. */
       const markDrift = async () => {
         if (!verification.length || verification.some(v => !v.passed && v.output.startsWith('VERIFICATION_SOURCE_DRIFT'))) return;
         const artifact = path.join(checksDir, 'workspace-stability.json');
@@ -1036,9 +900,6 @@ export class PairController extends EventEmitter {
       };
       const base = await evidence.readSnapshot(t.baseSnapshotRef, r.repoRoot); check();
       let checkpoint = await evidence.checkpoint(t.id, incoming.reportId, base, snapshot, verification); check();
-      // Another writer (an editor, Main's own tools, a formatter) can touch the tree while it is
-      // frozen. Let it settle and freeze the new state a bounded number of times, instead of
-      // discarding the report and killing a healthy worker.
       for (let attempt = 1; ; attempt++) {
         const again = await evidence.capture(r.repoRoot); check();
         if (again.hash === snapshot.hash) break;
@@ -1060,15 +921,11 @@ export class PairController extends EventEmitter {
         const notice = { reportId: incoming.reportId, workerId: id, taskId: t.id, ownerEpoch: this.state.ownerEpoch, workerGeneration: r.workerGeneration, attemptId: t.attemptId, deliveryOperationId: uid('delivery'), status: 'pending', createdAt: Date.now() };
         this.state.notices[incoming.reportId] = notice; await this.persist(); return notice;
       });
-      // The report is durable pending work. It never interrupts a running Main turn: an idle
-      // Main is woken now; a busy Main receives it at its next safe boundary.
       if (!this.closing && this.controlCurrent(control)) {
         try { this.callbacks.reportReady?.(notice); } catch (error) { console.error(`Pair report-ready notification failed: ${briefError(error)}`); }
         this.autoDeliver();
       }
     } catch (error) {
-      // Hold the task, keep the report envelope for the resume archive, and keep the healthy
-      // worker process: only runtime faults (handled by the scan) stop a generation.
       const reason = `Checkpoint could not be frozen: ${briefError(error)}`;
       const held = await this.transaction(async () => {
         if (!current()) return null;
@@ -1094,7 +951,6 @@ export class PairController extends EventEmitter {
       independentlyRunChecks: report.checkpoint.verification.map(v => ({ ...v, output: bounded(v.output, 1500) })), ...(stepTooLarge(t, report.checkpoint) ? { stepSizeNotice: stepTooLarge(t, report.checkpoint) } : {}), workerInferenceUsage: t.usage, workerBudgetNotice: limitExceeded(t, t.limits), evidenceDirectory: report.checkpoint.path,
       requirement: 'Inspect the immutable checkpoint using pair_inspect before approval. Reply via pair_decide using these exact IDs. Do not create another worker session.' })}`;
   }
-  /** Never-offered reports that may still be delivered automatically (bounded attempts and per-task cap). */
   autoEligible() {
     if (this.closing || !this.state || this.config.autoDeliverReports === false) return [];
     return this.autoOfferNotices().filter(n => {
@@ -1107,14 +963,11 @@ export class PairController extends EventEmitter {
       return false;
     });
   }
-  /** Wake an idle Main with a waiting report. While Main is occupied this does nothing: the
-   * report is delivered at Main's next safe boundary instead (agent_before_settle, or the
-   * agent_settled claim), never in the middle of Main's work. */
   autoDeliver() {
     if (this.callbacks.mainBusy?.()) return;
     for (const notice of this.autoEligible()) void this.deliverNotice(notice, 'auto').catch(error => this.notifyUser(`Pair: report ${notice.reportId} is saved but automatic delivery to Main failed (${briefError(error)}). Use /pair inbox.`, 'warning'));
   }
-  /** Automatic deliveries already made for one task (any automatic channel). @param {string} taskId */
+  /** @param {string} taskId */
   autoDelivered(taskId) { return Object.values(this.state.notices).filter(n => n.taskId === taskId && (n.channel === 'auto' || n.channel === 'prompt' || n.channel === 'boundary')).length; }
   /** @param {string} taskId @returns {number} */
   autoCap(taskId) {
@@ -1122,9 +975,7 @@ export class PairController extends EventEmitter {
     const limits = task?.limits, configured = this.config.limits;
     return (limits && 'maxReportsPerTask' in limits ? limits.maxReportsPerTask : undefined) ?? (configured && 'maxReportsPerTask' in configured ? configured.maxReportsPerTask : undefined) ?? 40;
   }
-  /** A report that already reached Main (for example before a crash reset its delivery state)
-   * is recorded as offered instead of being sent again. Caller holds the serial.
-   * @param {import('./contracts.js').StoredNoticeV1} notice @param {string} channel @returns {boolean} */
+  /** @param {import('./contracts.js').StoredNoticeV1} notice @param {string} channel @returns {boolean} */
   alreadyDelivered(notice, channel) {
     let present = false;
     try { present = this.callbacks.mainHasDelivery?.(notice.deliveryOperationId) === true; } catch { present = false; }
@@ -1138,10 +989,10 @@ export class PairController extends EventEmitter {
     const r = this.record(notice.workerId); assert(r.task?.report?.reportId === notice.reportId, 'Notice no longer matches its retained report');
     return { message: this.reportMessage(r), details: { reportId: notice.reportId, workerId: r.id, taskId: r.task.id, ownerEpoch: notice.ownerEpoch, workerGeneration: notice.workerGeneration, attemptId: notice.attemptId, deliveryOperationId: notice.deliveryOperationId } };
   }
-  /** Settlement-boundary delivery for automatic mode: at agent_before_settle of a completed Main
-   * run with no queued user input, waiting reports are appended to that run. Main has finished
-   * its own work, and queued user input keeps priority (the caller skips this when any exists).
-   * @param {string} runToken @returns {Promise<{drafts: {message: string, details: NoticeDetails}[], token: {consumedRevision: number, activity: number, runToken: string, ownerEpoch: number, reportIds: string[]}} | null>} */
+  /**
+   * @param {string} runToken
+   * @returns {Promise<{drafts: {message: string, details: NoticeDetails}[], token: {consumedRevision: number, activity: number, runToken: string, ownerEpoch: number, reportIds: string[]}} | null>}
+   */
   async autoBoundaryOffer(runToken) {
     const activity = this.activity;
     if (!this.autoEligible().length) return null;
@@ -1161,10 +1012,7 @@ export class PairController extends EventEmitter {
       return { drafts, token: { consumedRevision: this.state.mainPhase?.revision ?? 0, activity, runToken, ownerEpoch: this.state.ownerEpoch, reportIds: drafts.map(d => d.details.reportId) } };
     });
   }
-  /** Claim one waiting report inside Main's agent_settled handler. The caller sends it
-   * synchronously before the handler returns, so Pi defers the resulting run behind
-   * anything already queued at settlement (including a user prompt), in order.
-   * @returns {Promise<Delivery | null>} */
+  /** @returns {Promise<Delivery | null>} */
   async claimSettledDelivery() {
     if (!this.autoEligible().length) return null;
     return this.transaction(async () => {
@@ -1176,11 +1024,10 @@ export class PairController extends EventEmitter {
       return null;
     });
   }
-  /** Caller holds the serial. @param {import('./contracts.js').StoredNoticeV1} notice @param {'manual' | 'auto'} channel @returns {Promise<Delivery | null>} */
+  /** @param {import('./contracts.js').StoredNoticeV1} notice @param {'manual' | 'auto'} channel @returns {Promise<Delivery | null>} */
   async claimUnlocked(notice, channel) {
     const r = this.record(notice.workerId);
     if (this.closing || r.task?.report?.reportId !== notice.reportId || !['pending', 'offered', 'delivered', 'delivery_failed'].includes(notice.status)) return null;
-    // Automatic delivery only ever takes a never-offered report; a yield or boundary offer that got there first wins.
     if (channel === 'auto' && (notice.status !== 'pending' || notice.observedAt !== undefined)) return null;
     if (channel === 'auto' && this.alreadyDelivered(notice, 'auto')) { await this.persist(); return null; }
     const control = this.control(r.id);
@@ -1189,9 +1036,7 @@ export class PairController extends EventEmitter {
     this.logDelivery({ event: 'claimed', channel, notice });
     return { notice, channel, control, ...this.deliveryDetails(notice) };
   }
-  /** Record the outcome of one send. `received` resolves once Main's session observably holds
-   * the report; DeliveryDeferred means Main was occupied, so nothing was sent.
-   * @param {Delivery} delivery @param {Promise<void>} received */
+  /** @param {Delivery} delivery @param {Promise<void>} received */
   async completeDelivery(delivery, received) {
     const { notice, channel } = delivery;
     /** @type {unknown} */ let failure = null;
@@ -1205,8 +1050,6 @@ export class PairController extends EventEmitter {
       this.logDelivery({ event: failure ? (failure instanceof DeliveryDeferred ? 'deferred' : 'unconfirmed') : 'observed', channel, notice, ...(failure && !(failure instanceof DeliveryDeferred) ? { error: briefError(failure) } : {}) });
       await this.persist();
     });
-    // An unconfirmed automatic send goes back to eligibility; retry at once if Main is idle
-    // (a busy Main receives it at its next boundary).
     if (failure && !(failure instanceof DeliveryDeferred) && channel === 'auto' && notice.status === 'pending') queueMicrotask(() => this.autoDeliver());
   }
   /** @param {import('./contracts.js').StoredNoticeV1} notice @param {'manual' | 'auto'} [channel] */
@@ -1218,24 +1061,20 @@ export class PairController extends EventEmitter {
     try {
       assert(this.controlCurrent(delivery.control) && !this.closing, 'Notice delivery was revoked');
       assert(this.callbacks.notifyMain, 'Main delivery callback is unavailable');
-      // Automatic sends re-check Main's occupancy synchronously in the same tick as the send.
       received = Promise.resolve(this.callbacks.notifyMain(delivery.message, delivery.details, { requireIdle: channel === 'auto' }));
     } catch (error) { received = Promise.reject(error); }
     const completion = this.completeDelivery(delivery, received);
-    // A human redelivery returns once sent; its receipt may wait until Main's current run ends.
     if (channel === 'manual') { void completion.catch(error => this.notifyUser(`Pair delivery bookkeeping failed: ${briefError(error)}`, 'warning')); return; }
     await completion;
   }
-  /** Append one line to the delivery log (diagnostics only; never read back as state).
-   * @param {{event: string, channel: string, notice: import('./contracts.js').StoredNoticeV1, error?: string}} entry */
+  /** @param {{event: string, channel: string, notice: import('./contracts.js').StoredNoticeV1, error?: string}} entry */
   logDelivery({ event, channel, notice, error }) {
     const file = path.join(this.dir, 'deliveries.jsonl');
     const line = JSON.stringify({ at: Date.now(), event, channel, reportId: notice.reportId, taskId: notice.taskId, deliveryOperationId: notice.deliveryOperationId, status: notice.status, ...(error ? { error } : {}) }) + '\n';
     void fs.stat(file).then(stat => stat.size > DELIVERY_LOG_BYTES ? fs.rename(file, `${file}.1`) : undefined, () => undefined)
       .then(() => fs.appendFile(file, line, { mode: 0o600 })).catch(() => {});
   }
-  /** A boundary offer whose drafts were not returned to Pi goes back to automatic eligibility.
-   * @param {{reportIds: string[]} | null | undefined} token */
+  /** @param {{reportIds: string[]} | null | undefined} token */
   revertOffer(token) {
     if (!token?.reportIds.length) return Promise.resolve();
     return this.transaction(async () => {
@@ -1252,99 +1091,58 @@ export class PairController extends EventEmitter {
     const notices = await this.transaction(async () => {
       return Object.values(this.state.notices).filter(n => !['resolved', 'superseded'].includes(n.status));
     });
-    // Manual redelivery only: never touch an in-flight delivery, and never re-arm
-    // automatic delivery for a report that some channel already offered.
     if (redeliver) for (const notice of notices) if (notice.status !== 'delivery_pending') await this.deliverNotice(notice);
     return notices;
   }
-  /** Explicit, nonauthorizing Main phase marker; eligible only for the exact
-   * binding that recorded it (reload/rebind raises ownerEpoch and leaves the
-   * retained marker readable but inert). A missing marker never implies yield.
-   * @returns {import('./contracts.js').StoredMainPhaseV1 | null} */
+  /** @returns {import('./contracts.js').StoredMainPhaseV1 | null} */
   phaseEligible() {
     const phase = this.state.mainPhase;
     return phase && phase.ownerSession === this.ownerSession && phase.ownerEpoch === this.state.ownerEpoch ? phase : null;
   }
-  /** Durable phase transition; never a lease, grant or worker authority. The
-   * revision is a real monotonic phase token (ownerEpoch alone is not one);
-   * runToken binds a yield to the exact Main agent run that recorded it, and
-   * armed records whether an empty yield may receive ONE future automatic
-   * boundary offer — a yield that already returned results consumes it.
-   * @param {'open' | 'yielded'} status @param {string | null} [runToken] @param {boolean} [armed] @param {number} [activity] */
+  /** @param {'open' | 'yielded'} status @param {string | null} [runToken] @param {boolean} [armed] @param {number} [activity] */
   setPhase(status, runToken = null, armed = false, activity = this.activity) {
     const previous = this.state.mainPhase;
     this.state.mainPhase = { status, since: Date.now(), ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch,
       revision: incrementCounter(previous?.revision ?? 0, 'state.mainPhase.revision'), runToken: status === 'yielded' ? runToken : null,
       armed: status === 'yielded' ? armed === true : false, activity };
   }
-  /** Exact permit snapshot used to fence one delivery cycle across awaits. */
   phasePermit() {
     const phase = this.state.mainPhase;
     return phase ? { status: phase.status, revision: phase.revision ?? 0, runToken: phase.runToken ?? null, armed: phase.armed === true, activity: phase.activity ?? 0, ownerSession: phase.ownerSession, ownerEpoch: phase.ownerEpoch } : null;
   }
-  /** Observation-only logical-activity epoch bump plus yield revocation. New
-   * user input (including same-run steering/follow-ups), non-Pair tool
-   * admission or a new agent run is new Main work and supersedes any
-   * outstanding yield or in-flight offer — even one whose phase was already
-   * consumed open. Never blocks, consumes or transforms input; queues are
-   * untouched. @returns {boolean} whether a yield was revoked */
+  /** @returns {boolean} */
   noteActivity() { this.activity++; return this.revokeYield(); }
-  /** Observation-only branch change: tree navigation durably bumps the persisted
-   * conversation-branch counter (normal turns, settlement and compaction never
-   * bump it), invalidates unused yields/offers, and makes decisions resting on a
-   * previous branch's inspection stale until the current context re-inspects.
-   * Never cancels, blocks or rewrites navigation. @returns {boolean} */
+  /** @returns {boolean} */
   noteBranchChange() {
     this.state.branch = incrementCounter(this.state.branch ?? 0, 'state.branch');
     const revoked = this.noteActivity();
     this.transaction(() => this.persist()).catch(error => this.notifyUser(`Pair branch persistence failed: ${briefError(error)}`, 'error'));
     return revoked;
   }
-  /** Observation-only revocation: new accepted Main work reopens the phase
-   * synchronously in memory. Never consumes or transforms user input and never
-   * touches queues, sessions or the agent loop. @returns {boolean} */
+  /** @returns {boolean} */
   revokeYield() {
     const phase = this.phaseEligible();
     if (!phase || phase.status !== 'yielded') return false;
     this.setPhase('open');
-    // Through the serial: a persist must never snapshot a half-applied transaction.
     this.transaction(() => this.persist()).catch(error => this.notifyUser(`Pair phase persistence failed: ${briefError(error)}`, 'error'));
     return true;
   }
-  /** Every visible explicit-recovery obligation: retained reports no channel
-   * has confirmed acknowledged — pending, offered, legacy delivered, failed or
-   * in-flight manual deliveries, without observedAt. Legacy-uncertain receipts
-   * are never silently hidden from status, and are never auto-delivered.
-   * @returns {import('./contracts.js').StoredNoticeV1[]} */
+  /** @returns {import('./contracts.js').StoredNoticeV1[]} */
   recoveryNotices() {
     return Object.values(this.state.notices).filter(n => !['resolved', 'superseded'].includes(n.status) && n.observedAt === undefined);
   }
-  /** Explicitly retrievable reports (pair_yield//pair yield): recovery
-   * obligations excluding in-flight manual deliveries. Repeat reads return
-   * the same stable IDs; idempotence is not destructive read-once semantics.
-   * @returns {import('./contracts.js').StoredNoticeV1[]} */
+  /** @returns {import('./contracts.js').StoredNoticeV1[]} */
   retrievableNotices() {
     return this.recoveryNotices().filter(n => n.status !== 'delivery_pending');
   }
-  /** Automatic boundary-offer eligibility ONLY: reports never offered by any
-   * channel. Explicitly offered/legacy-uncertain receipts stay visible and
-   * retrievable, but never automatically replay merely because they are
-   * unacknowledged or a prior hook dropped them.
-   * @returns {import('./contracts.js').StoredNoticeV1[]} */
+  /** @returns {import('./contracts.js').StoredNoticeV1[]} */
   autoOfferNotices() {
     return Object.values(this.state.notices).filter(n => n.status === 'pending' && n.observedAt === undefined);
   }
-  /** Single-unresolved-report invariant, mechanically enforced at retrieval:
-   * V1 allows one unresolved assignment, so more than one recoverable report
-   * is an unsupported profile, never an unbounded batch to stream. */
   assertSingleUnacknowledged() {
     assert(this.retrievableNotices().length <= 1, 'UNSUPPORTED_PROFILE: Fabric Pair V1 allows one unresolved report; acknowledge or resolve the retained report first.');
   }
-  /** Compact, non-authoritative review summary for explicit Main retrieval.
-   * Preserves the exact bounded question text, step identity and completion
-   * semantics, and worker-reported decision items, so distinct questions are
-   * never lost to compaction; full evidence stays behind pair_inspect.
-   * @param {WorkerRecord} r */
+  /** @param {WorkerRecord} r */
   compactReport(r) {
     const t = r.task, report = t?.report; assert(t && report, 'No finalized report to summarize');
     return { ownerEpoch: this.state.ownerEpoch, workerGeneration: r.workerGeneration, attemptId: t.attemptId, workerId: r.id, taskId: t.id, planRevision: t.planRevision, reportId: report.reportId,
@@ -1357,32 +1155,20 @@ export class PairController extends EventEmitter {
       evidenceDirectory: report.checkpoint.path, inspectedAt: report.inspectedAt || null, workerBudgetNotice: limitExceeded(t, t.limits),
       requirement: 'Inspect the immutable checkpoint with pair_inspect before approval (this acknowledges receipt); reply with pair_decide using these exact IDs. This summary is not evidence by itself.' };
   }
-  /** Explicit Main yield (pair_yield): returns every unacknowledged report in
-   * the tool result — repeat reads return the same stable report IDs; offers are
-   * receipts of delivery attempts, never confirmed comprehension — and records
-   * the yielded phase bound to the current Main agent run.
-   * @param {string | null} [runToken] Identity of the yielding Main agent run. */
+  /** @param {string | null} [runToken] */
   async yieldMain(runToken = null) {
-    // Capture the logical activity epoch BEFORE any await: user input admitted
-    // after this call — even before the queued yield transaction executes —
-    // supersedes the stale request; the permit never adopts the newer epoch.
     const activity = this.activity;
     return this.transaction(async () => {
       assert(!this.closing, 'Pair is closing');
       this.assertSingleUnacknowledged();
       const ready = this.retrievableNotices();
       for (const notice of ready) { notice.status = 'offered'; notice.offeredAt = Date.now(); notice.channel = 'tool-result'; }
-      // A yield that returned results consumes the automatic delivery permission
-      // for this cycle; only an empty yield arms one future boundary offer.
       this.setPhase('yielded', runToken, ready.length === 0, activity);
       await this.persist();
       return { phase: 'yielded', reports: ready.map(notice => this.compactReport(this.record(notice.workerId))) };
     });
   }
-  /** Human-commanded yield (/pair yield): record the explicit yield, then
-   * re-offer unacknowledged reports through the manual sendMessage channel
-   * (fire-and-forget; never a confirmed delivery).
-   * @returns {Promise<import('./contracts.js').StoredNoticeV1[]>} */
+  /** @returns {Promise<import('./contracts.js').StoredNoticeV1[]>} */
   async yieldManual() {
     const ready = await this.transaction(async () => {
       assert(!this.closing, 'Pair is closing');
@@ -1395,24 +1181,16 @@ export class PairController extends EventEmitter {
     for (const notice of ready) await this.deliverNotice(notice);
     return ready;
   }
-  /** One bounded settlement-boundary offer, eligible only for the exact permit
-   * of an explicit yield recorded by this binding and this agent run. Reopens
-   * the phase (new revision) so one armed empty yield buys one delivery cycle;
-   * the caller verifies the consumed-offer token after the persist await. A
-   * dropped offer stays offered-but-unacknowledged and explicitly retrievable.
+  /**
    * @param {{status: string, revision: number, runToken: string | null, armed: boolean, activity: number, ownerSession: string, ownerEpoch: number} | null} permit
-   * @returns {Promise<{drafts: {message: string, details: NoticeDetails}[], token: {consumedRevision: number, activity: number, runToken: string, ownerEpoch: number, reportIds: string[]}} | null>} */
+   * @returns {Promise<{drafts: {message: string, details: NoticeDetails}[], token: {consumedRevision: number, activity: number, runToken: string, ownerEpoch: number, reportIds: string[]}} | null>}
+   */
   async boundaryOffer(permit) {
     return this.transaction(async () => {
       assert(!this.closing, 'Pair is closing');
       const phase = this.phaseEligible();
       if (!phase || phase.status !== 'yielded' || permit === null) return null;
-      // Only an armed empty yield may receive one automatic offer; a yield that
-      // already returned results consumed the delivery permission for this cycle.
       if (!permit.armed || phase.armed !== true) return null;
-      // The permit must still name the CURRENT logical activity epoch: input or
-      // non-Pair work admitted after the yield (even before its transaction ran)
-      // supersedes the stale request.
       if (permit.activity !== this.activity) return null;
       if (permit.status !== 'yielded' || permit.revision !== (phase.revision ?? 0) || permit.runToken === null || permit.runToken !== (phase.runToken ?? null)
         || permit.activity !== (phase.activity ?? 0) || permit.ownerSession !== phase.ownerSession || permit.ownerEpoch !== phase.ownerEpoch) return null;
@@ -1431,13 +1209,11 @@ export class PairController extends EventEmitter {
       return { drafts, token };
     });
   }
-  /** Exact consumed-offer verification immediately before returning drafts: the
-   * logical activity epoch, run identity, binding epoch, enabled config, phase
-   * revision and every correlated report must still be current. New input or
-   * non-Pair work, cancellation/resolution, disable, close/rebind or any phase
-   * change stales the offer; a dropped offer stays retrievable, never replayed.
+  /**
    * @param {{consumedRevision: number, activity: number, runToken: string, ownerEpoch: number, reportIds: string[]} | null} token
-   * @param {string} runToken @returns {boolean} */
+   * @param {string} runToken
+   * @returns {boolean}
+   */
   offerCurrent(token, runToken) {
     if (this.closing || !this.config.enabled || !token) return false;
     if (this.state.ownerEpoch !== token.ownerEpoch || this.activity !== token.activity || token.runToken !== runToken) return false;
@@ -1457,12 +1233,7 @@ export class PairController extends EventEmitter {
       const hash = stableDigest(input), old = t.decisions[input.reportId];
       if (old) { assert(old.hash === hash || old.hash === digest(input), 'A different decision already resolved this report'); return { duplicate: { taskId: t.id, status: t.status, duplicate: true } }; }
       assert(['question', 'review', 'blocked'].includes(t.status) && t.report?.reportId === input.reportId, 'No matching report awaits a decision');
-      // Branch/context fencing: an inspection pinned on a previous conversation
-      // branch is stale; the current context must re-inspect to reconcile.
       const notice = this.state.notices[input.reportId], branch = this.state.branch ?? 0;
-      // Missing/legacy branch metadata establishes current-context authority only
-      // while no navigation has ever advanced the branch counter — it never
-      // implies a current-context inspection after navigation.
       const observed = notice?.observedBranch ?? 0;
       assert(notice === undefined || observed === branch,
         'BRANCH_STALE: the conversation branch changed since this report was last inspected; pair_inspect the retained checkpoint again before deciding');
@@ -1477,8 +1248,6 @@ export class PairController extends EventEmitter {
       const oversized = stepTooLarge(t, report.checkpoint); assert(!oversized, oversized || '');
     }
     if (input.action !== 'cancel') {
-      // Every continuation is later guarded against this checkpoint. Reject drift
-      // BEFORE the decision is recorded, so the report stays open and decidable.
       const live = await this.evidence.capture(control.record.repoRoot); check();
       assert(live.hash === report.checkpoint.checkpointHash, 'STALE_CHECKPOINT: the workspace changed after this report; restore the reported state, or cancel the task and dispatch again');
       if (input.action === 'approve' && t.verification.requirePassing) assert(report.checkpoint.verification.every(v => v.passed), 'Configured verification failed');
@@ -1487,9 +1256,7 @@ export class PairController extends EventEmitter {
       check(); const r = control.record;
       if (input.action === 'cancel') {
         t.decisions[input.reportId] = { hash, action: 'cancel', at: Date.now() };
-        // A decision is explicit Main activity: later reports wait for a fresh yield.
         if (this.state.mainPhase) this.setPhase('open');
-        // Revoked only once the cancellation is validated and about to be recorded.
         this.revoke(r.id, input.feedback);
         return { cancel: await this.cancelUnlocked(r.id, input.feedback) };
       }
@@ -1500,7 +1267,6 @@ export class PairController extends EventEmitter {
       }
       const newSteps = input.action === 'revise' ? input.steps : undefined;
       if (newSteps) {
-        // Completed steps are history: they stay as an unchanged prefix. The current and later steps may change.
         assert(newSteps.length > t.stepIndex, 'The revised plan must still contain the current step position');
         assert(t.steps.slice(0, t.stepIndex).every((step, index) => isDeepStrictEqual(step, newSteps[index])), 'Completed steps must be kept unchanged as the prefix of the revised plan');
       }
@@ -1513,13 +1279,10 @@ export class PairController extends EventEmitter {
         ...(input.action === 'approve' ? { action: input.action, checkpointHash: input.checkpointHash } : { action: input.action, checkpointHash: input.checkpointHash || null }) };
       t.decisions[input.reportId] = decision; t.lastDecision = { action: input.action, feedback: input.feedback, reportId: input.reportId };
       if (this.state.notices[input.reportId]) this.state.notices[input.reportId].status = 'resolved';
-      // A decision is explicit Main activity: later reports wait for a fresh yield.
       if (this.state.mainPhase) this.setPhase('open');
       if (input.action === 'revise') { t.revisions++; t.stepRevisions = (t.stepRevisions ?? 0) + 1; }
       if (newSteps) {
-        // One revision counts once; the new planRevision stales every report from the old plan.
         t.steps = clone(newSteps); t.planRevision = incrementCounter(t.planRevision, 'task.planRevision');
-        // Keep the retained scope identity-bound to the new revision, or post-compaction restoration omits it.
         await atomicJSON(path.join(this.workerDir(r.id), 'work-order.json'),
           { version: 1, taskId: t.id, planRevision: t.planRevision, objective: t.objective, context: bounded(t.context, 24000), constraints: t.constraints, writtenAt: Date.now() });
       }
@@ -1542,14 +1305,8 @@ export class PairController extends EventEmitter {
     if (next.completed) await this.releaseRepoLocks();
     if (next.work) {
       const work = next.work, decision = next.decision;
-      // The continuation runs in the background: Main's pair_decide returns once the decision is
-      // durable. A failure holds the task and is reported to the user and to Main.
       this.backgroundActivation(work, 'continuation', async () => {
         await this.fenced(work, this.startReserved(work));
-        // The guard revalidates source AND branch AFTER activation's final readiness
-        // wait (prepareActivation), immediately before renewed running authority is
-        // written or any prompt is sent. No atomic exclusion of external writers is
-        // claimed — this is a fresh capture compared against the decision evidence.
         const sent = await this.activate(work, this.decisionMessage(t, input), {
           branch: reservation.branch,
           guard: async () => {
@@ -1568,10 +1325,6 @@ export class PairController extends EventEmitter {
   }
   /** @param {string} id @param {string} [reportId] @param {string} [file] */
   async inspect(id, reportId, file) {
-    // A2: capture the conversation branch BEFORE the first await. The queued
-    // admission transaction and every asynchronous evidence read are fenced
-    // against it, so an inspection that crosses navigation can never pin or
-    // acknowledge the newer branch; a fresh explicit inspection reconciles.
     const branch = this.state.branch ?? 0;
     const reserved = await this.transaction(() => {
       assert((this.state.branch ?? 0) === branch, 'BRANCH_STALE: the conversation branch changed before this inspection; re-inspect on the current branch');
@@ -1583,22 +1336,15 @@ export class PairController extends EventEmitter {
     await this.transaction(async () => {
       assert(this.controlCurrent(reserved.control) && reserved.control.record.task?.report === reserved.report, 'Checkpoint changed while inspecting');
       assert((this.state.branch ?? 0) === branch, 'BRANCH_STALE: the conversation branch changed while inspecting; re-inspect on the current branch to reconcile');
-      // Only the checkpoint summary (patch, changed files, checks) satisfies approval's inspection
-      // gate; reading a single file acknowledges the report but does not.
       if (file === undefined) reserved.report.inspectedAt = Date.now();
-      // A1: pin the ACTUAL current report even when the optional reportId is omitted.
       const notice = this.state.notices[reportId || reserved.report.reportId];
       if (notice && notice.observedAt === undefined) notice.observedAt = Date.now(); // explicit Main read, not comprehension
-      // Pin the branch this inspection was actually read on (captured above), never a newer one.
       if (notice && notice.observedAt !== undefined) notice.observedBranch = branch;
       await this.persist();
     });
     return evidence;
   }
-  /** Human read-only view of a worker's current report. Unlike inspect(), it never
-   * marks the report inspected, acknowledges its notice or pins a branch, so a
-   * human glance can never stand in for Main's pair_inspect before approval.
-   * @param {string} id */
+  /** @param {string} id */
   reportView(id) {
     const t = this.record(id).task, report = t?.report;
     if (!t || !report) return null;
@@ -1609,15 +1355,12 @@ export class PairController extends EventEmitter {
       verification: report.checkpoint.verification.map(v => ({ name: v.name, passed: v.passed, timedOut: v.timedOut, code: v.code })),
       acknowledged: notice?.observedAt !== undefined };
   }
-  /** Human read-only checkpoint patch, with the same non-acknowledging contract as reportView().
-   * @param {string} id */
+  /** @param {string} id */
   async reviewPatch(id) {
     const report = this.record(id).task?.report;
     assert(report, 'This worker has no current checkpoint to show');
     const evidence = await this.evidence.inspect(report.checkpoint.path);
     assert('patch' in evidence, 'Checkpoint summary is unavailable');
-    // The stored patch lists added files by hash only; read their authenticated
-    // contents so a human sees new code, not just its digest.
     /** @type {Map<string, string | null>} */ const added = new Map();
     for (const match of evidence.patch.matchAll(/^### ("(?:[^"\\]|\\.)*") \(absent → file\)$/gm)) {
       if (added.size >= 50) break;
@@ -1627,9 +1370,9 @@ export class PairController extends EventEmitter {
     }
     return { reportId: report.reportId, checkpointHash: report.checkpoint.checkpointHash, changed: report.checkpoint.changed, patch: evidence.patch, added, patchTruncated: report.checkpoint.patchTruncated };
   }
-  /** Durable control fence; no mutable lifecycle flags. @param {string} id @returns {Control} */
+  /** @param {string} id @returns {Control} */
   control(id) { const record = this.record(id); return { id, record, runtime: this.handles.get(id), intent: this.intent(id), generation: record.workerGeneration }; }
-  /** Reserve a durable control publication before its first await. @param {string} id @returns {Control} */
+  /** @param {string} id @returns {Control} */
   reserveControl(id) {
     const control = this.control(id), data = control.runtime && this.runtimeData.get(control.runtime);
     if (data) data.pendingControls++;
@@ -1639,14 +1382,13 @@ export class PairController extends EventEmitter {
   async publishControl(control, phase) {
     try { await this.writeAuthority(control.id, phase); await this.persist(); return control; }
     catch (error) {
-      // A failed durable write must still contain the child. The microtask never waits in serial.
       const work = Promise.resolve().then(() => this.contain(control, 'Authority publication failed', true)).catch(failure => this.notifyUser(`Pair containment failed: ${briefError(failure)}`, 'error')).finally(() => this.containmentWork.delete(work));
       this.containmentWork.add(work); throw error;
     }
   }
   /** @param {Control} control @returns {boolean} */
   controlCurrent(control) { return this.state.workers[control.id] === control.record && this.handles.get(control.id) === control.runtime && control.record.workerGeneration === control.generation && this.intent(control.id) === control.intent; }
-  /** Outside-serial containment; retain the handle until exit proof. @param {Control} control @param {string} reason @param {boolean} stop */
+  /** @param {Control} control @param {string} reason @param {boolean} stop */
   async contain(control, reason, stop) {
     if (!control.runtime) return;
     const data = this.runtimeData.get(control.runtime);
@@ -1668,19 +1410,15 @@ export class PairController extends EventEmitter {
     this.revoke(id, reason); const intent = this.intent(id);
     return this.transaction(() => this.intent(id) === intent ? this.pauseUnlocked(id, reason) : null).then(async control => { if (control) await this.contain(control, reason, false); });
   }
-  /** Durable only, called inside serial. @param {string} id @param {string} reason @returns {Promise<Control>} */
+  /** @param {string} id @param {string} reason @returns {Promise<Control>} */
   async pauseUnlocked(id, reason) {
     const r = this.record(id); assert(activeTask(r), 'No active task to pause');
-    // Re-pausing an existing hold preserves the ORIGINAL waiting predecessor: a
-    // second pause must never mask a question/review/blocker obligation with
-    // 'paused', which would let resume rotate a fresh lease and supersede the
-    // retained notice instead of restoring the decision wait.
     if (r.task.status !== 'paused') r.task.previousStatus = r.task.status;
     r.task.status = 'paused'; r.task.interruption = reason;
     if (r.status !== 'error' && r.status !== 'stopped') r.status = 'paused';
     const control = this.reserveControl(id); return this.publishControl(control, 'paused');
   }
-  /** Durable interruption only; caller must run returned containment outside serial. @param {string} id @param {string} reason @returns {Promise<Control>} */
+  /** @param {string} id @param {string} reason @returns {Promise<Control>} */
   async interrupt(id, reason) {
     this.revoke(id, reason);
     const r = this.record(id); r.error = reason;
@@ -1693,11 +1431,6 @@ export class PairController extends EventEmitter {
     const outcome = await this.transaction(async () => {
       const r = this.record(id), t = r.task;
       assert(t && ['paused', 'interrupted'].includes(t.status), 'Only paused/interrupted tasks can resume');
-      // A paused question/review/blocker restores WAITING, not a fresh lease: the
-      // retained report, its notice and the original attempt/lease survive
-      // pause/resume/reload, and no new implementation lease (attempt rotation,
-      // recovery prompt or activation) is issued. The next pair_decide owns any
-      // continuation. Policy/budget amendment does not apply: nothing is re-granted.
       if (t.report && !t.pendingReport && ['question', 'review', 'blocked'].includes(String(t.previousStatus))) {
         const restored = t.previousStatus;
         assert(restored === 'question' || restored === 'review' || restored === 'blocked', 'Resume restoration requires a waiting predecessor status');
@@ -1705,7 +1438,6 @@ export class PairController extends EventEmitter {
         t.status = restored;
         if (r.status !== 'error' && r.status !== 'stopped') r.status = restored;
         r.error = null;
-        // Durable restore only: no containment publication, no process lifecycle.
         await this.writeAuthority(id, 'waiting');
         await this.persist();
         return { waitingRestored: { taskId: t.id, status: t.status }, work: null };
@@ -1713,14 +1445,11 @@ export class PairController extends EventEmitter {
       await this.ensureRepoLock(r.repoRoot);
       const launch = await this.reserveStart(id, true);
       assert(this.launchCurrent(launch) && r.task === t && ['paused', 'interrupted'].includes(t.status), 'Resume was superseded');
-      // Legacy budget amendment/reset behavior remains (explicit existing
-      // amendment semantics); lifetime budgeting belongs to AR-03/04.
       t.limits = clone(this.config.limits); t.policy = clone(this.config.supervision);
       if (t.limits.maxReportedCostUsd !== null) assert((t.usage?.reportedCost || 0) < t.limits.maxReportedCostUsd, 'Raise the reported cost budget before resuming');
       if (t.limits.maxOutputTokens !== null) assert((t.usage?.output || 0) < t.limits.maxOutputTokens, 'Raise the output-token budget before resuming');
       for (const notice of Object.values(this.state.notices)) if (notice.taskId === t.id && notice.status !== 'resolved') notice.status = 'superseded';
       if (t.pendingReport) {
-        // V1 cannot carry a pending envelope across attempt rotation. Retain its full record/reference first.
         const file = path.join(this.dir, 'tasks', t.id, `attempt-${t.attemptNumber}.json`);
         await atomicJSON(file, t);
         assert(this.launchCurrent(launch) && r.task === t, 'Recovery was revoked while archiving the pending report');
@@ -1747,11 +1476,10 @@ export class PairController extends EventEmitter {
       return { taskId: control.record.task?.id, status: control.record.task?.status, sessionRetained: true };
     });
   }
-  /** Durable cancellation only. @param {string} id @param {string} reason @returns {Promise<Control>} */
+  /** @param {string} id @param {string} reason @returns {Promise<Control>} */
   async cancelUnlocked(id, reason) {
     const r = this.record(id); assert(activeTask(r), 'No active task to cancel');
     r.task.status = 'cancelled'; r.task.cancelReason = reason; r.task.completedAt = Date.now();
-    // Reports/latches are obligations and evidence, not garbage to delete on cancellation.
     if (r.status !== 'error' && r.status !== 'stopped') r.status = 'ready';
     for (const notice of Object.values(this.state.notices)) if (notice.taskId === r.task.id) notice.status = 'resolved';
     const control = this.reserveControl(id); return this.publishControl(control, 'paused');
@@ -1761,7 +1489,7 @@ export class PairController extends EventEmitter {
     this.revoke(id, 'Worker stopped'); const intent = this.intent(id);
     return this.stopReserved(id, intent);
   }
-  /** Stop waits are outside serial; stopped is persisted only AFTER confirmed exit. @param {string} id @param {number} intent */
+  /** @param {string} id @param {number} intent */
   async stopReserved(id, intent) {
     const control = await this.transaction(async () => {
       const r = this.state.workers[id]; if (!r || this.intent(id) !== intent) return null;
@@ -1803,10 +1531,7 @@ export class PairController extends EventEmitter {
     });
     await this.releaseRepoLocks();
   }
-  /** Proof that the process of a worker's last generation has exited: the recorded PID (and its
-   * process group) is gone, belongs to another user, or was reused by a process that started
-   * after this generation spawned. @param {WorkerRecord} r
-   * @returns {Promise<{exited: boolean, pid: number | null, reason: string}>} */
+  /** @param {WorkerRecord} r @returns {Promise<{exited: boolean, pid: number | null, reason: string}>} */
   async exitProof(r) {
     const probe = /** @type {Record<string, unknown> | null | undefined} */ (r.probe), observed = /** @type {Record<string, unknown> | null | undefined} */ (r.lastObservation);
     const current = (/** @type {Record<string, unknown> | null | undefined} */ value) => value && value.workerGeneration === r.workerGeneration && typeof value.pid === 'number' ? value.pid : undefined;
@@ -1819,10 +1544,7 @@ export class PairController extends EventEmitter {
     if (own === 'alive' && group !== 'alive' && started !== null && spawned !== null && started > spawned + 5000) return { exited: true, pid, reason: `Process ID ${pid} now belongs to a newer process.` };
     return { exited: false, pid, reason: `The last worker process (${pid}) may still be running.` };
   }
-  /** Explicit reconciliation of a worker whose exit this controller could not confirm (for
-   * example after Main crashed). Marks it stopped only on proof, after an optional terminate of
-   * the recorded process group, or on the human's explicit confirmation (`force`). The task stays
-   * interrupted: nothing is replayed. @param {string} id @param {{terminate?: boolean, force?: boolean}} [options] */
+  /** @param {string} id @param {{terminate?: boolean, force?: boolean}} [options] */
   async reconcile(id, { terminate = false, force = false } = {}) {
     const r = this.record(id);
     assert(!this.handles.has(id), 'This worker generation is owned by this Main session; use /pair stop instead.');
@@ -1851,7 +1573,7 @@ export class PairController extends EventEmitter {
       return `${typeof message.role === 'string' ? message.role : 'unknown'}: ${text.join('\n')}`;
     }).join('\n\n'), 60000);
   }
-  /** Shutdown revokes immediately, even while a Main bind/start is still draining. @returns {Promise<void>} */
+  /** @returns {Promise<void>} */
   close() {
     if (this.closePromise) return this.closePromise;
     this.closing = true; this.operationAbort.abort(); clearInterval(this.timer);
@@ -1863,7 +1585,6 @@ export class PairController extends EventEmitter {
       const failures = outcomes.filter(result => result.status === 'rejected');
       await Promise.allSettled([...this.activations]);
       await Promise.all([...this.containmentWork]);
-      // Verification/evidence moved outside serial; abort and join that work before releasing ownership.
       await this.scanPromise;
       await this.serial.drain(); await this.persistSerial.drain();
       const held = Object.values(this.state?.workers || {}).some(r => r.status !== 'stopped') || [...this.handles.values()].some(h => !h.closed);
