@@ -29,7 +29,7 @@ Commands with an optional worker ID use the first configured worker by default.
 | `/pair reload` | Reread saved Pair settings without restarting Main or launching a worker. |
 | `/pair status` | Inspect task state, sessions, usage, and warming diagnostics. |
 | `/pair doctor` | Check configuration and extension registrations. |
-| `/pair transcript [worker]` | Read the recent worker conversation. |
+| `/pair transcript [worker]` | Read the recent worker conversation from its saved session, also while the worker is stopped. |
 | `/pair report [worker]` | Show the current report as a card: summary, question, Pair-captured files and checks, then worker claims. Read-only: it never marks the report inspected for Main. |
 | `/pair diff [worker]` | Scroll the checkpoint diff with real file names and added-file contents. Keys: ↑/↓, PgUp/PgDn, `g`/`G`, `/` search, `n`/`N`, `[`/`]` previous/next file, Esc. Read-only, like `/pair report`. |
 | `/pair inbox` | Inspect unresolved reports and recovery delivery options. |
@@ -264,6 +264,34 @@ the ones the worker does not need with `runtime.excludeExtensions` (package name
 such as `"pi-retry"`, or absolute paths). Keep provider extensions your worker
 model needs.
 
+### Approval risk for Pair tools
+
+Fabric captures Pair's tools like any extension tool and gives them its
+conservative default risk, `execute`, because Pi tool definitions carry no effect
+metadata. With Fabric's default policy (`allow` for every risk class) this changes
+nothing. If you set `ask`, `auto` or `deny` for some classes, add Pair's tools to
+`capture.risks` in `fabric.json`; entries merge over Fabric's defaults. Pair never
+edits Fabric configuration itself.
+
+```json
+{
+  "capture": {
+    "risks": {
+      "pair_status": "read",
+      "pair_inspect": "read",
+      "pair_yield": "write",
+      "pair_cancel": "write",
+      "pair_dispatch": "agent",
+      "pair_decide": "agent",
+      "pair_report": "write"
+    }
+  }
+}
+```
+
+`pair_dispatch` and `pair_decide` start or continue worker inference, so they are
+`agent`. `pair_report` runs in the worker and ends its implementation lease.
+
 ## Context, warming and cost
 
 Main and Worker keep their own Pi conversations and use native context management.
@@ -286,18 +314,16 @@ status line and remain explicit in `/pair status`. Shares are shown as percentag
 timestamps stay validated and retained internally for staleness handling and are
 never displayed as an age, cache-lifetime estimate or prediction of the next hit.
 
-Optional `cacheWarming: "active"` is a JSON-only Pair setting, **off by default**.
-After explicit acceptance of refresh costs, it can request native session-scoped
-idle warming during eligible work and review waits. It needs the proposed
-`ctx.acquireCacheWarming("idle")` capability and a separately deployed compatible
-native SDK. Older SDKs report unsupported and make no fallback requests.
+Prompt-cache warming is Fabric's `cache` provider (Fabric 0.97+), not a Pair
+setting. Inside `fabric_exec`, `cache.status()` observes the local session,
+`cache.hold({durationMs})` opts into a time-bounded native idle lease (paid
+refreshes, 30-minute maximum, no auto-renew) and `cache.release({id})` ends it.
+Pair requests no leases; a legacy `cacheWarming` key in `fabric-pair.json` is
+accepted and ignored. Native eligibility, economics and safety windows remain
+authoritative; holding a lease does not prove a refresh occurred or guarantee a
+cache hit. See Fabric's `docs/prompt-cache.md`.
 
-Pair leaves persisted native warming settings untouched. Native eligibility,
-economics, and safety windows remain authoritative; holding a lease does not prove
-a refresh occurred or guarantee a cache hit. The native counterpart and live
-deployment remain separate from this Pair implementation.
-
-Pair's reported inference budgets exclude Main usage, native warming, external
+Pair's reported inference budgets exclude Main usage, Fabric cache warming, external
 tools, and unknown prices. Use provider-side controls for an overall spending cap.
 
 ## Current limits

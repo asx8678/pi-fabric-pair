@@ -5,7 +5,6 @@ import { assertReportSize, reportSchema, validateReport } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
 import { gateTool, isDirectMutation, nativeSettings, probeNative, requestsDetachedEffect, toolName } from './native.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
-import { ScopedCacheWarming } from './warming.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionAPI} ExtensionAPI */
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} ExtensionContext */
@@ -110,9 +109,6 @@ export function registerWorker(pi, env = process.env) {
   let speed = null;
   /** @type {number | null} */
   let speedStart = null;
-  const warming = new ScopedCacheWarming();
-  let warmingSession = '', warmingBinding = 0, warmingCheck = 0;
-  const releaseWarming = () => { warmingCheck++; warming.release(); };
   /** @type {ReturnType<typeof setInterval> | undefined} */
   let parentTimer;
   let compacting = false, stopped = false;
@@ -123,7 +119,7 @@ export function registerWorker(pi, env = process.env) {
   let parentDead = false;
   const parentGone = () => {
     if (parentDead) return;
-    parentDead = true; stopped = true; releaseWarming(); ctxRef?.abort(); ctxRef?.shutdown();
+    parentDead = true; stopped = true; ctxRef?.abort(); ctxRef?.shutdown();
   };
   if (process.connected === false) parentGone();
   if (process.channel) {
@@ -133,30 +129,8 @@ export function registerWorker(pi, env = process.env) {
   /** @type {import('./contracts.js').StoredDetachedEffectV1 | null} */
   let detachedEffect = null;
 
-  /** @param {Authority} current @param {ExtensionContext | undefined} ctx */
-  function applyWarming(current, ctx) {
-    warmingCheck++; // a newer authority load fences an older asynchronous decision read
-    const requested = !!(ctx && !stopped && !parentDead && !compacting && !detachedEffect && warmingSession === ctx.sessionManager.getSessionId()
-      && current.cacheWarming === 'active' && current.task && ['running', 'waiting'].includes(current.phase)
-      && ctx.model?.provider === current.model.provider && ctx.model?.id === current.model.id);
-    warming.reconcile(ctx, requested, String(warmingBinding));
-  }
-  /** @param {ExtensionContext} ctx */
-  async function reconcileWarming(ctx) {
-    const check = ++warmingCheck;
-    if (stopped || parentDead || warmingSession !== ctx.sessionManager.getSessionId()) { warming.release(); return; }
-    try {
-      const fresh = validateAuthority(await readJSON(gateFile, null), { ownerSession, ownerEpoch, workerId, workerGeneration });
-      if (check !== warmingCheck || stopped || parentDead) return;
-      applyWarming(fresh, ctx);
-    } catch (error) {
-      if (check === warmingCheck) { warming.release(); warming.observation.error = `Warming authority unavailable: ${String(error).slice(0, 1000)}`; }
-    }
-  }
   /** @returns {Promise<Authority>} */
   async function load() {
-    const warmingRead = ++warmingCheck;
-    try {
     const next = validateAuthority(await readJSON(gateFile, null), { ownerSession, ownerEpoch, workerId, workerGeneration });
     authority = next;
     try { workOrder = validateWorkOrder(await readJSON(workOrderFile, null)); } catch { workOrder = null; }
@@ -169,9 +143,7 @@ export function registerWorker(pi, env = process.env) {
       assert(latch.report.ownerSession === ownerSession && latch.report.workerId === workerId && latch.report.nonce === nonce, 'Latched report producer mismatch');
     }
     report = currentLatch ? latch.report : null;
-    if (warmingRead === warmingCheck) applyWarming(next, ctxRef);
     return next;
-    } catch (error) { releaseWarming(); throw error; }
   }
   /** @param {import('./contracts.js').ReportEnvelope} retained @returns {Promise<void>} */
   async function assertReportAuthority(retained) {
@@ -209,7 +181,7 @@ export function registerWorker(pi, env = process.env) {
       /** @type {import('./contracts.js').StoredTelemetryV1} */
       const packet = {
         version: PROTOCOL, nonce, ownerSession, ownerEpoch, workerId, workerGeneration, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
-        context: contextUsage(ctx) || null, currentTool, currentTarget, lastUsage, compacting, detachedEffect, warming: warming.snapshot(), speed,
+        context: contextUsage(ctx) || null, currentTool, currentTarget, lastUsage, compacting, detachedEffect, speed,
         phase: report ? 'waiting' : authority?.phase || 'idle', model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
         at: Date.now()
       };
@@ -303,7 +275,6 @@ export function registerWorker(pi, env = process.env) {
     }
   });
   pi.on('session_start', async (_event, ctx) => {
-    releaseWarming(); warmingSession = ctx.sessionManager.getSessionId(); warmingBinding++;
     ctxRef = ctx; stopped = parentDead; lastUsage = null; speed = null; speedStart = null;
     if (parentDead) { ctx.abort(); ctx.shutdown(); return; }
     await mkdirPrivate(dir); await load(); await probe(ctx);
@@ -385,21 +356,18 @@ export function registerWorker(pi, env = process.env) {
     }
     if (event.message?.role === 'assistant' && event.message.usage) { lastUsage = selectLastMeasuredUsage(lastUsage, event.message.usage); await telemetry(ctx); }
   });
-  pi.on('cache_warming_decision', async (_event, ctx) => {
-    await reconcileWarming(ctx); await telemetry(ctx);
-  });
-  pi.on('session_before_compact', async (_event, ctx) => { compacting = true; releaseWarming(); speedStart = null; await telemetry(ctx); });
+  pi.on('session_before_compact', async (_event, ctx) => { compacting = true; speedStart = null; await telemetry(ctx); });
   pi.on('session_compact', async (_event, ctx) => {
     compacting = false; await load();
     pi.sendMessage({ customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false }, { triggerTurn: false });
     await telemetry(ctx);
   });
-  pi.on('session_compact_failed', async (_event, ctx) => { compacting = false; await reconcileWarming(ctx); await telemetry(ctx); });
+  pi.on('session_compact_failed', async (_event, ctx) => { compacting = false; await telemetry(ctx); });
   pi.on('agent_before_settle', async (_event, ctx) => { if (waiting()) ctx.abort(); });
-  pi.on('agent_settled', async (_event, ctx) => { currentTool = null; currentTarget = null; await reconcileWarming(ctx); await telemetry(ctx); });
-  pi.on('model_select', async (_event, ctx) => { releaseWarming(); speed = null; speedStart = null; await reconcileWarming(ctx); await telemetry(ctx); });
+  pi.on('agent_settled', async (_event, ctx) => { currentTool = null; currentTarget = null; await telemetry(ctx); });
+  pi.on('model_select', async (_event, ctx) => { speed = null; speedStart = null; await telemetry(ctx); });
   pi.on('session_shutdown', async () => {
-    stopped = true; releaseWarming(); clearInterval(parentTimer); process.removeListener('disconnect', parentGone); await reportSerial.drain(); await telemetrySerial.drain();
+    stopped = true; clearInterval(parentTimer); process.removeListener('disconnect', parentGone); await reportSerial.drain(); await telemetrySerial.drain();
   });
   return { load, probe, getState: () => ({ authority, report }) };
 }

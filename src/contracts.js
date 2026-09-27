@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { types as nodeTypes } from 'node:util';
 import { validateUsageObservation, validateUsageTotals, UsageValidationError } from './observations.js';
-import { validateWarmingObservation } from './warming.js';
 
 /** @typedef {import('./observations.js').UsageObservation} UsageObservation */
 /** @typedef {import('./observations.js').UsageTotals} UsageTotals */
@@ -59,7 +58,7 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {ReportEnvelope & {checkpoint: Checkpoint, snapshotRef: string, inspectedAt?: number}} FinalizedReport */
 /** @typedef {{id: string, objective: string, planRevision: number, attemptId: string, attemptNumber: number, constraints: string[], steps: Step[], stepIndex: number, policy: LegacyTaskPolicy, limits: LegacyTaskLimits, lastDecision: LastDecision | null}} AuthorityTask */
 /** @typedef {'idle' | 'running' | 'waiting' | 'paused' | 'stopped'} AuthorityPhase */
-/** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, phase: AuthorityPhase, leaseId: string, attemptId: string | null, readOnly: boolean, model: {provider: string, id: string}, repoRoot: string, task: AuthorityTask | null, updatedAt: number, cacheWarming?: 'off' | 'active'}} Authority */
+/** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, phase: AuthorityPhase, leaseId: string, attemptId: string | null, readOnly: boolean, model: {provider: string, id: string}, repoRoot: string, task: AuthorityTask | null, updatedAt: number, cacheWarming?: 'off' | 'active'}} Authority */  // cacheWarming: legacy key, accepted and ignored
 /** @typedef {{ownerEpoch: number, workerGeneration: number, leaseId: string, attemptId: string, report: ReportEnvelope}} Latch */
 
 /** @typedef {'activating' | 'running' | 'awaiting_settle' | 'question' | 'blocked' | 'review' | 'paused' | 'interrupted' | 'completed' | 'cancelled'} TaskStatus */
@@ -76,8 +75,8 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {{toolCallId: string, toolName: string, pid: number | null, detectedAt: number}} StoredDetachedEffectV1 */
 /** @typedef {{tokens: number, seconds: number}} StoredSpeedV1 */
 /** @typedef {{version: 1, nonce: string, workerId: string, pid: number, sessionId: string, context: StoredContextUsage | null, currentTool: string | null, lastUsage: UsageObservation | null, compacting: boolean, detachedEffect: StoredDetachedEffectV1 | null, phase: AuthorityPhase, model: StoredModel | null, at: number}} HistoricalTelemetryV1 */
-/** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number, warming?: import('./warming.js').WarmingObservation, speed?: StoredSpeedV1 | null, currentTarget?: string | null}} StoredTelemetryV1 */
-/** @typedef {{agentDir: string, piCompaction: unknown, cacheWarming: unknown, fabricCompaction: unknown, fabricShellHangMs: number | null, fabricAgentMaxDepth: number | null, prewalkDisabled: boolean, prewalkConfigured: boolean, note: string}} StoredNativeSettings */
+/** @typedef {HistoricalTelemetryV1 & {ownerSession: string, ownerEpoch: number, workerGeneration: number, warming?: unknown, speed?: StoredSpeedV1 | null, currentTarget?: string | null}} StoredTelemetryV1 */
+/** @typedef {{agentDir: string, piCompaction: unknown, cacheWarming: unknown, fabricCompaction: unknown, fabricShellHangMs: number | null, fabricAgentMaxDepth: number | null, prewalkDisabled: boolean, prewalkAutoArm?: boolean, prewalkConfigured: boolean, note: string}} StoredNativeSettings */
 /** @typedef {{protocol: 1, pairVersion: string, pid: number, cwd: string, trusted: boolean, sessionId: string, sessionFile?: string, model: (StoredModel & {contextWindow: number}) | null, thinkingLevel: Effort | 'max' | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}, sourcePaths: string[], context: StoredContextUsage | null, native: StoredNativeSettings, checkedAt: number, scope: string, nonce: string, workerId: string, ownerSession: string}} HistoricalProbeV1 */
 /** @typedef {HistoricalProbeV1 & {ownerEpoch: number, workerGeneration: number, meshRoot?: string}} StoredProbeV1 */
 /** @typedef {Omit<ReportEnvelope, 'ownerEpoch' | 'workerGeneration' | 'attemptId' | 'attemptNumber'>} HistoricalReportEnvelopeV1 */
@@ -397,7 +396,6 @@ function checkTelemetry(value, label, workerId, ownerSession, facts) {
   if (value === null) return;
   const record = object(value, label), historical = diagnosticHistorical(record, label, 'telemetry', facts);
   keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration', 'warming', 'speed', 'currentTarget'])], label);
-  if (!historical && Object.hasOwn(record, 'warming')) validateWarmingObservation(record.warming);
   if (!historical && Object.hasOwn(record, 'speed') && record.speed !== null) checkSpeed(record.speed, `${label}.speed`);
   if (!historical && Object.hasOwn(record, 'currentTarget') && record.currentTarget !== null) text(record.currentTarget, `${label}.currentTarget`, 200);
   knownVersion(required(record, 'version', label), `${label}.version`, 1);
@@ -470,13 +468,14 @@ export function validateSnapshot(value, limits) { assertSnapshot(value, limits);
 /** @param {unknown} value @param {string} label */
 function checkNativeSettings(value, label) {
   const native = object(value, label);
-  keys(native, ['agentDir', 'piCompaction', 'cacheWarming', 'fabricCompaction', 'fabricShellHangMs', 'fabricAgentMaxDepth', 'prewalkDisabled', 'prewalkConfigured', 'note'], label);
+  keys(native, ['agentDir', 'piCompaction', 'cacheWarming', 'fabricCompaction', 'fabricShellHangMs', 'fabricAgentMaxDepth', 'prewalkDisabled', 'prewalkAutoArm', 'prewalkConfigured', 'note'], label);
   text(required(native, 'agentDir', label), `${label}.agentDir`, 10000); text(required(native, 'note', label), `${label}.note`, 10000);
   for (const key of ['piCompaction', 'fabricCompaction', 'cacheWarming']) required(native, key, label);
   for (const key of ['fabricShellHangMs', 'fabricAgentMaxDepth']) {
     const number = required(native, key, label); if (number !== null) integer(number, `${label}.${key}`);
   }
   bool(required(native, 'prewalkDisabled', label), `${label}.prewalkDisabled`); bool(required(native, 'prewalkConfigured', label), `${label}.prewalkConfigured`);
+  if (Object.hasOwn(native, 'prewalkAutoArm')) bool(native.prewalkAutoArm, `${label}.prewalkAutoArm`); // optional: absent in probes recorded before it existed
 }
 /** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @param {ProfileFacts} facts */
 function checkProbe(value, label, workerId, ownerSession, facts) {

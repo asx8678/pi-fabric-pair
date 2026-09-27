@@ -101,15 +101,15 @@ function validateContent(value, role) {
     }
   }
 }
-/** @param {unknown} value @param {boolean} [allowPending] */
-function validateMessage(value, allowPending = false) {
+/** @param {unknown} value */
+function validateMessage(value) {
   const message = record(value, 'Session message'); requireValue(text(message.role), 'Invalid message role');
   if (!['user', 'assistant', 'toolResult', 'system', 'custom', 'bashExecution', 'branchSummary', 'compactionSummary'].includes(message.role)) return;
   requireValue(nonnegative(message.timestamp), 'Invalid stored message timestamp');
   if (['user', 'assistant', 'toolResult', 'system', 'custom'].includes(message.role)) validateContent(message.content, message.role);
   if (message.role === 'assistant') {
     requireValue(text(message.api) && text(message.provider) && text(message.model), 'Invalid assistant identity');
-    requireValue((allowPending && message.stopReason === 'pending') || ['stop', 'length', 'toolUse', 'error', 'aborted', 'deferred'].includes(String(message.stopReason)), 'Invalid assistant stop reason');
+    requireValue(['stop', 'length', 'toolUse', 'error', 'aborted', 'deferred'].includes(String(message.stopReason)), 'Invalid assistant stop reason');
     validateUsage(message.usage);
   }
   if (message.role === 'toolResult') requireValue(text(message.toolCallId) && text(message.toolName) && typeof message.isError === 'boolean', 'Invalid stored tool result');
@@ -278,7 +278,7 @@ function assertProbe(value) {
     requireValue((context.tokens === null || nonnegative(context.tokens)) && nonnegative(context.contextWindow) && (context.percent === null || nonnegative(context.percent)), 'Invalid bridge context usage');
   }
   for (const key of ['piCompaction', 'cacheWarming', 'fabricCompaction']) requireValue(Object.hasOwn(native, key), `Missing native setting ${key}`);
-  requireValue(text(native.agentDir) && typeof native.note === 'string' && typeof native.prewalkDisabled === 'boolean' && typeof native.prewalkConfigured === 'boolean', 'Invalid native settings');
+  requireValue(text(native.agentDir) && typeof native.note === 'string' && typeof native.prewalkDisabled === 'boolean' && (native.prewalkAutoArm === undefined || typeof native.prewalkAutoArm === 'boolean') && typeof native.prewalkConfigured === 'boolean', 'Invalid native settings');
   requireValue((native.fabricShellHangMs === null || nonnegative(native.fabricShellHangMs)) && (native.fabricAgentMaxDepth === null || nonnegative(native.fabricAgentMaxDepth)), 'Invalid native runtime limits');
 }
 
@@ -803,16 +803,6 @@ export class PiRuntime {
       } finally { finishWait(); }
     }
     throw new RpcUncertainError('Worker did not reach verified true idle before deadline');
-  }
-  /** @returns {Promise<{messages: unknown[]}>} */
-  async getMessages() {
-    const response = await this.#send('get_messages', {}, null); // ordinary command rejection is not a malformed frame
-    try {
-      const data = record(response, 'RPC messages');
-      requireValue(Array.isArray(data.messages), 'RPC messages missing');
-      for (const message of data.messages) validateMessage(message, true);
-      return { messages: data.messages };
-    } catch (error) { this.#hold(new RpcUncertainError(`Malformed get_messages response: ${reasonOf(error)}`)); throw error; }
   }
   /** @param {string} reason @returns {Promise<void>} */
   abortCurrent(reason) {

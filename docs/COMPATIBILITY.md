@@ -22,7 +22,7 @@ Originally inspected on **2026-09-23** from the supplied reference sources: Pi 0
 | Project | Package version inspected | Repository |
 |---|---|---|
 | Pi coding agent | 0.87.1 | https://github.com/earendil-works/pi |
-| Fabric | 0.93.0 | https://github.com/monotykamary/pi-fabric |
+| Fabric | 0.93.0 (contracts); 0.97.0 `cache` provider relied on for warming | https://github.com/monotykamary/pi-fabric |
 | Fovea | 0.29.2 | https://github.com/monotykamary/pi-fovea |
 
 Versions identify the source inspected, not npm publication status or a live
@@ -57,10 +57,14 @@ that every fetched `main` file came from that exact commit.
 - `pi.sendMessage` custom messages with follow-up/next-turn delivery.
 - Read-only session identity, model registry and context observations; public `pi.getThinkingLevel()`.
 - Pi JSONL commands including prompt, get_state, set_model, available effort levels,
-  set_thinking_level, clear_queue, abort, get_messages, get_entries, get_commands, and extension UI responses.
+  set_thinking_level, clear_queue, abort, get_entries, get_commands, and extension UI responses. `/pair transcript` reads the retained session file instead of `get_messages`, whose single-line reply grows with the worker's context.
 - Pi `agent_settled` and compaction events. `agent_end` alone is not sufficient.
 - Fabric replay of nested host `tool_call` events with fully qualified tool refs.
 - Normal Fabric capture of `pair_*` registered extension tools.
+- Fabric 0.97.0 `cache.status` / `cache.hold` / `cache.release` provider actions for prompt-cache warming (Pair holds no native leases itself).
+- Fabric's `PI_FABRIC_PARENT_RUN`, which Fabric sets on every child agent and actor it launches (inspected in Fabric 0.97.0 `src/worker.ts`). Pair loads inert when it is present. The variable is not a documented Fabric contract; an upstream request asks for one. Without it, role detection is unchanged.
+- Fabric's Prewalk auto-arm rule: only a root session with `prewalk.alwaysRearm: true` arms itself (Fabric 0.97.0 `src/prewalk/arm.ts`). Pair's profile check requires that auto-arm is off, not that Prewalk is disabled.
+- Pi's RPC `agent_end` and `turn_end` lines repeat the run's messages and the turn's tool results. Pair delivers an oversized one by type only, since it reads neither payload; any other oversized line still faults the worker.
 
 Source/documentation references:
 

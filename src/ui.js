@@ -4,7 +4,6 @@ import { assert, briefError, cleanText, clone } from './util.js';
 import { INDICATORS, validateConfig } from './config.js';
 import { EFFORT_LEVELS } from './contracts.js';
 import { validateUsageObservation } from './observations.js';
-import { warmingLabel } from './warming.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} UIContext */
 /** @typedef {Readonly<ReturnType<import('./controller.js').PairController['summary']>>} PairSummary */
@@ -321,11 +320,9 @@ export function statusText(summary, native = null, now = Date.now()) {
   lines.push('## Details', row('Session', summary.ownerSession));
   if (summary.mainPhase) lines.push(row('Main phase', `${summary.mainPhase.status} (explicit, non-authorizing)${summary.mainPhase.current ? '' : ' · stale binding: reports stay retained'}`));
   lines.push(row('Delivery', summary.autoDeliverReports === false ? 'automatic delivery off' : 'automatic delivery on'),
-    row('Warming', `Pair ${summary.cacheWarming || 'off'} (opt-in) · Main ${warmingLabel(summary.main?.warming)}${native ? ` · native ${native.cacheWarming}` : ''}`));
+    row('Warming', `Fabric cache.status/cache.hold (Pair holds no leases)${native ? ` · native ${native.cacheWarming}` : ''}`));
   for (const w of summary.workers) {
-    const obs = w.observation;
-    lines.push(row(w.id, `PID ${w.pid || 'not running'} · session ${w.sessionId || 'not created'}`), row('Workspace', `${w.cwd}${w.workspaceGit === false ? ' · not a Git repository' : ''}`),
-      row('Warming', `worker ${warmingLabel(obs && 'warming' in obs ? obs.warming : undefined)}`));
+    lines.push(row(w.id, `PID ${w.pid || 'not running'} · session ${w.sessionId || 'not created'}`), row('Workspace', `${w.cwd}${w.workspaceGit === false ? ' · not a Git repository' : ''}`));
     if (w.usage) lines.push(row('Usage', `${w.usage.requests} responses · reported $${w.usage.reportedCost.toFixed(4)} · ${w.usage.unknownCostRequests} with unknown price (inference only)`));
     if (w.lastExchange) lines.push(row('Exchange', `${w.lastExchange.direction} · ${w.lastExchange.kind}`));
   }
@@ -694,7 +691,7 @@ export function doctorText({ main, pair, configuration, blockers, raw, notes = [
     `  Project     ${main.trusted ? 'trusted' : 'not trusted (project settings are ignored)'}`, '',
     '## Extensions', check(main.capabilities.fabric, main.capabilities.fabric ? `Fabric${ver(main.versions.fabric)} loaded` : 'Fabric not loaded'),
     check(main.capabilities.fovea, main.capabilities.fovea ? `Fovea${ver(main.versions.fovea)} loaded` : 'Fovea not loaded'), '',
-    '## Worker Fabric profile', ...(blockers.length ? blockers.map(item => check(false, item)) : [check(true, 'shellHangMs, maxDepth and prewalk are set for Pair')]), '',
+    '## Worker Fabric profile', ...(blockers.length ? blockers.map(item => check(false, item)) : [check(true, 'shellHangMs, maxDepth and Prewalk auto-arm are set for Pair')]), '',
     '## Configuration', `  Version     ${String(configuration.version ?? 'unknown')} · ${String(configuration.scope ?? 'unknown')} scope`,
     check(pending === 0, pending === 0 ? 'no pending migrations' : `${pending} pending migration${pending === 1 ? '' : 's'}; review in /pair settings`),
     check(pair.enabled, pair.enabled ? 'enabled for new work' : 'disabled for new work; turn it on in /pair settings'),

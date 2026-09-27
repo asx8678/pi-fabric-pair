@@ -97,19 +97,30 @@ export async function nativeSettings(cwd, trusted, env = process.env) {
     fabricShellHangMs: (plain(fabric.executor) ? fabric.executor.shellHangMs : undefined) ?? null,
     fabricAgentMaxDepth: (plain(fabric.agents) ? fabric.agents.maxDepth : undefined) ?? null,
     prewalkDisabled: plain(fabric.prewalk) && fabric.prewalk.enabled === false,
+    prewalkAutoArm: plain(fabric.prewalk) && fabric.prewalk.enabled !== false && fabric.prewalk.alwaysRearm === true,
     prewalkConfigured: !!fabric.prewalk,
     note: 'File-level native configuration; session-only overrides may differ. RPC autoCompactionEnabled is authoritative for that switch.'
   };
 }
 /**
- * @param {{fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean}} native
- * @param {{prewalkDisabled: boolean}} requirements
+ * Whether Fabric would arm Prewalk by itself at session start. Fabric arms it
+ * automatically only for a root session with `prewalk.alwaysRearm: true`; a
+ * manual `/fabric prewalk` stays the user's choice. Probes recorded before
+ * `prewalkAutoArm` existed keep the older, stricter reading.
+ * @param {{prewalkDisabled: boolean, prewalkAutoArm?: boolean}} native
+ */
+export function prewalkAutoArms(native) {
+  return typeof native.prewalkAutoArm === 'boolean' ? native.prewalkAutoArm : !native.prewalkDisabled;
+}
+/**
+ * @param {{fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean, prewalkAutoArm?: boolean}} native
+ * @param {{prewalkDisabled: boolean}} requirements `prewalkDisabled` keeps its config name; it now requires only that Prewalk cannot auto-arm.
  */
 export function nativeProfileBlockers(native, requirements) {
   const blockers = [];
   if (native.fabricShellHangMs !== 0) blockers.push(`executor.shellHangMs = 0 (observed ${JSON.stringify(native.fabricShellHangMs)}; prevents untracked background shell jobs)`);
   if (native.fabricAgentMaxDepth !== 0) blockers.push(`agents.maxDepth = 0 (observed ${JSON.stringify(native.fabricAgentMaxDepth)}; prevents recursive agents)`);
-  if (requirements.prewalkDisabled && !native.prewalkDisabled) blockers.push('prewalk.enabled = false (not explicitly disabled; Pair owns delegation)');
+  if (requirements.prewalkDisabled && prewalkAutoArms(native)) blockers.push('prewalk.alwaysRearm = false, or prewalk.enabled = false (Prewalk would arm itself at startup and hand the first edit to another model; Pair owns delegation)');
   return blockers;
 }
 /**
@@ -156,7 +167,7 @@ export async function probeNative(pi, ctx) {
   };
 }
 /**
- * @param {{protocol: number, cwd: string, sessionId: string, sessionFile?: string, meshRoot?: string | null, model: {provider: string, id: string} | null, thinkingLevel: string | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, native: {fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean}}} probe
+ * @param {{protocol: number, cwd: string, sessionId: string, sessionFile?: string, meshRoot?: string | null, model: {provider: string, id: string} | null, thinkingLevel: string | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, native: {fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown, prewalkDisabled: boolean, prewalkAutoArm?: boolean}}} probe
  * @param {{sessionId: string, sessionFile?: string, model?: {provider: string, id: string}, thinkingLevel?: string, autoCompactionEnabled?: boolean}} rpcState
  * @param {{requirements: {fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}}} config
  * @param {import('./contracts.js').WorkerSpec} worker

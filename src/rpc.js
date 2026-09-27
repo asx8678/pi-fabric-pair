@@ -17,6 +17,13 @@ const MAX_FRAME = 16 * 1024 * 1024, MAX_TIMEOUT = 300_000, KILL_WAIT = 1500;
 const CONTROL_COMMANDS = new Set(['clear_queue', 'abort', 'abort_retry', 'abort_bash', 'get_state']);
 const MAX_EXTENDED_WAIT = 30 * 60_000;
 const NOISE_LINES = 1000, NOISE_BYTES = 1024 * 1024;
+/** Pi repeats the run's messages in `agent_end` and the turn's tool results in `turn_end`; PiRuntime reads neither payload. */
+const SHEDDABLE = ['agent_end', 'turn_end'];
+/** @param {string} head the first characters of a frame @returns {string | null} */
+function sheddableType(head) {
+  const start = head.trimStart();
+  return SHEDDABLE.find(type => start.startsWith(`{"type":"${type}"`)) ?? null;
+}
 
 export class RpcUncertainError extends Error {
   /** @param {string} message */
@@ -47,6 +54,7 @@ export class PiRpc extends EventEmitter {
     this.normalBytes = 0; this.controlBytes = 0;
     this.stderr = '';
     /** @type {string[]} */ this.parts = []; this.partBytes = 0; this.discarding = false; this.noiseLines = 0; this.noiseBytes = 0;
+    /** @type {string | null} */ this.shedding = null;
     this.decoder = new TextDecoder('utf-8', { fatal: true });
     this.closed = false; this.started = false; this.stopping = false;
     /** @type {Error | null} */ this.fault = null;
@@ -120,7 +128,12 @@ export class PiRpc extends EventEmitter {
     let start = 0;
     for (let at = text.indexOf('\n'); at >= 0; at = text.indexOf('\n', start)) {
       const piece = text.slice(start, at); start = at + 1;
-      if (this.discarding) { this.discarding = false; continue; }
+      if (this.discarding) {
+        this.discarding = false;
+        const shed = this.shedding; this.shedding = null;
+        if (shed) this.shed(shed);
+        continue;
+      }
       const line = this.parts.length ? this.parts.join('') + piece : piece;
       this.parts = []; this.partBytes = 0;
       this.frame(line.endsWith('\r') ? line.slice(0, -1) : line);
@@ -128,9 +141,29 @@ export class PiRpc extends EventEmitter {
     if (start >= text.length || this.discarding) return;
     const rest = text.slice(start);
     this.parts.push(rest); this.partBytes += Buffer.byteLength(rest);
-    if (this.partBytes > this.maxLineBytes) { this.dropPartial(); this.fail(new RpcUncertainError('Invalid worker protocol: Oversized incomplete RPC frame')); }
+    if (this.partBytes > this.maxLineBytes) {
+      const type = sheddableType(this.frameHead());
+      this.dropPartial();
+      if (type) this.shedding = type; // skip to the frame boundary, then deliver the event without its payload
+      else this.fail(new RpcUncertainError('Invalid worker protocol: Oversized incomplete RPC frame'));
+    }
   }
   dropPartial() { this.parts = []; this.partBytes = 0; this.discarding = true; }
+  /** @returns {string} the start of the frame being assembled */
+  frameHead() {
+    let head = '';
+    for (const part of this.parts) { head += part.slice(0, 64); if (head.length >= 64) break; }
+    return head;
+  }
+  /**
+   * Deliver an oversized lifecycle frame by type only. The type is all PiRuntime
+   * uses from these events; every other oversized frame still faults.
+   * @param {string} type
+   */
+  shed(type) {
+    this.emit('diagnostic', { shed: type });
+    this.handle({ type, payloadOmitted: true });
+  }
   /** @param {string} line */
   frame(line) {
     const trimmed = line.trimStart();
@@ -140,8 +173,10 @@ export class PiRpc extends EventEmitter {
       this.emit('diagnostic', { stdout: line.slice(0, 2000) });
       return;
     }
+    const oversized = Buffer.byteLength(line) > this.maxLineBytes, shed = oversized ? sheddableType(line.slice(0, 64)) : null;
+    if (shed) { this.shed(shed); return; }
     try {
-      if (!line.length || Buffer.byteLength(line) > this.maxLineBytes) throw new Error('Empty or oversized RPC frame');
+      if (!line.length || oversized) throw new Error('Empty or oversized RPC frame');
       /** @type {unknown} */ const value = JSON.parse(line);
       if (!isRpcRecord(value) || typeof value.type !== 'string') throw new Error('Invalid RPC frame');
       this.handle(value);

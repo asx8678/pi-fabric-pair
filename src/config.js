@@ -19,7 +19,7 @@ export function isIndicator(value) { return INDICATORS.some(mode => mode === val
 /** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], excludeExtensions: string[], extraSkills: string[], inheritExtensions: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
-/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, cacheWarming: 'off' | 'active', indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean}} PairConfig */
+/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean}} PairConfig */
 /** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence'} NestedConfigKey */
 /** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>}} ConfigLayer */
 /** @typedef {{scope: ConfigScope, kind: 'fabric-pair-v1' | 'handoff-v1', sourceFile: string, targetFile: string, fromVersion: 1, toVersion: 2, warnings: string[]}} ConfigMigration */
@@ -36,7 +36,6 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   version: CONFIG_VERSION,
   enabled: false,
   autoStart: true,
-  cacheWarming: 'off',
   indicator: 'minimal',
   maxWorkers: 1,
   workers: [{ id: 'worker', provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }],
@@ -57,6 +56,8 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
 const NESTED = ['supervision', 'runtime', 'requirements', 'limits', 'verification', 'evidence'];
 /** @type {Record<string, import('./contracts.js').ReviewMode | undefined>} */
 const POLICY_ALIASES = { final: 'final-only', strict: 'every-step', 'final-only': 'final-only', milestones: 'milestones', 'every-step': 'every-step' };
+/** Removed top-level settings: accepted for existing files, then dropped. Warming is Fabric's cache provider now. */
+const DEPRECATED_KEYS = ['cacheWarming'];
 const DEPRECATED_LIMIT_KEYS = ['maxTurnsPerStep', 'taskTimeoutMs', 'maxQueuedTasks', 'maxQueuedReviews', 'maxAutomaticRecoveryAttempts'];
 /** @type {Record<string, [number, number]>} */
 const DEPRECATED_LIMIT_BOUNDS = { maxTurnsPerStep: [1, Number.MAX_SAFE_INTEGER], taskTimeoutMs: [1, Number.MAX_SAFE_INTEGER], maxQueuedTasks: [0, 128], maxQueuedReviews: [0, 128], maxAutomaticRecoveryAttempts: [0, 20] };
@@ -75,8 +76,9 @@ function assertKeys(value, allowed, label) {
 /** @param {unknown} [raw] @returns {PairConfig} */
 export function validateConfig(raw = {}) {
   assert(isObject(raw), 'Pair configuration must be an object');
-  const allowed = Object.keys(DEFAULTS);
+  const allowed = [...Object.keys(DEFAULTS), ...DEPRECATED_KEYS];
   for (const key of Object.keys(raw)) assert(allowed.includes(key), `Unknown Pair setting: ${key}`);
+  if (Object.hasOwn(raw, 'cacheWarming')) assert(raw.cacheWarming === 'off' || raw.cacheWarming === 'active', 'cacheWarming is a removed setting; delete it (prompt-cache warming is Fabric\'s cache.hold)');
   for (const section of NESTED) {
     if (raw[section] === undefined) continue;
     const keys = Object.keys(DEFAULTS[section]);
@@ -88,6 +90,7 @@ export function validateConfig(raw = {}) {
   }
   /** @type {unknown} */
   const c = merge(DEFAULTS, raw);
+  if (isObject(c)) for (const key of DEPRECATED_KEYS) delete c[key];
   if (isObject(c) && isObject(c.limits)) dropDeprecatedLimits(c.limits);
   assertMergedConfig(c);
   return c;
@@ -99,7 +102,6 @@ function assertMergedConfig(c) {
   assert(isObject(c.supervision) && isObject(c.runtime) && isObject(c.requirements) && isObject(c.limits) && isObject(c.verification) && isObject(c.evidence), 'Pair configuration sections must be objects');
   assert(c.version === CONFIG_VERSION, `Unsupported Pair config version ${c.version}; expected ${CONFIG_VERSION}`);
   for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks', 'autoDeliverReports']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
-  assert(c.cacheWarming === 'off' || c.cacheWarming === 'active', 'cacheWarming must be off or active');
   assert(isIndicator(c.indicator), `indicator must be ${INDICATORS.join(', ')}`);
   assert(typeof c.maxWorkers === 'number' && Number.isInteger(c.maxWorkers) && c.maxWorkers >= 1 && c.maxWorkers <= 8, 'maxWorkers must be 1–8');
   assert(isArray(c.workers) && c.workers.length >= 1 && c.workers.length <= 8, 'Configure 1–8 workers');
@@ -152,6 +154,7 @@ function assertConfigLayer(raw) {
 export function validateConfigLayer(raw) {
   assertConfigLayer(raw);
   const layer = structuredClone(raw);
+  for (const key of DEPRECATED_KEYS) delete /** @type {Record<string, unknown>} */ (layer)[key];
   if (isObject(layer.limits)) {
     dropDeprecatedLimits(layer.limits);
     if (Object.keys(layer.limits).length === 0) delete layer.limits;

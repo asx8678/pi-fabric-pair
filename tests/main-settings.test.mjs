@@ -6,10 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { registerMain } from '../src/main.js';
-import { fakeWarming } from './helpers/warming.mjs';
 import { configPaths } from '../src/config.js';
 
-async function fixture(run, { global, project = { version: 2, autoStart: false }, trusted = true, mode = 'rpc', sdk } = {}) {
+async function fixture(run, { global, project = { version: 2, autoStart: false }, trusted = true, mode = 'rpc' } = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-settings-main-'));
   const cwd = path.join(base, 'repo'), home = path.join(base, 'agent');
   await fs.mkdir(path.join(cwd, '.pi'), { recursive: true }); await fs.mkdir(home);
@@ -20,7 +19,7 @@ async function fixture(run, { global, project = { version: 2, autoStart: false }
   await fs.writeFile(files.project, JSON.stringify(project));
   const events = new Map(), commands = new Map(), tools = new Map(), actions = [], notices = [], confirmations = [], widgets = [], messages = [];
   let confirmed = true;
-  const ctx = { ...(sdk ? { acquireCacheWarming: sdk.acquireCacheWarming } : {}), cwd, mode, hasUI: true, isProjectTrusted: () => trusted,
+  const ctx = { cwd, mode, hasUI: true, isProjectTrusted: () => trusted,
     sessionManager: { getSessionId: () => 'settings-test-owner' }, getContextUsage: () => undefined,
     model: { provider: 'main', id: 'native' }, modelRegistry: { getAvailable: () => [] },
     ui: { select: async (_title, rows) => {
@@ -103,7 +102,7 @@ for (const command of ['start worker', '']) {
     assert.equal(f.spawns(), 0); assert.equal(f.controller.handles.size, 0);
     assert.equal(Object.keys(f.controller.state.workers).length, 0);
     assert.equal(f.notices.length, 1); assert.equal(f.notices[0].level, 'error');
-    for (const field of ['shellHangMs = 0', 'maxDepth = 0', 'prewalk.enabled = false', path.join(f.home, 'fabric.json'), path.join(await fs.realpath(f.cwd), '.pi', 'fabric.json')]) assert.ok(f.notices[0].message.includes(field), field);
+    for (const field of ['shellHangMs = 0', 'maxDepth = 0', path.join(f.home, 'fabric.json'), path.join(await fs.realpath(f.cwd), '.pi', 'fabric.json')]) assert.ok(f.notices[0].message.includes(field), field);
     assert.match(f.notices[0].message, /retry \/pair start/);
     await new Promise(resolve => setTimeout(resolve, 400));
     assert.equal(f.notices.length, 1, 'scanner does not repeat a known setup rejection');
@@ -150,8 +149,23 @@ test('invalid configuration cannot escape the command boundary or replace valid 
   assert.equal(f.controller.state.ownerEpoch, epoch); assert.equal(f.notices.at(-1).level, 'info');
 }));
 
+async function activeTaskFixture(f) {
+  const c = f.controller, spec = c.config.workers[0];
+  const task = { id: 'active-task', workerId: spec.id, requestId: 'active-request', objective: 'Isolated active-task fixture', context: '', constraints: [],
+    steps: [{ id: 'one', title: 'Work', instructions: 'fixture' }], stepIndex: 0, planRevision: 1, attemptId: 'active-attempt', attemptNumber: 1,
+    status: 'running', leaseId: 'active-lease', policy: structuredClone(c.config.supervision), limits: structuredClone(c.config.limits),
+    verification: structuredClone(c.config.verification), startedAt: Date.now(), updatedAt: Date.now(), revisions: 0, turns: 7, usage: null,
+    baseSnapshotRef: '/unused-fixture', pendingReport: null, report: null, decisions: {}, lastDecision: null };
+  const record = { id: spec.id, cwd: f.cwd, repoRoot: f.cwd, status: 'working', bound: spec, workerGeneration: 1,
+    sessionId: 'fake-worker-session', sessionFile: path.join(f.home, 'fake-session.jsonl'), history: [], usage: null, task };
+  c.state.workers[spec.id] = record;
+  await c.writeAuthority(spec.id, 'running');
+  const change = () => c.emit('change', c.summary()); change();
+  return { task, record, change, clear: () => { delete c.state.workers[spec.id]; change(); } };
+}
+
 test('reload preserves active authorization and stages the worker model without a replacement', () => fixture(async f => {
-  const active = await activeWarmingFixture(f);
+  const active = await activeTaskFixture(f);
   try {
     const before = JSON.stringify(active.task), hash = f.controller.configHash(), intent = f.controller.intent('worker');
     const authority = await fs.readFile(path.join(f.controller.workerDir('worker'), 'authority.json'), 'utf8');
@@ -322,109 +336,6 @@ test('registered Main message hook preserves measured history through abort plac
   assert.equal(f.getController().ownerSession, 'cache-main-new-session');
   assert.equal(f.getController().handles.size, 0);
   assert.equal(f.spawns(), 0);
-  assert.deepEqual(f.messages, [], 'observation hooks do not request model turns or warming');
+  assert.deepEqual(f.messages, [], 'observation hooks do not request model turns');
 }));
 
-async function activeWarmingFixture(f) {
-  const c = f.controller, spec = c.config.workers[0];
-  const task = { id: 'warming-task', workerId: spec.id, requestId: 'warming-request', objective: 'Isolated lease fixture', context: '', constraints: [],
-    steps: [{ id: 'one', title: 'Work', instructions: 'fixture' }], stepIndex: 0, planRevision: 1, attemptId: 'warming-attempt', attemptNumber: 1,
-    status: 'running', leaseId: 'warming-lease', policy: structuredClone(c.config.supervision), limits: structuredClone(c.config.limits),
-    verification: structuredClone(c.config.verification), startedAt: Date.now(), updatedAt: Date.now(), revisions: 0, turns: 7, usage: null,
-    baseSnapshotRef: '/unused-fixture', pendingReport: null, report: null, decisions: {}, lastDecision: null };
-  const record = { id: spec.id, cwd: f.cwd, repoRoot: f.cwd, status: 'working', bound: spec, workerGeneration: 1,
-    sessionId: 'fake-worker-session', sessionFile: path.join(f.home, 'fake-session.jsonl'), history: [], usage: null, task };
-  c.state.workers[spec.id] = record;
-  await c.writeAuthority(spec.id, 'running');
-  const change = () => c.emit('change', c.summary()); change();
-  return { task, record, change, clear: () => { delete c.state.workers[spec.id]; change(); } };
-}
-
-test('registered Main warming hooks require explicit active work and hold one scoped lease through review', () => {
-  const sdk = fakeWarming();
-  return fixture(async f => {
-    const native = path.join(f.home, 'settings.json'), bytes = '{"cacheWarming":"off","keep":1}\n'; await fs.writeFile(native, bytes);
-    assert.equal(sdk.stats.acquisitions, 0, 'retained-ready/no-task is not eligible');
-    const active = await activeWarmingFixture(f), c = f.controller;
-    try {
-      assert.equal(sdk.leases.size, 1);
-      const taskBefore = JSON.stringify(active.task), acquisitions = sdk.stats.acquisitions;
-      for (let i = 0; i < 10; i++) {
-        active.change(); f.events.get('agent_settled')({}, f.ctx);
-        assert.equal(await f.events.get('cache_warming_decision')({ action: 'stop' }, f.ctx), undefined);
-      }
-      for (const status of ['awaiting_settle', 'question', 'review', 'blocked', 'running']) {
-        active.task.status = status; active.record.status = status === 'running' ? 'working' : status; active.change();
-        assert.equal(sdk.stats.acquisitions, acquisitions, `${status}: repeated intervals cannot move native clocks`);
-      }
-      active.record.status = 'working';
-      assert.equal(JSON.stringify(active.task), taskBefore);
-      const originalConfig = structuredClone(c.config);
-      await c.updateConfig({ ...c.config, runtime: { ...c.config.runtime, requestTimeoutMs: c.config.runtime.requestTimeoutMs + 1 } });
-      assert.equal(c.summary().settingsPending, true);
-      assert.equal(sdk.stats.acquisitions, acquisitions, 'staged profile changes do not restart current lease');
-      await c.updateConfig(originalConfig);
-      for (const status of ['paused', 'interrupted', 'completed', 'cancelled']) {
-        active.task.status = status; active.change(); assert.equal(sdk.leases.size, 0, status);
-        active.task.status = 'running'; active.change(); assert.equal(sdk.leases.size, 1);
-      }
-      for (const status of ['error', 'stopped', 'paused']) {
-        active.record.status = status; active.change(); assert.equal(sdk.leases.size, 0, status);
-        active.record.status = 'working'; active.change(); assert.equal(sdk.leases.size, 1);
-      }
-      await c.updateConfig({ ...c.config, enabled: false }); assert.equal(sdk.leases.size, 0);
-      await c.updateConfig({ ...c.config, enabled: true, cacheWarming: 'off' }); assert.equal(sdk.leases.size, 0);
-      await c.updateConfig({ ...c.config, cacheWarming: 'active' }); assert.equal(sdk.leases.size, 1);
-      const status = await f.tools.get('pair_status').execute('status', {}, undefined, undefined, f.ctx);
-      assert.equal(status.details.cacheWarming, 'active');
-      assert.equal(status.details.main.warming.held, true);
-      assert.equal(status.details.main.warming.requested, true);
-      assert.equal(active.task.turns, 7, 'no budget reset');
-      assert.equal(await fs.readFile(native, 'utf8'), bytes);
-      assert.equal(f.spawns(), 0);
-      assert.deepEqual(f.messages, [], 'no prompts, paid requests or model continuations');
-    } finally { active.clear(); }
-    assert.equal(sdk.leases.size, 0);
-  }, { project: { version: 2, enabled: true, autoStart: false, cacheWarming: 'active' }, sdk });
-});
-
-test('registered Main default-off and unsupported SDK diagnostics never silently claim enabled warming', async () => {
-  const sdk = fakeWarming();
-  await fixture(async f => {
-    const active = await activeWarmingFixture(f);
-    try { assert.equal(sdk.stats.acquisitions, 0); assert.equal(f.controller.summary().main.warming.requested, false); }
-    finally { active.clear(); }
-  }, { project: { version: 2, enabled: true, autoStart: false }, sdk });
-  await fixture(async f => {
-    const active = await activeWarmingFixture(f);
-    try {
-      assert.deepEqual(f.controller.summary().main.warming, { supported: false, requested: true, held: false, error: null });
-      assert.equal(await f.events.get('cache_warming_decision')({ action: 'warm' }, f.ctx), undefined);
-      assert.deepEqual(f.messages, []);
-    } finally { active.clear(); }
-  }, { project: { version: 2, enabled: true, autoStart: false, cacheWarming: 'active' } });
-});
-
-test('Main releases for compaction, rebind, closing and shutdown without touching other native owners', async () => {
-  const sdk = fakeWarming(), other = sdk.acquireCacheWarming('idle');
-  await fixture(async f => {
-    const active = await activeWarmingFixture(f);
-    try {
-      assert.equal(sdk.leases.size, 2);
-      await f.events.get('session_before_compact')({}, f.ctx); assert.equal(sdk.leases.size, 1);
-      await f.events.get('session_compact_failed')({}, f.ctx); assert.equal(sdk.leases.size, 2);
-      const stale = { ...f.ctx, sessionManager: { getSessionId: () => 'settings-test-owner' } };
-      delete f.controller.state.workers.worker; // fixture removes its memory-only actor before rebinding
-      f.ctx.sessionManager.getSessionId = () => 'warming-next-session';
-      await f.events.get('session_start')({}, f.ctx);
-      assert.equal(sdk.leases.size, 1, 'rebind releases before closing the old controller');
-      await f.events.get('cache_warming_decision')({ action: 'warm' }, stale);
-      assert.equal(sdk.leases.size, 1, 'old context cannot acquire on a new binding');
-      await f.getController().close();
-      assert.equal(sdk.leases.size, 1);
-      await f.events.get('session_shutdown')({}, f.ctx);
-      assert.equal(sdk.leases.size, 1);
-    } finally { delete f.controller.state.workers.worker; }
-  }, { project: { version: 2, enabled: true, autoStart: false, cacheWarming: 'active' }, sdk });
-  other(); assert.equal(sdk.leases.size, 0);
-});

@@ -55,17 +55,21 @@ Merge these fields into the worker's effective `fabric.json`:
 
 ```json
 {
-  "prewalk": { "enabled": false },
   "executor": { "shellHangMs": 0 },
   "agents": { "maxDepth": 0 }
 }
 ```
 
 Global defaults normally live in `~/.pi/agent/fabric.json`; trusted worker-project
-settings can override them. These fields disable Prewalk, automatic background
-shell spill, and recursive agents. They affect Main too if it shares the profile.
+settings can override them. These fields disable automatic background shell spill
+and recursive agents. They affect Main too if it shares the profile; Fabric has no
+per-process setting yet. Prewalk may stay enabled, but `prewalk.alwaysRearm` must
+not be `true`: an auto-armed worker would hand its first edit to another model.
 Keep native automatic compaction enabled. Pair checks this setup without editing
 it. See the [quickstart](docs/QUICKSTART.md) for paths and troubleshooting.
+
+If you tighten Fabric's approval policies, classify Pair's tools too; see
+[approval risk for Pair tools](docs/REFERENCE.md#approval-risk-for-pair-tools).
 
 ### 3. Start the worker
 
@@ -162,9 +166,9 @@ The status line's **cache** reading (for example `cache M 99% W 100%`) shows the
 share of measured input read from provider cache on each role's last request. The hero artwork's 99-100% values are examples;
 actual results vary.
 
-Optional cache warming is **off by default**. It requires compatible native SDK
-support, can incur paid usage, and does not guarantee cache hits. Pair's inference
-budgets exclude Main usage and native warming. See the
+Prompt-cache warming is Fabric's `cache.status` / `cache.hold` provider, an
+explicit paid opt-in; Pair holds no leases of its own. Pair's inference budgets
+exclude Main usage and Fabric warming. See the
 [cache reference](docs/REFERENCE.md#context-warming-and-cost).
 
 ## More details

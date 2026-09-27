@@ -32,25 +32,23 @@ The worker's effective `fabric.json` must contain:
 
 ```json
 {
-  "prewalk": { "enabled": false },
   "executor": { "shellHangMs": 0 },
   "agents": { "maxDepth": 0 }
 }
 ```
 
+`prewalk.alwaysRearm` must not be `true` (it defaults to `false`). Prewalk itself may stay enabled: Fabric arms it automatically only with `alwaysRearm`, so a manual `/fabric prewalk` in Main stays available. Do not arm it for a Pair task. Setting `prewalk.enabled: false` also satisfies the check.
+
 Global defaults are in `<PI_CODING_AGENT_DIR>/fabric.json` (normally `~/.pi/agent/fabric.json`). Fields in `<worker-workspace>/.pi/fabric.json` take precedence only if the worker trusts that project. A separate worker workspace has its own project file and trust decision.
 
 Pair gathers these file-level blockers before spawning when reliably knowable. Worker trust is not borrowed from Main: if trust is unknown, preflight rejects only when both trusted and untrusted profiles fail; otherwise the worker readiness check decides. Custom runtime commands/arguments skip Main’s best-effort preflight because their environment may differ. No preflight proves provider authentication or installed capability readiness.
 
-If Main and Worker share this profile, these settings affect both. Pair verifies them, never silently changes them. Keep native auto-compaction enabled. No monitored/background shell jobs, detached processes or recursive workers are supported.
+If Main and Worker share this profile, these settings affect both, because Fabric has no per-process configuration yet. Pair verifies them, never silently changes them. Keep native auto-compaction enabled. No monitored/background shell jobs, detached processes or recursive workers are supported.
 
 ## 3. Enable and start manually
 
-Keep Pair `cacheWarming` at its default `off` unless the human explicitly accepts
-native refresh costs. Optional `active` is a JSON-only Pair policy, not a native
-global setting: see [Context, warming and cost](../README.md#context-warming-and-cost).
-It needs the new session-scoped SDK capability and separately reviewed deployment;
-older SDKs honestly report unsupported and do not fall back to paid prompts.
+Prompt-cache warming is Fabric's `cache.hold` (paid, explicit, time-bounded);
+Pair has no warming setting. A legacy `cacheWarming` key is accepted and ignored.
 
 Open `/pair settings` and set:
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { meshRootFor, nativeSettings, nativeProfileBlockers, preflightNativeProfile, checkReadiness } from '../src/native.js';
+import { meshRootFor, nativeSettings, nativeProfileBlockers, preflightNativeProfile, prewalkAutoArms, checkReadiness } from '../src/native.js';
 
 const valid = { executor: { shellHangMs: 0 }, agents: { maxDepth: 0 }, prewalk: { enabled: false } };
 async function fixture(run) {
@@ -17,14 +17,15 @@ async function fixture(run) {
 test('fresh profile lists all exact required fields and actionable paths at once', () => fixture(async ({ cwd, home, env }) => {
   const result = await preflightNativeProfile(cwd, { prewalkDisabled: true }, null, env);
   assert.equal(result.blocked, true);
-  for (const value of ['executor.shellHangMs = 0', 'agents.maxDepth = 0', 'prewalk.enabled = false', path.join(home, 'fabric.json'), path.join(cwd, '.pi', 'fabric.json')]) assert.ok(result.message.includes(value), value);
+  for (const value of ['executor.shellHangMs = 0', 'agents.maxDepth = 0', path.join(home, 'fabric.json'), path.join(cwd, '.pi', 'fabric.json')]) assert.ok(result.message.includes(value), value);
+  assert.ok(!result.message.includes('prewalk.'), 'an unconfigured Prewalk never auto-arms, so it is not a blocker');
   assert.match(result.message, /trusted worker/); assert.match(result.message, /authentication are still checked/);
   assert.deepEqual(await fs.readdir(home), []);
 }));
 
 test('project precedence and worker trust are explicit; Main trust is not borrowed', () => fixture(async ({ cwd, home, env }) => {
   await fs.writeFile(path.join(home, 'fabric.json'), JSON.stringify(valid));
-  await fs.writeFile(path.join(cwd, '.pi', 'fabric.json'), JSON.stringify({ prewalk: { enabled: true }, executor: { shellHangMs: 25 } }));
+  await fs.writeFile(path.join(cwd, '.pi', 'fabric.json'), JSON.stringify({ prewalk: { enabled: true, alwaysRearm: true }, executor: { shellHangMs: 25 } }));
   assert.equal((await preflightNativeProfile(cwd, { prewalkDisabled: true }, true, env)).blocked, true);
   assert.equal((await preflightNativeProfile(cwd, { prewalkDisabled: true }, false, env)).blocked, false);
   const uncertain = await preflightNativeProfile(cwd, { prewalkDisabled: true }, null, env);
@@ -40,10 +41,26 @@ test('worker readiness shares aggregate checks and is still authoritative', () =
   const probe = { protocol: 1, cwd, sessionId: 'session', sessionFile, meshRoot: '/isolated/mesh', model, thinkingLevel: 'low', capabilities: { fabric: true, fovea: true, pairReport: true }, native: { fabricShellHangMs: null, fabricAgentMaxDepth: 5, prewalkDisabled: false } };
   const state = { sessionId: 'session', sessionFile, model, thinkingLevel: 'low', autoCompactionEnabled: true };
   assert.throws(() => checkReadiness(probe, state, { requirements: { fabric: true, fovea: true, prewalkDisabled: true, autoCompaction: true } }, { ...model, model: model.id, effort: 'low', readOnly: false }, cwd, '/isolated/mesh'), error => {
-    for (const key of ['shellHangMs = 0', 'maxDepth = 0', 'prewalk.enabled = false']) assert.ok(error.message.includes(key));
+    for (const key of ['shellHangMs = 0', 'maxDepth = 0', 'prewalk.alwaysRearm = false']) assert.ok(error.message.includes(key));
     return true;
   });
 });
+
+test('only Prewalk auto-arm blocks Pair; manual Prewalk stays available to Main and the worker profile', () => fixture(async ({ cwd, home, env }) => {
+  const profile = prewalk => fs.writeFile(path.join(home, 'fabric.json'), JSON.stringify({ ...valid, prewalk }));
+  const blockers = async () => nativeProfileBlockers(await nativeSettings(cwd, false, env), { prewalkDisabled: true });
+  await profile({ enabled: true });
+  assert.deepEqual(await blockers(), [], 'enabled without alwaysRearm is armed only by an explicit /fabric prewalk');
+  await profile({ enabled: false, alwaysRearm: true });
+  assert.deepEqual(await blockers(), [], 'a disabled Prewalk cannot auto-arm');
+  await profile({ alwaysRearm: true });
+  assert.equal((await blockers()).length, 1);
+  assert.match((await blockers())[0], /prewalk\.alwaysRearm = false/);
+  assert.equal(nativeProfileBlockers({ fabricShellHangMs: 0, fabricAgentMaxDepth: 0, prewalkDisabled: false, prewalkAutoArm: true }, { prewalkDisabled: false }).length, 0, 'the requirement can still be switched off');
+  assert.equal(prewalkAutoArms({ prewalkDisabled: false }), true, 'a probe recorded before prewalkAutoArm keeps the stricter reading');
+  assert.equal(prewalkAutoArms({ prewalkDisabled: true }), false);
+  assert.equal(prewalkAutoArms({ prewalkDisabled: false, prewalkAutoArm: false }), false);
+}));
 
 test('meshRootFor derives a stable absolute private root per worker directory', () => {
   const first = meshRootFor('/pair/state/workers/first'), second = meshRootFor('/pair/state/workers/second');

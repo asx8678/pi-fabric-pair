@@ -6,6 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { PiRuntime } from '../src/actor-runtime.js';
+import fabricPair, { roleFromEnvironment } from '../src/extension.js';
 
 const entryPath = fileURLToPath(new URL('../src/extension.js', import.meta.url));
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -216,4 +217,20 @@ test('activation recheck still requires the exact private mesh root before any w
     await assert.rejects(runtime.prepareActivation(token), /private mesh root/);
     assert.equal(rpc.calls.some(call => call.command === 'prompt' && !String(call.fields.message).startsWith('/pair-bridge')), false, 'no work prompt may leave after a failed mesh recheck');
   });
+});
+
+test('Pair stays inert inside Fabric child agents, including children of a Pair worker', () => {
+  const worker = { PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: 'worker', PI_FABRIC_PAIR_NONCE: 'n' };
+  assert.equal(roleFromEnvironment({}), 'main');
+  assert.equal(roleFromEnvironment(worker), 'worker');
+  assert.equal(roleFromEnvironment({ PI_FABRIC_PARENT_RUN: 'run-1' }), 'inert', 'a Fabric child of Main never starts its own controller');
+  assert.equal(roleFromEnvironment({ ...worker, PI_FABRIC_PARENT_RUN: 'run-2' }), 'inert', 'inherited worker variables grant a Fabric child nothing');
+  assert.equal(roleFromEnvironment({ PI_FABRIC_PARENT_RUN: '' }), 'main');
+  assert.throws(() => roleFromEnvironment({ PI_FABRIC_PAIR_WORKER_ID: 'worker' }), /Ambiguous Pair role/);
+  const previous = process.env.PI_FABRIC_PARENT_RUN;
+  const registered = [];
+  const pi = new Proxy({}, { get: (_target, name) => (...args) => { registered.push([String(name), args[0]]); return () => {}; } });
+  try { process.env.PI_FABRIC_PARENT_RUN = 'run-3'; fabricPair(pi); }
+  finally { if (previous === undefined) delete process.env.PI_FABRIC_PARENT_RUN; else process.env.PI_FABRIC_PARENT_RUN = previous; }
+  assert.deepEqual(registered, [], 'no tools, commands or hooks are registered in a Fabric child');
 });

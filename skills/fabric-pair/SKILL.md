@@ -8,7 +8,7 @@ description: Delegate bounded implementation to retained Pi workers, handle work
 Use this skill when the user wants the configured persistent Main/Worker workflow.
 Pair must be installed, enabled and configured. Main remains under native `/model`.
 Do not create a second ad-hoc worker or use `agents.handoff` for a Pair assignment.
-Do not enable native Prewalk while Pair owns the task.
+Do not arm native Prewalk for a Pair assignment.
 
 ## Discover capabilities
 
@@ -89,6 +89,22 @@ individually with its `file` argument and inspect relevant surrounding repositor
 context through Fovea/read tools. Do not equate “inspection tool returned” with
 “code is correct.”
 
+Use Fovea for the blast radius. Every report carries `repositoryRoot` and the actual
+changed files (`actualChangedFiles`, or `changedFiles` in a `pair_yield` summary).
+Copy them into `fovea_impact` inside `fabric_exec`:
+
+```ts
+const impact = await extensions.fovea_impact({
+  root: "REPOSITORY_ROOT_FROM_REPORT",
+  files: ["CHANGED_FILE_FROM_REPORT"],
+});
+return impact.text;
+```
+
+It returns review order, affected callers and co-change companions the worker may
+have missed. It is a navigation aid: read the suggested code before citing it in a
+revision.
+
 Answer a question using `action:"answer"` with the same IDs. Request changes using
 `action:"revise"` and concrete findings. Approve only a reviewed, current snapshot
 with `action:"approve"` and its exact `checkpointHash`:
@@ -131,14 +147,13 @@ outcomes before doing more work; never replay mutations blindly.
 ## Cost and UI
 
 Do not send status messages or invoke Main merely to keep a cache warm. Native Pi
-owns scheduling, TTL/cost eligibility and safety windows. Pair's separate
-`cacheWarming` policy defaults to `off`. Only explicit `active` cost opt-in allows
-session-scoped native idle leases during enabled active work, including review
-waits; the native 30-minute idle cap is not extended. Leases are not implementation
-authority, cache-residency proof or evidence that refresh usage occurred. Status
-reports SDK support/requested/held separately from last measured cache samples.
-Old SDKs have no fallback: never issue warm prompts, change global settings, invent
-TTLs or reset/restart work to keep a cache hot. Release preserves native policy and
-other owners. Native refresh costs are outside Pair inference-only budgets.
+owns scheduling, TTL/cost eligibility and safety windows. Prompt-cache warming is
+Fabric's `cache` provider, not Pair's: `cache.status()` observes the local session,
+`cache.hold({durationMs})` is an explicit paid opt-in bounded to 30 minutes, and
+`cache.release({id})` ends it. Pair requests no leases and has no warming setting.
+Leases are not implementation authority, cache-residency proof or evidence that
+refresh usage occurred. Old SDKs have no fallback: never issue warm prompts, change
+global settings, invent TTLs or reset/restart work to keep a cache hot. Fabric
+refresh costs are outside Pair inference-only budgets.
 Native SDK support and Pair deployment must be reviewed/installed separately;
 source edits are not live. Minimal/compact/off indicators remain human UI only.

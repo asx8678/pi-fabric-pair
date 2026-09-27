@@ -17,7 +17,7 @@ container/OS/tool permissions for security-sensitive work.
 
 The human configures models, workspaces, verification argv, and limits. Main authorizes bounded implementation steps; that is distinct from the human's permission for commands or external actions. Worker UI requests are forwarded to the human. Missing UI means cancel/deny, never implicit approval.
 
-Pair is disabled by default and requires deliberate enablement. Legacy enablement is never migrated as consent. Retained V1 policy fields can be imported only from an explicitly selected, scope-matching regular `.v1.bak` after a field preview and human confirmation; project imports require Pi project trust, stale previews fail, the backup remains unchanged, and no worker inference is requested. V1 qualifies one writer. A read-only worker with generic Fabric is rejected before inference because generic provider actions do not expose Pi's pre-effect `tool_call` hook. The writer profile requires Fabric `agents.maxDepth:0`, `executor.shellHangMs:0`, and disabled Prewalk. A successful `pair_report` aborts the containing Fabric invocation so subsequent provider calls cannot execute. Explicit background shells, their background alias, and monitored shells are blocked before execution.
+Pair is disabled by default and requires deliberate enablement. Legacy enablement is never migrated as consent. Retained V1 policy fields can be imported only from an explicitly selected, scope-matching regular `.v1.bak` after a field preview and human confirmation; project imports require Pi project trust, stale previews fail, the backup remains unchanged, and no worker inference is requested. V1 qualifies one writer. A read-only worker with generic Fabric is rejected before inference because generic provider actions do not expose Pi's pre-effect `tool_call` hook. The writer profile requires Fabric `agents.maxDepth:0`, `executor.shellHangMs:0`, and Prewalk that cannot auto-arm (`prewalk.alwaysRearm` not `true`). A Fabric child agent or actor (marked by Fabric's `PI_FABRIC_PARENT_RUN`) loads Pair inert: it registers no tools or hooks and cannot act as Main or as a worker through inherited variables. A successful `pair_report` aborts the containing Fabric invocation so subsequent provider calls cannot execute. Explicit background shells, their background alias, and monitored shells are blocked before execution.
 
 Direct file edits are checked against workspace boundaries and symlink escapes. Raw shell commands and external tool servers still need independent permission controls; a workflow gate cannot determine every possible shell side effect. Main's read-only-during-task option covers recognized direct mutation tools, not arbitrary shell execution. It is an ergonomic safeguard, not complete isolation.
 
@@ -89,8 +89,8 @@ warming, and external tools. Use provider-side quotas for a true spending bounda
 
 ## Safe first use
 
-Use a separate test profile and disposable repository. Disable native Prewalk for
-Pair work, start with one worker, retain human permission prompts, and configure
+Use a separate test profile and disposable repository. Do not arm native Prewalk
+for Pair work, start with one worker, retain human permission prompts, and configure
 small reported-cost/output-token budgets and provider-side spending caps. Keep
 workloads supervised; automatic crash recovery and unattended operation remain
 outside this MVP.

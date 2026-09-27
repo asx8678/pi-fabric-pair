@@ -60,3 +60,18 @@ test('a large frame delivered in many chunks is assembled once', () => {
   assert.deepEqual(t.events, [1]);
   assert.deepEqual(t.faults, []);
 });
+
+test('oversized agent_end and turn_end frames are delivered by type without their payload; other oversized frames still fault', () => {
+  const rpc = new PiRpc({ maxLineBytes: 64 }), seen = [], faults = [];
+  rpc.on('event', event => seen.push(event));
+  rpc.on('fault', error => faults.push(error.message));
+  rpc.on('diagnostic', () => {});
+  const huge = `"${'m'.repeat(500)}"`;
+  const agentEnd = `{"type":"agent_end","messages":[${huge}],"willRetry":false}\n`;
+  for (let i = 0; i < agentEnd.length; i += 17) rpc.consume(Buffer.from(agentEnd.slice(i, i + 17))); // assembled across chunks
+  rpc.consume(Buffer.from(`{"type":"turn_end","message":{},"toolResults":[${huge}]}\n{"type":"e","n":1}\n`)); // complete line in one chunk
+  assert.deepEqual(seen, [{ type: 'agent_end', payloadOmitted: true }, { type: 'turn_end', payloadOmitted: true }, { type: 'e', n: 1 }]);
+  assert.deepEqual(faults, []);
+  rpc.consume(Buffer.from(`{"type":"message_end","message":[${huge}]}\n`));
+  assert.equal(faults.length, 1, 'only the two redundant lifecycle payloads may be shed');
+});

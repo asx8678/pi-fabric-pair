@@ -187,6 +187,28 @@ function parseJSONC(text) {
   }
   return JSON.parse(result);
 }
+/**
+ * Parse the complete JSONL records in the last `maxBytes` of a file without
+ * following a symlink. A record cut by the window start or still being
+ * appended is skipped, as are lines that are not JSON objects.
+ * @param {string} file @param {number} maxBytes @returns {Promise<Record<string, unknown>[]>}
+ */
+export async function readJsonlTail(file, maxBytes) {
+  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+  try {
+    const stat = await handle.stat();
+    assert(stat.isFile(), `Not a regular file: ${file}`);
+    const start = Math.max(0, stat.size - maxBytes), bytes = Buffer.alloc(stat.size - start);
+    let length = 0;
+    while (length < bytes.length) { const read = await handle.read(bytes, length, bytes.length - length, start + length); if (!read.bytesRead) break; length += read.bytesRead; }
+    const lines = new TextDecoder('utf-8').decode(bytes.subarray(0, length)).split('\n');
+    if (start > 0) lines.shift();
+    lines.pop(); // empty after the final newline, or a record still being written
+    /** @type {Record<string, unknown>[]} */ const records = [];
+    for (const line of lines) { try { const value = JSON.parse(line); if (plain(value)) records.push(value); } catch { /* not a complete record */ } }
+    return records;
+  } finally { await handle.close(); }
+}
 /** @param {string} file @returns {Promise<unknown>} */
 export async function readJSONC(file) {
   try { return parseJSONC(await fs.readFile(file, 'utf8')); } catch (e) { if (plain(e) && e.code === 'ENOENT') return {}; throw new Error(`Cannot inspect ${file}: ${briefError(e)}`); }

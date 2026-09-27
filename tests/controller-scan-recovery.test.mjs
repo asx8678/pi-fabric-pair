@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { PairController } from '../src/controller.js';
 import { loadConfig } from '../src/config.js';
-import { digest, PROTOCOL } from '../src/util.js';
+import { digest, PROTOCOL, readJsonlTail } from '../src/util.js';
 import { validateLatch } from '../src/contracts.js';
 import { humanPatch } from '../src/ui.js';
 
@@ -310,6 +310,25 @@ test('unconfirmed exits and real config drift remain held despite staged setting
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });
 
+test('transcript reads the retained session file tail, needs no RPC, and survives a stopped worker', async () => {
+  const { controller, record, runtime, base } = await fixture();
+  try {
+    const entry = (id, message) => JSON.stringify({ type: 'message', id, parentId: null, timestamp: new Date(0).toISOString(), message });
+    const lines = [JSON.stringify({ type: 'session', version: 3, id: 'retained', cwd: base, timestamp: new Date(0).toISOString() }),
+      entry('a', { role: 'user', content: 'first request' }),
+      JSON.stringify({ type: 'model_change', id: 'b', parentId: 'a', provider: 'p', modelId: 'm' }),
+      entry('c', { role: 'assistant', content: [{ type: 'thinking', thinking: 'hidden' }, { type: 'text', text: 'worker reply' }] }),
+      entry('d', { role: 'toolResult', content: [{ type: 'text', text: 'tool output' }] })];
+    await fs.mkdir(path.dirname(record.sessionFile), { recursive: true });
+    await fs.writeFile(record.sessionFile, `${lines.join('\n')}\n${entry('e', { role: 'assistant', content: 'still being written' }).slice(0, 40)}`);
+    runtime.closed = true; controller.handles.delete(record.id);
+    const text = await controller.transcript(record.id);
+    assert.equal(text, 'user: first request\n\nassistant: worker reply\n\ntoolResult: tool output', 'only complete message entries, text blocks only');
+    const tail = await readJsonlTail(record.sessionFile, 40 + 1 + Buffer.byteLength(lines[4]) + 1 + 20); // 20 bytes into record c
+    assert.deepEqual(tail.map(value => value.id), ['d'], 'a record cut by the window start and a record still being written are skipped');
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
 test('no-op, indicator and reverted runtime edits never revoke or schedule startup', async () => {
   const { controller, task, runtime, base } = await fixture();
   try {
@@ -322,33 +341,6 @@ test('no-op, indicator and reverted runtime edits never revoke or schedule start
     controller.updateConfig(before);
     assert.equal(controller.pendingConfig, null); assert.equal(revokes, 0);
     await runScan(controller); assert.equal(task.status, 'running');
-  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
-});
-
-test('scoped warming preference updates only nonauthorizing authority data and preserves the in-flight report', async () => {
-  const { controller, task, record, runtime, workerDir, base } = await fixture();
-  try {
-    let revokes = 0; runtime.revoke = () => { revokes++; };
-    const before = JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8'));
-    const taskBefore = JSON.stringify(task), hash = controller.configHash(), intent = controller.intent('worker');
-    const report = envelope({ controller, task, record, runtime });
-    await controller.updateConfig({ ...controller.config, cacheWarming: 'active' });
-    const after = JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8'));
-    assert.deepEqual(after, { ...before, cacheWarming: 'active' });
-    assert.equal(JSON.stringify(task), taskBefore);
-    assert.equal(controller.configHash(), hash); assert.equal(controller.intent('worker'), intent);
-    assert.equal(revokes, 0); assert.equal(controller.pendingConfig, null);
-    await controller.updateConfig({ ...controller.config, enabled: false });
-    assert.deepEqual(JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8')), { ...before, cacheWarming: 'off' });
-    await controller.updateConfig({ ...controller.config, enabled: true });
-    await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
-    await runScan(controller);
-    assert.equal(task.status, 'review'); assert.equal(task.report.reportId, report.reportId);
-    assert.equal(JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8')).phase, 'waiting');
-    await controller.cancel('worker', 'fixture cancel');
-    const cancelled = JSON.parse(await fs.readFile(path.join(workerDir, 'authority.json'), 'utf8'));
-    assert.equal(cancelled.phase, 'paused', 'warming preference never overrides a closed task phase');
-    assert.equal(task.status, 'cancelled'); assert.equal(task.report.reportId, report.reportId);
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });
 
@@ -369,19 +361,6 @@ test('removed turn/duration limits no longer pause running tasks, even with lega
     assert.equal(task.interruption, 'Reported inference-cost budget reached');
     assert.ok(userNotices.some(message => message.includes('Reported inference-cost budget reached')));
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }).catch(() => {}); }
-});
-
-test('warming publication failure contains the owned generation instead of leaving a stale paid opt-in', async () => {
-  const { controller, task, runtime, workerDir, base } = await fixture();
-  try {
-    let stops = 0;
-    runtime.abortAndStop = async () => { stops++; runtime.closed = true; };
-    const budget = { limits: structuredClone(task.limits), startedAt: task.startedAt, turns: task.turns };
-    await fs.rm(path.join(workerDir, 'authority.json'));
-    await assert.rejects(controller.updateConfig({ ...controller.config, cacheWarming: 'active' }));
-    assert.equal(stops, 1); assert.equal(task.status, 'interrupted');
-    assert.deepEqual({ limits: task.limits, startedAt: task.startedAt, turns: task.turns }, budget);
-  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });
 
 /** Stub the continuation path so a decision can reach activation without a real worker. */
