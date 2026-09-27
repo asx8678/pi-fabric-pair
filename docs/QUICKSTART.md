@@ -45,12 +45,16 @@ Pair gathers these file-level blockers before spawning when reliably knowable. W
 
 If Main and Worker share this profile, these settings affect both, because Fabric has no per-process configuration yet. Pair verifies them, never silently changes them. Keep native auto-compaction enabled. No monitored/background shell jobs, detached processes or recursive workers are supported.
 
+Add `.pi/fabric/` to the implementation repository's `.gitignore`. The worker's Fabric writes runtime state there (such as `mcp-cache.json`); if Git does not ignore it, it appears as a changed file in every checkpoint. `/pair doctor` warns when it is not ignored.
+
 ## 3. Enable and start manually
 
 Pair has no warming setting (a legacy `cacheWarming` key in `fabric-pair.json` is
 accepted and ignored). To keep both roles' prompt caches warm, set
-`"cacheWarming": "idle"` in Pi's `~/.pi/agent/settings.json`. That works for every
-model except Codex ones, which `/pair doctor` points out. Fabric's
+`"cacheWarming": "idle"` in Pi's `~/.pi/agent/settings.json`. That covers every
+model except Codex ones, which `/pair doctor` points out. Stock Pi 0.87.1 does not
+yet send the refreshes in a Pair session; see the reference's
+"Context, warming and cost" section. Fabric's
 `cache.hold` (Fabric 0.97.0 or newer; paid, explicit, time-bounded) is a separate
 option for Main.
 

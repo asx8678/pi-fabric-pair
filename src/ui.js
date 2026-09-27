@@ -84,9 +84,13 @@ function tokenLabel(tokens) {
 }
 /** @param {PairSummary['workers'][number]} worker @returns {string} */
 function nextAction(worker) {
+  if (worker.status === 'error' && /^EXIT_UNCONFIRMED/.test(worker.error || '')) return '/pair reconcile';
+  const held = ['paused', 'interrupted'].includes(worker.status) || ['paused', 'interrupted'].includes(worker.task?.status || '');
+  // A crashed or contained worker keeps its generation until an explicit stop; resume refuses before that.
+  // A stopped worker with a held task resumes directly: resume starts the process itself.
+  if (held) return worker.status === 'error' ? '/pair stop, then /pair resume' : '/pair resume';
   if (['stopped', 'not_started'].includes(worker.status) && !worker.pid) return !hasModel(worker) ? '/pair to set up' : worker.workspaceGit === false ? 'not a Git repo' : '/pair start';
-  if (['paused', 'interrupted'].includes(worker.status) || ['paused', 'interrupted'].includes(worker.task?.status || '')) return '/pair resume';
-  if (['attention', 'error'].includes(worker.status)) return /^EXIT_UNCONFIRMED/.test(worker.error || '') ? '/pair reconcile' : '/pair';
+  if (['attention', 'error'].includes(worker.status)) return '/pair';
   return '';
 }
 /** @param {PairSummary} summary @returns {string} */

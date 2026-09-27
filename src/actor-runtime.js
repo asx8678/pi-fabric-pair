@@ -149,7 +149,8 @@ function validateEntry(value, seen) {
       case 'thinking_level_change': requireValue(typeof entry.thinkingLevel === 'string' && THINKING.has(entry.thinkingLevel), 'Invalid thinking entry'); break;
       case 'compaction':
         requireValue(typeof entry.summary === 'string' && nonnegative(entry.tokensBefore), 'Invalid compaction entry');
-        requireValue(entry.firstKeptEntryId === entry.id || (text(entry.firstKeptEntryId) && seen.has(entry.firstKeptEntryId)), 'Broken compaction reference'); break;
+        // Pi keeps no earlier entry when none matches; Fabric's compactor writes '' when it summarises everything.
+        requireValue(entry.firstKeptEntryId === entry.id || entry.firstKeptEntryId === '' || (text(entry.firstKeptEntryId) && seen.has(entry.firstKeptEntryId)), 'Broken compaction reference'); break;
       case 'branch_summary': requireValue(typeof entry.summary === 'string' && text(entry.fromId) && seen.has(entry.fromId), 'Broken branch-summary reference'); break;
       case 'context_edit': {
         requireValue(text(entry.targetId) && seen.has(entry.targetId), 'Broken context-edit target');

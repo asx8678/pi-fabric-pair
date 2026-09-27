@@ -125,7 +125,7 @@ resume; staged model changes require finishing or cancelling the current task.
 Invalid configuration leaves the last valid settings in use.
 
 Cancel and stop do not undo file changes. Normal Main shutdown also stops owned
-workers. The [reference](docs/REFERENCE.md) covers pause, resume, staged settings,
+workers; `/new`, `/resume` or a fork asks first while the worker is running. The [reference](docs/REFERENCE.md) covers pause, resume, staged settings,
 and the remaining commands.
 
 ## Review you can inspect
@@ -175,7 +175,9 @@ before it runs, and never changes one Pi already knows. Pi stops 30 minutes afte
 session's last request. Pair never warms a Codex model, because Pi cannot cap that
 refresh; `/pair doctor` says when Main or the worker uses one. Fabric's `cache.hold` (Fabric 0.97.0 or newer, on a Pi with scoped
 warming) is a separate paid opt-in for Main. Pair holds no leases and never changes
-Pi's settings. Pair's inference budgets exclude Main usage and warming. See the
+Pi's settings. Pair's inference budgets exclude Main usage and warming. Stock Pi
+0.87.1 does not yet send these refreshes in a Pair session (its warmer stops once
+Pair's messages are in context); see the
 [cache reference](docs/REFERENCE.md#context-warming-and-cost).
 
 ## More details

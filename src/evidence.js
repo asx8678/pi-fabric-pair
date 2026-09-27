@@ -63,6 +63,10 @@ export async function git(cwd, args, options = {}) {
   assert(result.code === 0 && !result.truncated, `git ${args[0]} failed: ${bounded(result.stderr || result.stdout, 2000)}`);
   return result.stdout;
 }
+/** Whether Git ignores `relPath` in the repository at `cwd`, so review evidence leaves it out. @param {string} cwd @param {string} relPath */
+export async function gitIgnores(cwd, relPath) {
+  return (await runCommand('git', ['--no-pager', 'check-ignore', '-q', relPath], { cwd, maxBytes: 4096 })).code === 0;
+}
 /** @param {string} cwd @returns {Promise<string>} */
 export async function repositoryRoot(cwd) {
   try { return canonical((await git(cwd, ['rev-parse', '--show-toplevel'])).trim()); }

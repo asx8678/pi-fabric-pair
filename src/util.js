@@ -224,10 +224,11 @@ const ORPHAN_LOCK_MS = 60_000;
 /**
  * @param {string} dir
  * @param {Record<string, unknown>} owner
- * @param {{name?: string, conflict?: (owner: Record<string, unknown>) => string}} [options]
+ * @param {{name?: string, conflict?: (owner: Record<string, unknown>) => string, takeover?: (owner: Record<string, unknown>) => Promise<void>}} [options]
+ *   `takeover` runs before a dead owner's lock is removed and throws to keep it.
  * @returns {Promise<() => Promise<void>>}
  */
-export async function acquireLock(dir, owner, { name = '.owner-lock', conflict } = {}) {
+export async function acquireLock(dir, owner, { name = '.owner-lock', conflict, takeover } = {}) {
   await mkdirPrivate(dir);
   const lock = path.join(dir, name);
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -249,6 +250,7 @@ export async function acquireLock(dir, owner, { name = '.owner-lock', conflict }
       } else {
         assert(plain(previous) && typeof previous.pid === 'number', 'Invalid Pair owner lock: pid must be a number');
         assert(!await ownerAlive(previous), conflict ? conflict(previous) : `Pair session is already owned by process ${previous.pid}; never attach two controllers to one session.`);
+        await takeover?.(previous);
       }
       await fs.rm(lock, { recursive: true, force: true });
     }

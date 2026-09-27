@@ -38,7 +38,7 @@ export class DeliveryDeferred extends Error {
   /** @param {string} message */
   constructor(message) { super(message); this.name = 'DeliveryDeferred'; }
 }
-const REVIEW_RULES = 'Review rules: call pair_inspect on the checkpoint before approving; never approve failed configured checks or stale code; if anything is wrong or incomplete, pair_decide action "revise" with specific fixes; answer question reports with "answer"; do not edit the worker\'s code yourself while its task is active.';
+const REVIEW_RULES = 'Review rules: call pair_inspect without file on each report\'s checkpoint before approving (a file read alone does not count); never approve failed configured checks or stale code; if anything is wrong or incomplete, pair_decide action "revise" with specific fixes; answer question reports with "answer"; do not edit the worker\'s code yourself while its task is active.';
 const ENTRY = fileURLToPath(new URL('./extension.js', import.meta.url));
 /** @param {{pid: number, file: string}[]} hosts @returns {string} */
 function residentHostText(hosts) {
@@ -234,6 +234,17 @@ export class PairController extends EventEmitter {
     this.intents.set(id, this.intent(id) + 1);
     const h = this.handles.get(id);
     h?.revoke(reason); if (h) this.runtimeData.get(h)?.verificationAbort?.abort();
+  }
+  /**
+   * Revoke and start aborting the current run at once, as report acceptance does. A tool call the worker was
+   * already starting then counts as the tail of this abort, not as foreign activity that faults and kills the
+   * worker; the later containment joins the same abort.
+   * @param {string} id @param {string} reason
+   */
+  revokeAndAbort(id, reason) {
+    this.revoke(id, reason);
+    const h = this.handles.get(id);
+    if (h?.ready && !h.closed) void h.abortCurrent(reason).catch(() => {}); // a confirmed exit needs no RPC abort
   }
   /** @param {PiRuntime} runtime @param {Activation | null} activation @returns {boolean} */
   runtimeCurrent(runtime, activation) {
@@ -488,7 +499,14 @@ export class PairController extends EventEmitter {
     const base = this.storageDir ? path.join(path.dirname(this.storageDir), 'repositories') : path.join(agentDir(), 'fabric-pair', 'repositories');
     const release = await acquireLock(path.join(base, digest(repoRoot).slice(0, 32)), { repoRoot, ownerSession: this.ownerSession, stateDir: this.dir }, {
       name: '.writer-lock',
-      conflict: owner => `Another Pair session (process ${owner.pid}${typeof owner.ownerSession === 'string' ? `, Main session ${owner.ownerSession}` : ''}) has an unresolved task writing ${repoRoot}. Finish or cancel it there first: two workers must not write one repository.`
+      conflict: owner => `Another Pair session (process ${owner.pid}${typeof owner.ownerSession === 'string' ? `, Main session ${owner.ownerSession}` : ''}) has an unresolved task writing ${repoRoot}. Finish or cancel it there first: two workers must not write one repository.`,
+      // A Main that crashed leaves its lock behind with its task still unresolved in its own state.
+      takeover: async owner => {
+        if (typeof owner.stateDir !== 'string' || owner.stateDir === this.dir) return;
+        const state = /** @type {{workers?: Record<string, WorkerRecord>} | null} */ (await readJSON(path.join(owner.stateDir, 'state.json'), null).catch(() => null));
+        const held = Object.values(state?.workers || {}).some(r => activeTask(r) && r.repoRoot === repoRoot);
+        assert(!held, `Main session ${owner.ownerSession} ended with an unresolved Pair task writing ${repoRoot}. Reopen it (pi --session ${owner.ownerSession}) and resume or cancel the task with /pair first: two workers must not write one repository. To abandon that task instead, delete ${owner.stateDir}.`);
+      }
     });
     this.repoLocks.set(repoRoot, release);
   }
@@ -632,9 +650,9 @@ export class PairController extends EventEmitter {
           const usage = normalizedUsage(event.message.usage);
           if (usage) { record.usage = addUsage(record.usage, usage); if (task && activeTask(record)) task.usage = addUsage(task.usage, usage); changed = true; }
         }
-        if (event.type === 'notify' && event.error && !event.error.startsWith('fabric-pair:report:')) {
-          const level = event.notifyType === 'warning' || event.notifyType === 'error' ? event.notifyType : 'info';
-          this.notifyUser(`[${id}] ${bounded(event.error, 2000)}`, level);
+        // Info notices from the worker's extensions (Fabric's entropy runs, Fovea's clean checks) are its own chatter.
+        if (event.type === 'notify' && event.error && (event.notifyType === 'warning' || event.notifyType === 'error')) {
+          this.notifyUser(`[${id}] ${bounded(event.error, 2000)}`, event.notifyType);
         }
       }
     }
@@ -686,7 +704,7 @@ export class PairController extends EventEmitter {
       data.failureHandled = true;
       const control = await this.interrupt(id, h.fault || (h.closed ? 'Worker exited; conversation retained. Explicitly stop/reconcile before resuming.' : 'Configuration changed; current authority is held.'));
       jobs.push(() => this.contain(control, 'Runtime fault/configuration drift', true));
-      this.notifyUser(`[${id}] ${r.error}`, 'error');
+      this.notifyUser(`[${id}] ${r.error}. The task is held and the conversation kept: inspect the changes, then /pair stop ${id} and /pair resume ${id}.`, 'error');
       return changed;
     }
     let control = this.control(id);
@@ -778,7 +796,7 @@ export class PairController extends EventEmitter {
         ? `Step time limit reached (${Math.round(t.limits.activeStepTimeoutMs / 60000)} min without a report)` : null;
       const limit = limitExceeded(t, t.limits) || stepLimit;
       if (limit) {
-        this.revoke(id, limit); const control = await this.pauseUnlocked(id, limit); jobs.push(() => this.contain(control, limit, false));
+        this.revokeAndAbort(id, limit); const control = await this.pauseUnlocked(id, limit); jobs.push(() => this.contain(control, limit, false));
         this.notifyUser(`[${id}] ${limit}; the worker was paused.`, 'warning'); changed = true;
       } else if (t.dispatchSettleSequence !== undefined && latchSequence > t.dispatchSettleSequence) {
         const reason = retainedReport ? 'Worker ended without an admissible current pair_report. Inspect the retained latch/report; no automatic recovery is authorized.' : 'Worker ended without pair_report. Inspect its transcript, then explicitly resume or cancel.';
@@ -1394,7 +1412,7 @@ export class PairController extends EventEmitter {
   }
   /** @param {string} id @param {string} [reason] */
   pause(id, reason = 'Paused by the user') {
-    this.revoke(id, reason); const intent = this.intent(id);
+    this.revokeAndAbort(id, reason); const intent = this.intent(id);
     return this.transaction(() => this.intent(id) === intent ? this.pauseUnlocked(id, reason) : null).then(async control => { if (control) await this.contain(control, reason, false); });
   }
   /** @param {string} id @param {string} reason @returns {Promise<Control>} */
@@ -1455,7 +1473,7 @@ export class PairController extends EventEmitter {
   }
   /** @param {string} id @param {string} [reason] */
   cancel(id, reason = 'Cancelled by the user') {
-    this.revoke(id, reason); const intent = this.intent(id);
+    this.revokeAndAbort(id, reason); const intent = this.intent(id);
     return this.transaction(() => this.intent(id) === intent ? this.cancelUnlocked(id, reason) : null).then(async control => {
       if (!control) return { workerId: id, status: 'superseded' };
       await this.contain(control, reason, false);

@@ -43,7 +43,13 @@ Commands with an optional worker ID use the first configured worker by default.
 | `/pair indicator minimal` / `compact` / `off` | Choose what Pair shows: the status line plus the current plan step (`minimal`, the default), the status line only (`compact`), or nothing (`off`). |
 
 Cancellation and stopping do not undo files already written. Normal Main shutdown
-also stops owned workers.
+also stops owned workers, and so does leaving the Main session: `/new`, `/resume`
+or a fork while the worker is running asks for confirmation first (in the TUI),
+because the task is interrupted until you return and run `/pair resume`.
+
+Only the worker's warnings and errors appear on Main's screen; info-level notices
+from extensions inside the worker (such as Fabric's background optimization) are
+left out.
 
 ### Status line
 
@@ -364,6 +370,17 @@ stops 30 minutes after the session's last request. With `off` or Pi's default
 `streaming`, the hook never fires for an idle session. `/pair doctor` says when a
 role uses a Codex model.
 
+**Pi 0.87.1 does not run these refreshes with Pair.** Live checks found that Pi's
+idle warmer stops, before its first refresh, in any session that holds a custom
+message (Pair's guide, task-state and report messages) or a compaction summary
+while an extension handles `agent_before_settle` (Pair, Fabric and Fovea do). Each
+settle rebuilds those messages as new objects, and Pi reads that as a changed
+conversation. So Pair's decisions above take effect only on a Pi that compares
+them by value. With that one-line change in a scratch copy of Pi, the worker's
+first request after a 270-second review read 99% from cache instead of 2%, and a
+143k-token Main got its refresh while the worker ran. Until Pi fixes it, each
+role's cache lasts only as long as the provider keeps it.
+
 Pi prices a refresh from the last assistant message on the branch. A report made
 through `fabric_exec` ends the worker's run on an aborted request with no usage, so
 Pi sees a zero-token prompt; when Pi's `missCost` is 0, Pair prices the role's last
@@ -391,11 +408,18 @@ what processes can do.
   and to Main.
 - **One writer per repository.** A repository lock stops a second Pair session
   (another Main session or process) from dispatching into a repository while a
-  task there is unresolved. Unattended operation is not qualified.
+  task there is unresolved, also after the owning Main crashed: reopen that
+  session (`pi --session <id>`) and resume or cancel the task, or delete its
+  state folder (named in the refusal) to abandon it. Unattended operation is
+  not qualified.
 - **The supported worker is a writer.** Read-only workers with generic Fabric,
   background/monitored shell jobs, and recursive workers are rejected.
 - **Uncertain state stays held.** After Main crashes, Pair proves the old worker
   process exited when it starts again; if it cannot, `/pair reconcile` resolves it.
+  If only the worker crashes while Main runs, Pair holds the task and says so;
+  run `/pair stop` (it confirms the exit), then `/pair resume`: the same
+  conversation continues with an instruction to check the workspace before
+  redoing anything. Verified with a real killed worker.
   Missing or corrupt histories need explicit reconciliation. Pair does not silently
   replace a lost conversation. Retained worker sessions of any size are verified
   incrementally.
