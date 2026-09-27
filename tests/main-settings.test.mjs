@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { registerMain } from '../src/main.js';
 import { configPaths } from '../src/config.js';
 
-async function fixture(run, { global, project = { version: 2, autoStart: false }, trusted = true, mode = 'rpc' } = {}) {
+async function fixture(run, { global, project = { version: 2, autoStart: false }, trusted = true, mode = 'rpc', fabric } = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-settings-main-'));
   const cwd = path.join(base, 'repo'), home = path.join(base, 'agent');
   await fs.mkdir(path.join(cwd, '.pi'), { recursive: true }); await fs.mkdir(home);
@@ -29,7 +29,14 @@ async function fixture(run, { global, project = { version: 2, autoStart: false }
     }, setStatus: () => {}, setWidget: () => {}, notify: (message, level) => notices.push({ message, level }), setWidget: (key, component) => widgets.push({ key, component }),
     confirm: async (...args) => { confirmations.push(args); return confirmed; } }
   };
-  const pi = { on: (name, fn) => events.set(name, fn), registerCommand: (name, command) => commands.set(name, command), registerTool: tool => tools.set(tool.name, tool), getAllTools: () => [], getCommands: () => [], sendMessage: (...args) => messages.push(args), sendUserMessage: (...args) => messages.push(args) };
+  const fabricTools = [];
+  if (fabric) {
+    const root = path.join(base, 'fabric-package');
+    await fs.mkdir(path.join(root, 'dist'), { recursive: true });
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'pi-fabric', version: fabric }));
+    fabricTools.push({ name: 'fabric_exec', sourceInfo: { path: path.join(root, 'dist', 'index.js') } });
+  }
+  const pi = { on: (name, fn) => events.set(name, fn), registerCommand: (name, command) => commands.set(name, command), registerTool: tool => tools.set(tool.name, tool), getAllTools: () => fabricTools, getCommands: () => [], sendMessage: (...args) => messages.push(args), sendUserMessage: (...args) => messages.push(args) };
   const main = registerMain(pi);
   try {
     await events.get('session_start')({}, ctx);
@@ -339,3 +346,19 @@ test('registered Main message hook preserves measured history through abort plac
   assert.deepEqual(f.messages, [], 'observation hooks do not request model turns');
 }));
 
+
+test('Main is pointed at cache.* only when the loaded Fabric has the cache provider', async () => {
+  const guide = async fabric => {
+    let content;
+    await fixture(async f => { content = (await f.events.get('before_agent_start')({ systemPrompt: 'Fixture' }, f.ctx))?.message?.content; },
+      { project: { version: 2, enabled: true, autoStart: false }, fabric });
+    return content;
+  };
+  const old = await guide('0.96.3');
+  assert.match(old, /This Fabric \(0\.96\.3\) has no cache provider \(added in 0\.97\.0\)/);
+  assert.doesNotMatch(old, /inspect warming with cache\.status\(\)/);
+  const current = await guide('0.97.0');
+  assert.match(current, /Fabric's cache provider is loaded, but this Pi has no scoped warming API/, 'stock Pi 0.87.1 has no acquireCacheWarming');
+  assert.match(await guide(undefined), /this version is unknown/, 'no readable Fabric version is stated as unknown');
+  for (const text of [old, current]) assert.match(text, /Never simulate warming/);
+});

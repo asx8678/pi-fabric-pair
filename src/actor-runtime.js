@@ -299,7 +299,7 @@ export class PiRuntime {
   /** @type {Map<string, number>} */ #compactions = new Map();
   /** @type {VerifiedHistory | null} */ #history = null;
   /** @type {string | null} */ #leaf = null;
-  #observationBytes = 0; #dialogBytes = 0; #displayed = false; #wakeQueued = false;
+  #observationBytes = 0; #dialogBytes = 0; #displayed = false; #wakeQueued = false; #appended = 0;
   #settledSequence = 0; #settledAt = 0; #serial = 0; #scope = 0; #revision = 0;
   #ready = false; #started = false; #provenUnspawned = false; #closing = false; #revokedStartup = false;
   #streaming = false; #unsettled = false; #retrying = false; #summaryRetrying = false; #overflowRecovery = false;
@@ -539,9 +539,21 @@ export class PiRuntime {
 
   /** @param {Activation | null} activation */
   async #verifyRetainedHistory(activation) {
-    requireValue(this.#history, 'Bound session history is unavailable');
-    const extended = await this.#extend(this.#history, activation); this.#assertCurrent(activation);
-    this.#history = extended.history;
+    for (let attempt = 1; ; attempt++) {
+      requireValue(this.#history, 'Bound session history is unavailable');
+      const appended = this.#appended;
+      try {
+        const extended = await this.#extend(this.#history, activation); this.#assertCurrent(activation);
+        this.#history = extended.history; return;
+      } catch (error) {
+        // An idle session still grows: a native cache-warm refresh appends its usage entry. If one
+        // landed mid-check, check again; any other difference still fails. A state round trip first
+        // delivers every entry_appended Pi emitted before it.
+        if (attempt >= 3) throw error;
+        await this.#readState(activation);
+        if (this.#appended === appended) throw error;
+      }
+    }
   }
 
   /** @param {ActivationIdentity} identity @returns {Activation} */
@@ -694,6 +706,7 @@ export class PiRuntime {
         observation.message = { role: 'assistant', usage: usageOf(message.usage) }; break;
       }
       case 'turn_start': this.#idleKnown = false; break;
+      case 'entry_appended': this.#appended++; return;
       case 'thinking_level_changed': if (this.ready && event.level !== this.#options.spec.effort) this.#hold(new Error('Worker thinking level drifted')); return;
       default: if (unauthorizedActivity) activityError(); return; // deltas/args/results never retained
     }

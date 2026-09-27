@@ -5,7 +5,7 @@ Prepared 2026-09-27. **Status:** Phase 1 items 1.1–1.5 are implemented in Pair
 | Component | Version inspected |
 |---|---|
 | Pair | commit `61981db` plus the uncommitted cache-warming removal |
-| Fabric | 0.97.0, commit `9bf9503`, in `../pi-fabric` |
+| Fabric | 0.97.0, commit `9bf9503`, in `../pi-fabric`; installed 0.97.0 since 2026-09-27 (was 0.96.3) |
 | Fovea | 0.31.1, commit `3e9d89f`, in `../pi-fovea` |
 | Pi | 0.87.1 installed; reference source `b313731b8` |
 
@@ -180,6 +180,8 @@ Starts after U2 ships.
   - An actor option to keep its Pi process alive for a bounded idle period between activations.
   - A way for the creating host to bind extra environment or extension arguments to an actor's child, so a host extension can assign it a role.
   - Ideally, a documented execution-backend seam.
+  - `cwd` on actor definitions: actors run in the creator's directory today (Fabric's `docs/agents.md`), and a Pair worker may use its own workspace.
+  - A cross-process `cache.hold` target, or a host API for it: `target` is only the calling session, so Main's Fabric cannot warm the worker. Pair uses Pi's native `cache_warming_decision` for the worker until then.
 - **U3 Fovea: external-writer sync** (only if 1.6 confirms the extra turns). Ask for a way to suppress or tag sync steers caused by a known external writer, or a documented yield protocol. Fovea already yields to pi-queue-steer through a global.
 - **Existing draft.** File `../fabric-issue-mesh-highwater.md`.
 

@@ -109,7 +109,12 @@ and are retrieved explicitly.
     handler. Pi defers that turn and runs it in order with anything else queued at
     settlement, including a prompt you submit meanwhile.
   - *Main is idle*: the report starts a Main turn. Pair re-checks that Main is
-    idle in the same tick as the send. If your prompt still collides with that
+    idle in the same tick as the send. It appends the report, then starts the turn
+    with a fixed Pair prompt ("Pair: a worker report has arrived …") through Pi's
+    normal prompt path, so `before_agent_start` runs as on your own turns: Fabric's
+    system-prompt section, Fovea's sync and Pair's guide all apply, and the cached
+    prompt prefix matches. A turn started by a custom message alone skips
+    `before_agent_start`, so it would lack Fabric's section. If your prompt still collides with that
     turn (another extension's input handler was busy), Pair takes over your
     prompt, stops the report run, and sends your message next as a normal
     prompt, so it is never rejected or lost.
@@ -165,7 +170,8 @@ Inspections pin the branch they actually read: the branch is captured before
 the first await and re-verified at transaction admission and after the
 asynchronous evidence read, so an inspection crossing navigation never
 acknowledges the newer branch. Omitting `pair_inspect`'s optional report ID pins
-the actual current report. Missing/legacy branch metadata authorizes only while
+the actual current report. Its optional `taskId`, when given, must be the current
+task's. Missing/legacy branch metadata authorizes only while
 no navigation has ever occurred; it never implies a current-context inspection
 afterwards. A paused question/review/blocker survives repeated pauses and
 controller reload, and resume restores the waiting decision instead of rotating
@@ -321,7 +327,52 @@ refreshes, 30-minute maximum, no auto-renew) and `cache.release({id})` ends it.
 Pair requests no leases; a legacy `cacheWarming` key in `fabric-pair.json` is
 accepted and ignored. Native eligibility, economics and safety windows remain
 authoritative; holding a lease does not prove a refresh occurred or guarantee a
-cache hit. See Fabric's `docs/prompt-cache.md`.
+cache hit. See Fabric's `docs/prompt-cache.md`. With an older Fabric, Main's guide
+says warming is unavailable instead of pointing at `cache.*`, and `/pair doctor`
+notes the missing provider. Stock Pi 0.87.1 has no scoped warming API
+(`acquireCacheWarming`), so `cache.hold` returns `unsupported` there even on
+Fabric 0.97.0; Main's guide and `/pair doctor` say so.
+
+**Native warming for both roles.** `cache.hold` warms only the session that calls
+it, and the worker is idle exactly while Main reviews, so Fabric cannot warm it.
+Pi's native warmer can warm either role: with `"cacheWarming": "idle"` in
+`~/.pi/agent/settings.json` (Pi reads it from global settings only), Pi keeps
+refreshing a settled session's prompt cache while it expects the savings to be
+worth it, assuming a 15% chance that another request follows. Pair knows the next
+request is certain in two places and answers Pi's `cache_warming_decision` with
+`warm` there when `missCost - warmCost` is at least $0.05 (Pi's own rule with that
+request treated as certain):
+
+- **Main**, while the worker works or its finished report waits to be delivered
+  (automatic delivery on): the report starts Main's next turn.
+- **Worker**, while a checkpoint, question or blocker waits for Main: Main's reply
+  continues the same worker session. Final reviews and finished tasks are left to Pi.
+
+Pair never stops a refresh Pi chose, never changes the setting, and never asks Pi
+to warm a Codex model (`openai-codex-responses`): Pi 0.87.1 sends that API no output
+cap, and the ChatGPT backend accepts no cache-lifetime option either.
+
+Pi warms only models with a `promptCache` lifetime, and Pi 0.87.1 ships one only for
+Anthropic models. So that warming covers every model, each role gives the model
+about to run a 240-second lifetime (`DEFAULT_CACHE_LIFETIME_S`) when Pi knows none,
+at `before_agent_start`. Provider caches mostly fade after 3–5 idle minutes. A
+lifetime Pi already knows, built in or from `modelOverrides` in
+`~/.pi/agent/models.json`, is never changed, so that is how to set a different
+value for one model. Codex models get none. Pi refreshes at 90% of the lifetime and
+stops 30 minutes after the session's last request. With `off` or Pi's default
+`streaming`, the hook never fires for an idle session. `/pair doctor` says when a
+role uses a Codex model.
+
+Pi prices a refresh from the last assistant message on the branch. A report made
+through `fabric_exec` ends the worker's run on an aborted request with no usage, so
+Pi sees a zero-token prompt; when Pi's `missCost` is 0, Pair prices the role's last
+measured prompt with the model's rates and tiers instead. Pi's own status line may
+still read "cache economics unavailable" while refreshes continue; the session's
+`cache_warm` usage entries show what actually ran.
+
+A refresh appends a `usage` entry to the session. The worker's history check before
+each work prompt checks again (at most twice) when Pi reported such an append
+mid-check; any other difference still holds the task.
 
 Pair's reported inference budgets exclude Main usage, Fabric cache warming, external
 tools, and unknown prices. Use provider-side controls for an overall spending cap.

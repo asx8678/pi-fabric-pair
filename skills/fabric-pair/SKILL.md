@@ -148,12 +148,18 @@ outcomes before doing more work; never replay mutations blindly.
 
 Do not send status messages or invoke Main merely to keep a cache warm. Native Pi
 owns scheduling, TTL/cost eligibility and safety windows. Prompt-cache warming is
-Fabric's `cache` provider, not Pair's: `cache.status()` observes the local session,
+Fabric's `cache` provider (Fabric 0.97.0 or newer), not Pair's: `cache.status()` observes the local session,
 `cache.hold({durationMs})` is an explicit paid opt-in bounded to 30 minutes, and
-`cache.release({id})` ends it. Pair requests no leases and has no warming setting.
+`cache.release({id})` ends it; on a Pi without scoped warming (stock 0.87.1) it
+returns unsupported, so do not offer it there. Pair requests no leases and has no
+warming setting. The worker cannot be warmed through `cache.hold`; when the user
+has chosen Pi's native `idle` warming, Pair keeps your refreshes going while the
+worker works and the worker's while its report waits for you (any model except
+Codex ones).
 Leases are not implementation authority, cache-residency proof or evidence that
 refresh usage occurred. Old SDKs have no fallback: never issue warm prompts, change
 global settings, invent TTLs or reset/restart work to keep a cache hot. Fabric
-refresh costs are outside Pair inference-only budgets.
+refresh costs are outside Pair inference-only budgets. On an older Fabric there is no
+`cache.*`; Main's guide and `/pair doctor` say so, and warming is unavailable.
 Native SDK support and Pair deployment must be reviewed/installed separately;
 source edits are not live. Minimal/compact/off indicators remain human UI only.

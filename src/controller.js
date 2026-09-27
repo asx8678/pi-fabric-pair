@@ -7,7 +7,7 @@ import { PiRpc, isRpcRecord } from './rpc.js';
 import { PiRuntime } from './actor-runtime.js';
 import { Evidence, repositoryRoot, verifyConfigured } from './evidence.js';
 import { validateConfig } from './config.js';
-import { excludedExtension, meshRootFor, preflightNativeProfile } from './native.js';
+import { excludedExtension, liveResidentHosts, meshRootFor, preflightNativeProfile } from './native.js';
 import { assertReportSize, validateDecision, validateDispatch, validateReport } from './schema.js';
 import { incrementCounter, migrateStoredState, STATE_VERSION, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateStoredState } from './contracts.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
@@ -40,6 +40,10 @@ export class DeliveryDeferred extends Error {
 }
 const REVIEW_RULES = 'Review rules: call pair_inspect on the checkpoint before approving; never approve failed configured checks or stale code; if anything is wrong or incomplete, pair_decide action "revise" with specific fixes; answer question reports with "answer"; do not edit the worker\'s code yourself while its task is active.';
 const ENTRY = fileURLToPath(new URL('./extension.js', import.meta.url));
+/** @param {{pid: number, file: string}[]} hosts @returns {string} */
+function residentHostText(hosts) {
+  return `a Fabric resident host started from the worker's private mesh is still running (${hosts.map(h => `pid ${h.pid}, ${h.file}`).join('; ')}). Pair does not signal it: check the process with ps and stop it yourself`;
+}
 /** @param {{policy: object}} task @param {{changed: string[]}} checkpoint @returns {string | null} */
 function stepTooLarge(task, checkpoint) {
   const policy = /** @type {{mode?: unknown, maxStepFiles?: unknown}} */ (task.policy);
@@ -862,6 +866,8 @@ export class PairController extends EventEmitter {
     try {
       check(); await data.acceptDrain?.catch(() => {}); check();
       await h.waitIdle(); check(); // a settled event alone is not a fresh native idle observation
+      const hosts = await liveResidentHosts(meshRootFor(h.dir)); check();
+      assert(!hosts.length, residentHostText(hosts));
       const r = control.record, evidence = this.evidence, checksDir = path.join(this.dir, 'checks', t.id, incoming.reportId);
       let snapshot = await evidence.capture(r.repoRoot); check();
       const signal = AbortSignal.any([this.operationAbort.signal, abort.signal]);
@@ -1304,13 +1310,13 @@ export class PairController extends EventEmitter {
     if (t.status === 'completed' && input.action === 'approve') this.notifyUser(`Pair task completed: ${String(t.objective).slice(0, 90)} · worker retained, ready for the next dispatch.`, 'info');
     return { taskId: t.id, status: t.status, stepId: t.steps[t.stepIndex].id, sessionRetained: true, ...(next.work ? { message: 'Decision recorded; the worker continues in the background. Do not wait or poll.' } : {}) };
   }
-  /** @param {string} id @param {string} [reportId] @param {string} [file] */
-  async inspect(id, reportId, file) {
+  /** @param {string} id @param {string} [reportId] @param {string} [file] @param {string} [taskId] */
+  async inspect(id, reportId, file, taskId) {
     const branch = this.state.branch ?? 0;
     const reserved = await this.transaction(() => {
       assert((this.state.branch ?? 0) === branch, 'BRANCH_STALE: the conversation branch changed before this inspection; re-inspect on the current branch');
       const r = this.record(id), report = r.task?.report;
-      assert(report && (!reportId || report.reportId === reportId), 'No matching current checkpoint; archived evidence remains in Pair state');
+      assert(report && (!reportId || report.reportId === reportId) && (!taskId || r.task?.id === taskId), 'No matching current checkpoint; archived evidence remains in Pair state');
       return { control: this.control(id), report };
     });
     const evidence = await this.evidence.inspect(reserved.report.checkpoint.path, file);
@@ -1492,6 +1498,10 @@ export class PairController extends EventEmitter {
       await this.persist();
     }); } finally { if (data) data.pendingControls--; }
     if (failure) throw failure;
+    try {
+      const hosts = await liveResidentHosts(meshRootFor(this.workerDir(id)));
+      if (hosts.length) this.notifyUser(`[${id}] Worker stopped, but ${residentHostText(hosts)}.`, 'warning');
+    } catch (error) { this.notifyUser(`[${id}] Could not check for a Fabric resident host: ${briefError(error)}`, 'warning'); }
   }
   /** @param {string} id */
   async reset(id) {

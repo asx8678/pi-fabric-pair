@@ -4,6 +4,7 @@ import { assert, briefError, cleanText, clone } from './util.js';
 import { INDICATORS, validateConfig } from './config.js';
 import { EFFORT_LEVELS } from './contracts.js';
 import { validateUsageObservation } from './observations.js';
+import { DEFAULT_CACHE_LIFETIME_S, FABRIC_CACHE_VERSION } from './native.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} UIContext */
 /** @typedef {Readonly<ReturnType<import('./controller.js').PairController['summary']>>} PairSummary */
@@ -320,7 +321,7 @@ export function statusText(summary, native = null, now = Date.now()) {
   lines.push('## Details', row('Session', summary.ownerSession));
   if (summary.mainPhase) lines.push(row('Main phase', `${summary.mainPhase.status} (explicit, non-authorizing)${summary.mainPhase.current ? '' : ' · stale binding: reports stay retained'}`));
   lines.push(row('Delivery', summary.autoDeliverReports === false ? 'automatic delivery off' : 'automatic delivery on'),
-    row('Warming', `Fabric cache.status/cache.hold (Pair holds no leases)${native ? ` · native ${native.cacheWarming}` : ''}`));
+    row('Warming', `Pi's native idle refreshes, kept for Main while the worker works and for the worker while its report waits (every model except Codex; ${DEFAULT_CACHE_LIFETIME_S} s lifetime where Pi knows none)${native ? ` · native ${native.cacheWarming}${native.cacheWarming === 'idle' ? '' : ' (not warmed)'}` : ''} · Main can also use Fabric cache.hold (Fabric ${FABRIC_CACHE_VERSION}+ on a Pi with scoped warming) · Pair holds no leases`));
   for (const w of summary.workers) {
     lines.push(row(w.id, `PID ${w.pid || 'not running'} · session ${w.sessionId || 'not created'}`), row('Workspace', `${w.cwd}${w.workspaceGit === false ? ' · not a Git repository' : ''}`));
     if (w.usage) lines.push(row('Usage', `${w.usage.requests} responses · reported $${w.usage.reportedCost.toFixed(4)} · ${w.usage.unknownCostRequests} with unknown price (inference only)`));

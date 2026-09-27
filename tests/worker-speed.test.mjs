@@ -173,3 +173,19 @@ test('status and label output report streaming throughput with an explicit unkno
   assert.doesNotMatch(text, /ago|turns|elapsed/, 'no age, turn-count or elapsed text anywhere');
   assert.ok(text.includes('  STALE: no recent worker activity; inspect the transcript or cancel\n'), 'a plain stale warning remains without a duration');
 });
+
+test('a Fabric provider result that leaves an actor running is a detached effect', () => fixture(async f => {
+  const proxy = ref => ({ toolName: ref, toolCallId: `fabric_${ref}`, input: {}, isError: false, content: [{ type: 'text', text: '{}' }],
+    details: { kind: 'pi-fabric.tool-result-proxy.v1', ref, result: { id: 'actor-1' } } });
+  assert.equal(await f.emit('tool_result', proxy('mesh.get')), undefined, 'ordinary provider results pass through');
+  assert.equal(f.aborts(), 0);
+  const blocked = await f.emit('tool_result', proxy('agents.create'));
+  assert.equal(blocked.isError, true, 'the nested Fabric call fails');
+  assert.match(blocked.content[0].text, /^PAIR_DETACHED_EFFECT: Fabric agents\.create /);
+  assert.equal(f.aborts(), 1);
+  const effect = (await f.packet()).detachedEffect;
+  assert.deepEqual({ toolName: effect.toolName, toolCallId: effect.toolCallId, pid: effect.pid }, { toolName: 'agents.create', toolCallId: 'fabric_agents.create', pid: null });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(f.shutdowns(), 1, 'the worker shuts down so the human can reconcile');
+  assert.equal(await f.emit('tool_result', { ...proxy('agents.spawn'), isError: true }), undefined, 'a failed call left nothing running');
+}));

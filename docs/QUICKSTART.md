@@ -47,8 +47,12 @@ If Main and Worker share this profile, these settings affect both, because Fabri
 
 ## 3. Enable and start manually
 
-Prompt-cache warming is Fabric's `cache.hold` (paid, explicit, time-bounded);
-Pair has no warming setting. A legacy `cacheWarming` key is accepted and ignored.
+Pair has no warming setting (a legacy `cacheWarming` key in `fabric-pair.json` is
+accepted and ignored). To keep both roles' prompt caches warm, set
+`"cacheWarming": "idle"` in Pi's `~/.pi/agent/settings.json`. That works for every
+model except Codex ones, which `/pair doctor` points out. Fabric's
+`cache.hold` (Fabric 0.97.0 or newer; paid, explicit, time-bounded) is a separate
+option for Main.
 
 Open `/pair settings` and set:
 

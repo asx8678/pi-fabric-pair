@@ -301,6 +301,12 @@
           "minLength": 1,
           "maxLength": 80
         },
+        "taskId": {
+          "type": "string",
+          "description": "Optional; must be the current task ID",
+          "minLength": 1,
+          "maxLength": 80
+        },
         "reportId": {
           "type": "string",
           "description": "Report ID; omit for latest",

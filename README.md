@@ -166,9 +166,16 @@ The status line's **cache** reading (for example `cache M 99% W 100%`) shows the
 share of measured input read from provider cache on each role's last request. The hero artwork's 99-100% values are examples;
 actual results vary.
 
-Prompt-cache warming is Fabric's `cache.status` / `cache.hold` provider, an
-explicit paid opt-in; Pair holds no leases of its own. Pair's inference budgets
-exclude Main usage and Fabric warming. See the
+Both roles can use Pi's native cache warmer. With `"cacheWarming": "idle"` in
+Pi's global settings, Pair keeps Main's cache warm while the worker works and the
+worker's cache warm while its report waits for Main, using Pi's own savings rule.
+This works for every model: Pi warms only models it knows a cache lifetime for
+(built in: Anthropic only), so Pair gives any other model a 4-minute lifetime
+before it runs, and never changes one Pi already knows. Pi stops 30 minutes after a
+session's last request. Pair never warms a Codex model, because Pi cannot cap that
+refresh; `/pair doctor` says when Main or the worker uses one. Fabric's `cache.hold` (Fabric 0.97.0 or newer, on a Pi with scoped
+warming) is a separate paid opt-in for Main. Pair holds no leases and never changes
+Pi's settings. Pair's inference budgets exclude Main usage and warming. See the
 [cache reference](docs/REFERENCE.md#context-warming-and-cost).
 
 ## More details

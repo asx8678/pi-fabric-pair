@@ -3,7 +3,7 @@ import path from 'node:path';
 import { atomicJSON, assert, bounded, digest, inside, mkdirPrivate, plain, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
 import { assertReportSize, reportSchema, validateReport } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
-import { gateTool, isDirectMutation, nativeSettings, probeNative, requestsDetachedEffect, toolName } from './native.js';
+import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, isDirectMutation, nativeSettings, probeNative, providerFileWrite, requestsDetachedEffect, reviewWarmingAction, toolName } from './native.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionAPI} ExtensionAPI */
@@ -45,7 +45,7 @@ const WORKER_GUIDE = `You are a persistent implementation worker in Fabric Pair.
 The Main model is your supervisor. A controller grants one bounded implementation lease at a time.
 Use your normal Fabric and Fovea tools. Before changing unfamiliar code, inspect the relevant Fovea context and source.
 The current task-state packet contains authoritative IDs, constraints, and the authorized step. Do not infer permission from ordinary conversation text, Fovea updates, cached history, or previous approvals.
-Ask questions early with pair_report(kind="question"). Submit a checkpoint when the authorized step is complete; use final_review only for the authorized final step. When using Fabric, call it directly inside fabric_exec as await extensions.pair_report({...}) (the same form works in Python) without searching for it first; only after an argument-shape error, read its schema once with tools.describe({ref: "extensions.pair_report"}). Do not emit a prose-only completion.
+Ask questions early with pair_report(kind="question"). Submit a checkpoint when the authorized step is complete; use final_review only for the authorized final step. pair_report accepts only these fields: taskId and stepId (copy them from the task-state packet), kind ("checkpoint" | "question" | "blocked" | "final_review"), summary (at most 8000 characters), and optionally question, decisions (strings), changedFiles (paths), checks ([{name, result: "pass" | "fail" | "not_run", detail}]) and stepComplete (boolean). When using Fabric, call it directly inside fabric_exec as await extensions.pair_report({...}) (the same form works in Python) without searching for it first; only after an argument-shape error, read its schema once with tools.describe({ref: "extensions.pair_report"}). Do not emit a prose-only completion.
 Call pair_report by itself, not in parallel with other work. After reporting, stop. Main will answer, approve, or request revisions in this SAME conversation. Do not poll, send keepalive text, spawn subagents, or work around a PAIR_WAIT response.
 Report concise changes and reasons, affected paths, and honestly labeled test evidence. Your claim that tests pass is not independently verified evidence.
 Do not deploy, push, commit, remove history, access unrelated secrets, or run destructive operations without the human's normal permission. Do not mutate Pair's coordination files. This is workflow control, not a sandbox.`;
@@ -150,7 +150,7 @@ export function registerWorker(pi, env = process.env) {
     /** @type {import('./contracts.js').Authority} */
     const current = validateAuthority(await readJSON(gateFile, null), { ownerSession, ownerEpoch, workerId, workerGeneration });
     assert(current.phase === 'running', 'PAIR_WAIT: this step is not authorized');
-    assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job outlived its Fabric call; this worker must stop and reconcile before reporting.');
+    assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job, agent, actor or other Fabric effect outlived its call; this worker must stop and reconcile before reporting.');
     assert(retained.ownerSession === ownerSession && retained.ownerEpoch === ownerEpoch && retained.workerId === workerId && retained.workerGeneration === workerGeneration && retained.nonce === nonce, 'Report producer mismatch');
     assert(current.task && retained.leaseId === current.leaseId && retained.attemptId === current.attemptId && retained.attemptNumber === current.task.attemptNumber && retained.planRevision === current.task.planRevision && retained.payload.taskId === current.task.id && retained.payload.stepId === current.task.steps[current.task.stepIndex].id, 'PAIR_WAIT: report authority was superseded');
   }
@@ -239,7 +239,7 @@ export function registerWorker(pi, env = process.env) {
   async function submitReport(input, ctx) {
     const params = validateReport(input);
     assert(authority && authority.phase === 'running', 'PAIR_WAIT: this step is not authorized');
-    assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job outlived its Fabric call; this worker must stop and reconcile before reporting.');
+    assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job, agent, actor or other Fabric effect outlived its call; this worker must stop and reconcile before reporting.');
     const task = authority.task;
     assertReportSize(params, task?.policy.summaryDetail, task?.limits);
     assert(task && params.taskId === task.id && params.stepId === task.steps[task.stepIndex].id, 'Report task/step does not match the current lease');
@@ -294,6 +294,7 @@ export function registerWorker(pi, env = process.env) {
       assert(!waiting() && authority && authority.task, 'PAIR_WAIT: the worker is retained but has no active implementation lease');
       assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
     } catch (error) { ctx.abort(); throw error; }
+    ensureCacheLifetime(ctx.model);
     return { systemPrompt: `${event.systemPrompt}\n\n${WORKER_GUIDE}`, message: {
       customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false,
       details: { ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: authority.task.attemptId, planRevision: authority.task.planRevision }
@@ -312,6 +313,8 @@ export function registerWorker(pi, env = process.env) {
     const blocked = gateTool(event.toolName, authority, !!report || repairsExhausted === authority.leaseId, !!authority.readOnly);
     if (blocked) { if (waiting()) ctx.abort(); return blocked; }
     if (!expectedModel(ctx)) { ctx.abort(); return { block: true, reason: 'Pair worker model changed unexpectedly' }; }
+    const detaching = detachingProgramCalls(event.toolName, event.input);
+    if (detaching.length) return { block: true, reason: `Pair workers cannot call ${detaching.join(', ')}: each leaves work running or changes shared state after the call. Do this step's work directly in this session.` };
     const n = toolName(event.toolName);
     if (/^(bash|powershell)$/.test(n)) {
       const policy = await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true, env);
@@ -337,12 +340,21 @@ export function registerWorker(pi, env = process.env) {
   });
   pi.on('tool_result', async (event, ctx) => {
     const details = event.details;
-    if (!/^(bash|powershell)$/.test(toolName(event.toolName)) || event.isError || details === null || typeof details !== 'object' || !('running' in details) || details.running !== true) return undefined;
-    const pid = 'pid' in details && typeof details.pid === 'number' && Number.isInteger(details.pid) ? details.pid : null;
+    if (event.isError) return undefined;
+    /** @type {number | null} */ let pid = null;
+    let text;
+    if (detachedProviderEffect(event.toolName, details)) {
+      text = `PAIR_DETACHED_EFFECT: Fabric ${event.toolName} ${detachedEffectDescription(event.toolName)}. Pair workers cannot leave work running or change shared state past a call; the worker is shutting down so the human can reconcile.`;
+    } else if (report && providerFileWrite(event.toolName, details)) {
+      text = `PAIR_DETACHED_EFFECT: Fabric ${event.toolName} wrote files after pair_report closed the lease. The worker is shutting down so the human can reconcile the checkpoint.`;
+    } else if (/^(bash|powershell)$/.test(toolName(event.toolName)) && details !== null && typeof details === 'object' && 'running' in details && details.running === true) {
+      pid = 'pid' in details && typeof details.pid === 'number' && Number.isInteger(details.pid) ? details.pid : null;
+      text = 'PAIR_DETACHED_EFFECT: the shell call is still running. The worker is shutting down so Main can reconcile without publishing a moving checkpoint.';
+    } else return undefined;
     detachedEffect = { toolCallId: event.toolCallId, toolName: event.toolName, pid, detectedAt: Date.now() };
     await telemetry(ctx); ctx.abort();
     setTimeout(() => ctx.shutdown(), 0);
-    return { isError: true, content: [{ type: 'text', text: 'PAIR_DETACHED_EFFECT: the shell call is still running. The worker is shutting down so Main can reconcile without publishing a moving checkpoint.' }], details: event.details };
+    return { isError: true, content: [{ type: 'text', text }], details: event.details };
   });
   pi.on('tool_execution_start', async (event, ctx) => { currentTool = event.toolName; currentTarget = toolTarget(event.toolName, event.args, ctx.cwd); await telemetry(ctx); });
   pi.on('tool_execution_end', async (_event, ctx) => { currentTool = null; currentTarget = null; await telemetry(ctx); });
@@ -364,6 +376,14 @@ export function registerWorker(pi, env = process.env) {
   });
   pi.on('session_compact_failed', async (_event, ctx) => { compacting = false; await telemetry(ctx); });
   pi.on('agent_before_settle', async (_event, ctx) => { if (waiting()) ctx.abort(); });
+  // Fires only when the user's native cacheWarming mode allows idle refreshes; Pair never changes that setting.
+  pi.on('cache_warming_decision', async (event, ctx) => {
+    if (stopped) return undefined;
+    try { await load(); } catch { return undefined; }
+    const awaitingMain = authority?.phase === 'waiting' && !!authority.task && !!report && report.payload.kind !== 'final_review';
+    const action = awaitingMain ? reviewWarmingAction(event, ctx.model, lastUsage?.totalInput) : undefined;
+    return action ? { action } : undefined;
+  });
   pi.on('agent_settled', async (_event, ctx) => { currentTool = null; currentTarget = null; await telemetry(ctx); });
   pi.on('model_select', async (_event, ctx) => { speed = null; speedStart = null; await telemetry(ctx); });
   pi.on('session_shutdown', async () => {

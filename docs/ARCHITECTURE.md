@@ -39,7 +39,10 @@ handling, and bounded stream parsing. This is not a new wire protocol or gRPC.
    settlement boundary of a normally completed Main run with no queued user
    input, a send from the `agent_settled` handler (Pi defers it in order with
    prompts submitted during settlement), or a new turn when Main is idle, with
-   the idle check repeated in the same tick as the send. It never interrupts a
+   the idle check repeated in the same tick as the send. An idle turn starts
+   through Pi's normal prompt path (the report is appended, then a fixed Pair
+   prompt), so `before_agent_start` applies Fabric's system prompt as on user
+   turns and the cached prefix matches. It never interrupts a
    running turn or rides on the user's prompt. With it off, Main retrieves
    reports with `pair_yield`, or one report armed by an empty yield is delivered
    at the current run's settlement boundary. No entire worker transcript is
@@ -131,7 +134,13 @@ PID 0/1, Pair's own process or its parent.
 A normal prompt completion does not close stdin. Stop revokes authority, cancels
 queued work, aborts the current run, sends EOF, then escalates to process-group
 termination if the child does not exit. Worker bridges also check parent liveness.
-Main shutdown stops owned workers; there is no daemon surviving Main.
+Main shutdown stops owned workers; Pair starts no daemon of its own. Fabric can:
+a durable `agents.spawn`/`agents.create` in the worker launches a detached
+resident host before Fabric's depth check. The worker treats that call as a
+detached effect and shuts down. The controller refuses to freeze a checkpoint
+while a resident host recorded under the worker's private mesh is alive, and
+warns when one outlives a stop. It never signals that host: its PID comes from a
+file the worker can write, so the human stops it.
 
 After an interruption, the human must inspect changes and explicitly resume or
 cancel. Resume reuses the existing Pi session and tells the worker to reconcile
@@ -159,7 +168,17 @@ RPC automatic-compaction switch; session-only native overrides may differ.
 
 Fovea or other extensions can request continuations. The worker bridge rechecks
 its durable authority at turn/tool boundaries. A report closes a lease before
-publication. Nested Fabric tool events are gated too. Current in-flight effects
+publication. Nested `pi.*` and captured-tool calls inside Fabric raise `tool_call`
+and are gated too. Fabric provider actions (`agents.*`, `jev.*`, `mesh.*`, …)
+do not; the worker sees them only afterwards, through Fabric's `tool_result`
+proxy, and treats a successful `agents.spawn`, `agents.create`, `agents.import`,
+`agents.subscribe`, `jev.spawn`, `cache.hold` or `components.apply`, or a
+`schema.commit` after the report latched, as a detached effect. Before a program
+runs, the worker also blocks a `fabric_exec` whose code calls one of those
+detaching actions directly, and Main blocks one that calls `schema.commit` while
+it supervises a task; the check ignores strings and comments, so a computed ref
+reaches only the result check. `agents.maxDepth: 0` is what stops Fabric
+child runs. Current in-flight effects
 cannot be rolled back by a future hook, so the controller also waits for settled
 execution and verifies immutable evidence before review.
 
@@ -198,7 +217,12 @@ a cosmetic preference outside the repository and has no dispatch side effect.
 
 Cache ratios are timestamped observations using Pi's separated usage categories.
 The plugin does not infer GPU residency, guarantee next-request hits, or run its
-own cache warmer. Soft limits stop further task execution when observations show
+own cache warmer. It only answers Pi's native `cache_warming_decision` in each role
+while the other role will certainly continue it (Main while the worker works, the
+worker while its report waits), never for a Codex model, and never with `stop`;
+it gives a model with no Pi cache lifetime a 240 s default before a run.
+The worker's pre-prompt history check tolerates a warm refresh's `usage` entry
+announced mid-check. Soft limits stop further task execution when observations show
 a threshold, but cannot provide a provider-enforced total spend ceiling.
 
 ## Handoff: durable inbox, phases and branch fencing

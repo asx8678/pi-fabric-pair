@@ -55,7 +55,7 @@ export const decisionSchema = object({
   checkpointHash: string('Exact current checkpoint hash, required for approval', 64),
   steps: { ...array(stepSchema, 32), minItems: 1, description: 'revise only: the complete replacement plan. Completed steps must be kept unchanged as its prefix; this starts a new plan revision.' }
 }, ['workerId', 'taskId', 'reportId', 'action', 'feedback']);
-export const inspectSchema = object({ workerId: string('Worker ID', 80), reportId: string('Report ID; omit for latest', 80), file: string('Optional changed path to read from immutable evidence', 1024) }, ['workerId']);
+export const inspectSchema = object({ workerId: string('Worker ID', 80), taskId: string('Optional; must be the current task ID', 80), reportId: string('Report ID; omit for latest', 80), file: string('Optional changed path to read from immutable evidence', 1024) }, ['workerId']);
 export const statusSchema = object({}, []);
 export const yieldSchema = object({}, []);
 /** @param {unknown} value @returns {value is Record<string, unknown>} */

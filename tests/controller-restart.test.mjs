@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PairController } from '../src/controller.js';
 import { PiRpc } from '../src/rpc.js';
@@ -199,4 +199,20 @@ test('retained probes without a mesh observation stay readable; malformed observ
     const malformed = structuredClone(state); malformed.workers.worker.probe.meshRoot = value;
     assert.throws(() => validateStoredState(malformed, expected), pattern, `malformed mesh observation ${JSON.stringify(value)} must fail validation`);
   }
+}));
+
+test('stop warns about a live Fabric resident host in the worker mesh and never signals it', { timeout: 15000 }, () => fixture(async ({ c, notices }) => {
+  const resident = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+  try {
+    await c.start('worker');
+    const dir = path.join(c.workerDir('worker'), 'fabric', 'mesh', 'residency', 'root-digest');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'owner.json'), JSON.stringify({ format: 1, hostId: 'resident:fixture', pid: resident.pid, token: 't', startedAt: Date.now(), readyAt: Date.now() }));
+    await c.stop('worker');
+    assert.equal(c.record('worker').status, 'stopped', 'the worker itself still stops normally');
+    const warning = notices.find(message => /Fabric resident host/.test(message));
+    assert.ok(warning?.includes(`pid ${resident.pid}`), `stop names the surviving host: ${warning}`);
+    assert.equal(resident.exitCode, null, 'Pair never signals a PID read from the worker mesh');
+    assert.equal(resident.signalCode, null);
+  } finally { resident.kill(); }
 }));

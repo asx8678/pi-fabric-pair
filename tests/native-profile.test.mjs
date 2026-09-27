@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { meshRootFor, nativeSettings, nativeProfileBlockers, preflightNativeProfile, prewalkAutoArms, checkReadiness } from '../src/native.js';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { meshRootFor, nativeSettings, nativeProfileBlockers, preflightNativeProfile, prewalkAutoArms, checkReadiness, detachedProviderEffect, fabricHasCache, gateTool, liveResidentHosts } from '../src/native.js';
 
 const valid = { executor: { shellHangMs: 0 }, agents: { maxDepth: 0 }, prewalk: { enabled: false } };
 async function fixture(run) {
@@ -83,4 +85,51 @@ test('readiness requires the exact Pair-owned private mesh root observation', ()
   assert.throws(() => checkReadiness({ ...probe, meshRoot: 'relative/fabric/mesh' }, state, config, worker, cwd, root), /private mesh root/);
   const { meshRoot: absent, ...withoutObservation } = probe;
   assert.throws(() => checkReadiness(withoutObservation, state, config, worker, cwd, root), /private mesh root/);
+});
+
+test('only Fabric 0.97.0 and newer count as having the cache provider', () => {
+  for (const version of ['0.97.0', '0.97.1', '0.98.0', '0.100.0', '1.0.0', '0.97.0-beta.1']) assert.equal(fabricHasCache(version), true, version);
+  for (const version of ['0.96.3', '0.93.0', '0.9.99']) assert.equal(fabricHasCache(version), false, version);
+  for (const version of [null, undefined, '', 'latest', 97]) assert.equal(fabricHasCache(version), null, String(version));
+});
+
+test('Fabric provider results that leave something running are detached effects', () => {
+  const proxy = ref => ({ kind: 'pi-fabric.tool-result-proxy.v1', ref, result: { id: 'x' } });
+  for (const ref of ['agents.spawn', 'agents.create', 'agents.import', 'jev.spawn']) assert.equal(detachedProviderEffect(ref, proxy(ref)), true, ref);
+  for (const ref of ['agents.run', 'agents.status', 'mesh.put', 'jev.run', 'tasks.list']) assert.equal(detachedProviderEffect(ref, proxy(ref)), false, ref);
+  assert.equal(detachedProviderEffect('agents.create', proxy('agents.spawn')), false, 'the proxy must describe this exact action');
+  assert.equal(detachedProviderEffect('agents.create', { ref: 'agents.create' }), false, 'only Fabric result proxies count');
+  assert.equal(detachedProviderEffect('agents.create', null), false);
+  const running = { phase: 'running' };
+  assert.equal(gateTool('subagent', running, false)?.block, true, 'captured delegation tools still raise tool_call and stay blocked');
+  assert.equal(gateTool('bash', running, false), undefined);
+});
+
+test('resident hosts are read from owner.json under the mesh root and never signalled', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-resident-'));
+  const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+  try {
+    const meshRoot = path.join(base, 'fabric', 'mesh');
+    assert.deepEqual(await liveResidentHosts(meshRoot), [], 'no residency directory means no host');
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const owner = async (name, value) => {
+      await fs.mkdir(path.join(meshRoot, 'residency', name), { recursive: true });
+      await fs.writeFile(path.join(meshRoot, 'residency', name, 'owner.json'), JSON.stringify(value));
+    };
+    const startedAt = Date.now();
+    await owner('a-live', { format: 1, hostId: 'resident:live', pid: live.pid, token: 't', startedAt, readyAt: startedAt });
+    await owner('b-exited', { format: 1, hostId: 'resident:exited', pid: exited.pid, token: 't', startedAt, readyAt: startedAt });
+    await owner('c-string-pid', { format: 1, hostId: 'resident:bad', pid: String(live.pid), startedAt });
+    await owner('d-format', { format: 2, hostId: 'resident:bad', pid: live.pid, startedAt });
+    await owner('e-host', { format: 1, hostId: 'other', pid: live.pid, startedAt });
+    await fs.mkdir(path.join(meshRoot, 'residency', 'f-empty'));
+    const hosts = await liveResidentHosts(meshRoot);
+    assert.deepEqual(hosts, [{ pid: live.pid, hostId: 'resident:live', file: path.join(meshRoot, 'residency', 'a-live', 'owner.json') }]);
+    assert.equal(live.exitCode, null, 'detection sends no signal');
+    assert.equal(live.signalCode, null);
+  } finally {
+    live.kill();
+    await fs.rm(base, { recursive: true, force: true });
+  }
 });

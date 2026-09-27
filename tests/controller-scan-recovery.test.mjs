@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { PairController } from '../src/controller.js';
 import { loadConfig } from '../src/config.js';
 import { digest, PROTOCOL, readJsonlTail } from '../src/util.js';
@@ -441,4 +441,25 @@ test('a human report or diff view never counts as Main inspection', async () => 
     await assert.rejects(controller.decide({ workerId: 'worker', taskId: task.id, reportId: report.reportId, action: 'approve', checkpointHash: view.checkpointHash, feedback: 'ok' }),
       /Inspect the current review checkpoint before approval/, 'Main still has to pair_inspect before approving');
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('a live Fabric resident host in the worker mesh holds the checkpoint instead of freezing it', async () => {
+  const { controller, task, record, runtime, workerDir, userNotices, base } = await fixture();
+  const resident = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+  try {
+    const dir = path.join(workerDir, 'fabric', 'mesh', 'residency', 'root-digest');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'owner.json'), JSON.stringify({ format: 1, hostId: 'resident:fixture', pid: resident.pid, token: 't', startedAt: Date.now(), readyAt: Date.now() }));
+    task.status = 'awaiting_settle'; task.pendingReport = envelope({ controller, task, record, runtime });
+    controller.runtimeData.get(runtime).activationIntent = controller.intent('worker') - 1; // accepting a report advances the intent once
+    await controller.finalizeReport('worker');
+    assert.equal(task.status, 'interrupted', 'the task is held for the human');
+    assert.match(task.interruption, /Fabric resident host/);
+    assert.ok(task.interruption.includes(`pid ${resident.pid}`), task.interruption);
+    assert.equal(task.report, null, 'no checkpoint was frozen');
+    assert.deepEqual(Object.keys(controller.state.notices), [], 'no report reaches Main');
+    assert.ok(userNotices.some(message => /Fabric resident host/.test(message)));
+    assert.equal(resident.exitCode, null, 'Pair never signals a PID read from the worker mesh');
+    assert.equal(resident.signalCode, null);
+  } finally { resident.kill(); runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });
