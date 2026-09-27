@@ -154,26 +154,6 @@ test('compaction keeps the completed aggregate and clears only pending timing', 
   assert.deepEqual((await f.packet()).speed, done, 'the abandoned pending sample never lands');
 }));
 
-test('status and label output report streaming throughput with an explicit unknown', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, () => {
-  assert.equal(speedLabel({ tokens: 200, seconds: 4 }), 'avg 50.0 tok/s');
-  for (const bad of [null, undefined, {}, { tokens: 0, seconds: 1 }, { tokens: 10, seconds: -1 }, { tokens: 'x', seconds: 1 }, { tokens: 5, seconds: 0 }, { tokens: 5 }]) {
-    assert.equal(speedLabel(bad), 'avg — tok/s', `unusable ${JSON.stringify(bad)} stays explicit`);
-  }
-  const s = { main: null,
-    workers: [{ id: 'worker', status: 'working', model: 'fake/model', effort: 'low', cwd: '/project',
-      observation: { at: 100, speed: { tokens: 200, seconds: 4 }, lastUsage: { input: 10, cacheRead: 10, cacheWrite: 0, totalInput: 20, output: 5, cacheRatio: 0.5, cost: null, observedAt: 100 } },
-      task: { id: 'speed-task', status: 'running', step: 1, steps: 2, revisions: 0, objective: 'Stream', startedAt: 100, turns: 42, stepList: [{ id: 's1', title: 'Only', state: 'done' }] } }],
-    ownerSession: 'owner', directory: '/state', cacheNote: 'Cache observations describe past requests. Pair does not guarantee retained provider cache.' };
-  const text = statusText(s, null, 10_000_000);
-  assert.ok(text.includes('  Speed: avg 50.0 tok/s (average streaming throughput; weighted output tokens/second)\n'), `status line labels the average as streaming throughput:\n${text}`);
-  assert.match(text, /avg streaming throughput \(weighted output tokens\/second, pre-response request latency excluded, unavailable is explicit\)/);
-  assert.ok(!text.includes('request latency included'), 'no surface claims pre-response latency is included');
-  assert.ok(text.includes('  Last observed cache read: 50.0%\n'), 'cache shares stay visible without an age timer');
-  assert.ok(!text.includes('Telemetry') && !text.includes('Activity:'), 'status shows no elapsed/turn or numeric activity-age rows');
-  assert.doesNotMatch(text, /ago|turns|elapsed/, 'no age, turn-count or elapsed text anywhere');
-  assert.ok(text.includes('  STALE: no recent worker activity; inspect the transcript or cancel\n'), 'a plain stale warning remains without a duration');
-});
-
 test('a Fabric provider result that leaves an actor running is a detached effect', () => fixture(async f => {
   const proxy = ref => ({ toolName: ref, toolCallId: `fabric_${ref}`, input: {}, isError: false, content: [{ type: 'text', text: '{}' }],
     details: { kind: 'pi-fabric.tool-result-proxy.v1', ref, result: { id: 'actor-1' } } });

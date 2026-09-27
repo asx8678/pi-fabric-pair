@@ -178,7 +178,8 @@ controller reload, and resume restores the waiting decision instead of rotating
 a new lease. Dispatch also retains a bounded, identity-bound `work-order.json`
 scope reference so the worker can restore the original objective/context (and
 the final-only remaining plan) after compaction — a read-only reference, never
-a new grant.
+a new grant. Only the first work order carries the full plan and context;
+continuations, revisions and ordinary turns do not repeat them.
 
 ## Configuration
 Start with the settings UI or [the complete example](../fabric-pair.example.json).

@@ -51,11 +51,15 @@ Report concise changes and reasons, affected paths, and honestly labeled test ev
 Do not deploy, push, commit, remove history, access unrelated secrets, or run destructive operations without the human's normal permission. Do not mutate Pair's coordination files. This is workflow control, not a sandbox.`;
 
 /** @typedef {{version: 1, taskId: string, planRevision: number, objective: string, context: string, constraints: string[], writtenAt: number}} WorkOrderRef */
-/** @param {Authority | null} authority @param {ReportEnvelope | null} report @param {WorkOrderRef | null} [order] @returns {string} */
-function statePacket(authority, report, order) {
+/**
+ * @param {Authority | null} authority @param {ReportEnvelope | null} report @param {WorkOrderRef | null} [order]
+ * @param {boolean} [restore] include the original work order: only after compaction removed it from the conversation
+ * @returns {string}
+ */
+function statePacket(authority, report, order, restore = false) {
   if (!authority?.task) return 'No implementation lease is active. Remain idle until the Pair controller assigns work.';
   const t = authority.task;
-  const scope = order && order.taskId === t.id && order.planRevision === t.planRevision
+  const scope = restore && order && order.taskId === t.id && order.planRevision === t.planRevision
     ? { originalObjective: order.objective, originalContext: bounded(order.context, 24000),
         ...(t.policy.mode === 'final-only' ? { remainingPlan: t.steps.slice(t.stepIndex) } : {}) }
     : {};
@@ -371,7 +375,7 @@ export function registerWorker(pi, env = process.env) {
   pi.on('session_before_compact', async (_event, ctx) => { compacting = true; speedStart = null; await telemetry(ctx); });
   pi.on('session_compact', async (_event, ctx) => {
     compacting = false; await load();
-    pi.sendMessage({ customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false }, { triggerTurn: false });
+    pi.sendMessage({ customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder, true), display: false }, { triggerTurn: false });
     await telemetry(ctx);
   });
   pi.on('session_compact_failed', async (_event, ctx) => { compacting = false; await telemetry(ctx); });

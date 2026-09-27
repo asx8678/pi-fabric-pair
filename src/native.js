@@ -335,7 +335,7 @@ const PI_MIN_EXPECTED_SAVINGS_USD = 0.05;
  * @param {WarmedModel | null | undefined} model @param {number} tokens
  * @returns {{missCost: number, warmCost: number} | null}
  */
-export function refreshCosts(model, tokens) {
+function refreshCosts(model, tokens) {
   const cost = model?.cost;
   if (!plain(cost) || !(tokens > 0)) return null;
   /** @type {Record<string, unknown>} */ let rates = cost, above = -1;
@@ -355,7 +355,7 @@ export function refreshCosts(model, tokens) {
  */
 export function shortWarmReplay(model) { return model?.api !== 'openai-codex-responses'; }
 /** Whether Pi knows a prompt-cache lifetime for this model; without one Pi never warms it. @param {WarmedModel | null | undefined} model */
-export function hasCacheLifetime(model) {
+function hasCacheLifetime(model) {
   const cache = model?.promptCache;
   return !!cache && [cache.short, cache.long].some(seconds => typeof seconds === 'number' && seconds > 0);
 }

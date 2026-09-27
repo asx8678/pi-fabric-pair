@@ -83,6 +83,10 @@ function envelope({ controller, task, record, runtime, kind = 'final_review', re
   };
 }
 
+/** Automatic delivery and worker activation finish in the background; wait for them before asserting. */
+async function until(check, ms = 3000) {
+  for (const end = Date.now() + ms; !check(); await new Promise(resolve => setTimeout(resolve, 10))) assert.ok(Date.now() < end, 'timed out waiting for background work');
+}
 async function runScan(controller) {
   const jobs = [];
   await controller.scan(jobs);
@@ -128,8 +132,9 @@ test('cancel still holds an unconfirmed live process when abort fails', async ()
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });
 
-test('scan accepts a retained inbox report and freezes the review checkpoint', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, async () => {
+test('scan accepts a retained inbox report and freezes the review checkpoint', async () => {
   const { controller, task, record, runtime, workerDir, mainNotices, userNotices, base } = await fixture();
+  controller.config.autoDeliverReports = false; // this test covers the manual-delivery channel
   try {
     const report = envelope({ controller, task, record, runtime });
     await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
@@ -175,16 +180,18 @@ test('scan accepts a retained inbox report and freezes the review checkpoint', {
   }
 });
 
-test('re-presenting the same report is an idempotent duplicate', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, async () => {
+test('re-presenting the same report is an idempotent duplicate', async () => {
   const { controller, task, record, runtime, workerDir, mainNotices, base } = await fixture();
   try {
     const report = envelope({ controller, task, record, runtime });
     const bytes = JSON.stringify(report);
     await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), bytes);
     await runScan(controller);
+    await until(() => mainNotices.length === 1);
     const noticesAfterFirst = mainNotices.length;
     await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), bytes);
     await runScan(controller);
+    await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(task.status, 'review', 'duplicate must not change the settled status');
     assert.equal(mainNotices.length, noticesAfterFirst, 'duplicate must not redeliver');
     assert.equal(Object.keys(task.decisions).length, 0, 'duplicate must not record a decision');
@@ -374,7 +381,7 @@ function stubContinuation(runtime, record) {
   return prompts;
 }
 
-test('an answer after workspace drift is rejected before it is recorded; the question stays decidable', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, async () => {
+test('an answer after workspace drift is rejected before it is recorded; the question stays decidable', async () => {
   const { controller, repo, task, record, runtime, workerDir, base } = await fixture();
   try {
     const report = envelope({ controller, task, record, runtime, kind: 'question', reportId: 'report-drift-q' });
@@ -398,11 +405,12 @@ test('an answer after workspace drift is rejected before it is recorded; the que
     const result = await controller.decide(answer);
     assert.equal(result.duplicate, undefined, 'restoring the reported state makes the same answer admissible');
     assert.equal(task.decisions[report.reportId].action, 'answer');
+    await Promise.all([...controller.activations]);
     assert.equal(prompts.length, 1, 'the answer reaches the worker');
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });
 
-test('an unchanged retained latch does not rewrite state on every scan', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, async () => {
+test('an unchanged retained latch does not rewrite state on every scan', async () => {
   const { controller, task, record, runtime, workerDir, base } = await fixture();
   try {
     const report = envelope({ controller, task, record, runtime });
@@ -410,6 +418,7 @@ test('an unchanged retained latch does not rewrite state on every scan', { skip:
     await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
     await runScan(controller);
     assert.equal(task.status, 'review');
+    await until(() => controller.state.notices[report.reportId]?.status === 'offered');
     let persists = 0, changes = 0;
     const persist = controller.persist.bind(controller);
     controller.persist = async (...args) => { persists++; return persist(...args); };

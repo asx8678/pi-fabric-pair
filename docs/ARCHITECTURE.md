@@ -257,6 +257,8 @@ file: a read-only retained copy of the granted objective/context. The worker
 restores it (plus the final-only remaining plan) in the task-state packet after
 compaction, validating identity and omitting mismatched or malformed
 references; it is never a new grant and never changes the authority document.
+The original plan and context travel once, in the first work order; later work
+orders, revisions and per-turn task-state packets do not repeat them.
 `agentDir` follows the public native tilde semantics (`~`, `~/...`).
 
 ## Delivery and security limits

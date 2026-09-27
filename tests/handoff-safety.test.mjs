@@ -98,6 +98,14 @@ async function injectReview(c, cwd, { kind = 'checkpoint', question, decisions, 
 }
 
 const tool = (f, name, params = {}) => f.tools.get(name).execute('call', params, undefined, undefined, f.ctx);
+/** pair_decide and pair_dispatch return once recorded; the worker activation runs in the background. Returns the held reason. */
+async function settled(f, name, params) {
+  await tool(f, name, params);
+  await Promise.all([...f.controller.activations]);
+  return String(f.controller.record('worker').error ?? '');
+}
+/** A held activation tells Main with a passive notice and never starts a Main turn. */
+const onlyHeldNotice = f => assert.ok(f.messages.every(([message, options]) => message.customType === 'fabric-pair.notice' && options?.triggerTurn === false), 'Main only receives a passive held-task notice');
 
 test('agentDir matches native tilde/absolute/relative semantics without touching profiles', () => {
   const home = os.homedir();
@@ -109,7 +117,7 @@ test('agentDir matches native tilde/absolute/relative semantics without touching
   assert.equal(agentDir({ PI_CODING_AGENT_DIR: '' }), path.join(home, '.pi', 'agent'), 'empty falls back to the default');
 });
 
-test('per-command verification binds source identity and rejects drift between or during checks', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, async () => {
+test('per-command verification binds source identity and rejects drift between or during checks', { skip: 'stale: verification now records drift as a failed VERIFICATION_SOURCE_DRIFT check instead of rejecting; re-derive against that contract, see tests/README.md' }, async () => {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-verify-'));
   await fs.mkdir(path.join(base, 'repo'));
   const repo = await fs.realpath(path.join(base, 'repo'));
@@ -189,7 +197,7 @@ test('a paused question survives reload and restores waiting without a new lease
   assert.deepEqual(f.messages, []);
 }));
 
-test('tree navigation invalidates an armed yield; normal compaction does not', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, () => mainFixture(async f => {
+test('tree navigation invalidates an armed yield; normal compaction does not', () => mainFixture(async f => {
   const { notice, reportId } = await injectReview(f.controller, f.cwd);
   await f.controller.setPhase('yielded', '1:0', true); await f.controller.persist();   // armed empty yield
   await f.tree();
@@ -207,7 +215,7 @@ test('tree navigation invalidates an armed yield; normal compaction does not', {
   const delivered = await f.boundary();
   assert.ok(delivered, 'normal compaction does not spuriously revoke legitimate work');
   assert.equal(delivered.entries[0].details.reportId, next.reportId);
-}));
+}, { project: { autoDeliverReports: false } }));
 
 test('only an actual boolean false from hasPendingMessages counts as clear; anything else defers', () => mainFixture(async f => {
   await tool(f, 'pair_yield');
@@ -225,21 +233,20 @@ test('only an actual boolean false from hasPendingMessages counts as clear; anyt
   assert.equal(delivered.entries[0].details.reportId, reportId);
 }));
 
-test('source drift during the readiness-to-continuation wait rejects the renewed authorization', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, { timeout: 15000 }, () => mainFixture(async f => {
+test('source drift during the readiness-to-continuation wait rejects the renewed authorization', { timeout: 15000 }, () => mainFixture(async f => {
   const { reportId, taskId } = await injectReview(f.controller, f.cwd);
   await tool(f, 'pair_yield');
   await f.controller.inspect('worker', reportId);
   const c = f.controller;
   const original = c.startReserved.bind(c);
   c.startReserved = async launch => { await fs.writeFile(path.join(f.cwd, `external-drift-${Date.now()}.txt`), 'external writer\n'); return original(launch); };
-  await assert.rejects(tool(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'Fixture revision after drift' }),
-    /STALE_CHECKPOINT.*between the decision and renewed running authority/, 'drift during the readiness wait rejects the renewal');
+  assert.match(await settled(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'Fixture revision after drift' }), /STALE_CHECKPOINT.*between the decision and renewed running authority/, 'drift during the readiness wait rejects the renewal');
   assert.equal(c.record('worker').task.status, 'interrupted', 'the failed renewal holds the task without replaying work');
   assert.ok(c.record('worker').error, 'the failure is visible on the record');
-  assert.deepEqual(f.messages, []);
+  onlyHeldNotice(f);
 }, { project: { runtime: { command: process.execPath, commandArgs: [host], inheritExtensions: false, startupTimeoutMs: 5000, requestTimeoutMs: 2000, shutdownTimeoutMs: 300 } }, rpc: 'real' }));
 
-test('source drift during the final activation readiness wait rejects the renewed authorization', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, { timeout: 15000 }, () => mainFixture(async f => {
+test('source drift during the final activation readiness wait rejects the renewed authorization', { timeout: 15000 }, () => mainFixture(async f => {
   const { reportId, taskId } = await injectReview(f.controller, f.cwd);
   await tool(f, 'pair_yield');
   await f.controller.inspect('worker', reportId);
@@ -250,14 +257,13 @@ test('source drift during the final activation readiness wait rejects the renewe
     return ready;
   };
   try {
-    await assert.rejects(tool(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'drift during final readiness' }),
-      /STALE_CHECKPOINT.*between the decision and renewed running authority/, 'drift inside the final readiness wait is caught before running authority');
+    assert.match(await settled(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'drift during final readiness' }), /STALE_CHECKPOINT.*between the decision and renewed running authority/, 'drift inside the final readiness wait is caught before running authority');
     assert.equal(f.controller.record('worker').task.status, 'interrupted', 'the renewal is held without replaying work');
-    assert.deepEqual(f.messages, []);
+    onlyHeldNotice(f);
   } finally { proto.prepareActivation = original; }
 }, { project: { runtime: { command: process.execPath, commandArgs: [host], inheritExtensions: false, startupTimeoutMs: 5000, requestTimeoutMs: 2000, shutdownTimeoutMs: 300 } }, rpc: 'real' }));
 
-test('branch navigation during the continuation readiness wait rejects the renewed authorization', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, { timeout: 15000 }, () => mainFixture(async f => {
+test('branch navigation during the continuation readiness wait rejects the renewed authorization', { timeout: 15000 }, () => mainFixture(async f => {
   const { reportId, taskId } = await injectReview(f.controller, f.cwd);
   await tool(f, 'pair_yield');
   await f.controller.inspect('worker', reportId);
@@ -268,26 +274,24 @@ test('branch navigation during the continuation readiness wait rejects the renew
     return ready;
   };
   try {
-    await assert.rejects(tool(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'navigation during readiness' }),
-      /BRANCH_STALE.*during the decision/, 'a branch change during readiness stales the renewal');
+    assert.match(await settled(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'navigation during readiness' }), /BRANCH_STALE.*during the decision/, 'a branch change during readiness stales the renewal');
     assert.equal(f.controller.record('worker').task.status, 'interrupted');
   } finally { proto.prepareActivation = original; }
 }, { project: { runtime: { command: process.execPath, commandArgs: [host], inheritExtensions: false, startupTimeoutMs: 5000, requestTimeoutMs: 2000, shutdownTimeoutMs: 300 } }, rpc: 'real' }))
 
-test('an undrifted decision proceeds past revalidation to activation (negative control)', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, { timeout: 15000 }, () => mainFixture(async f => {
+test('an undrifted decision proceeds past revalidation to activation (negative control)', { timeout: 15000 }, () => mainFixture(async f => {
   const { reportId, taskId } = await injectReview(f.controller, f.cwd);
   await tool(f, 'pair_yield');
   await f.controller.inspect('worker', reportId);
   // The offline helper host rejects the work-order prompt, so activation fails
   // AFTER revalidation — proving the renewed authorization itself was valid.
-  await assert.rejects(tool(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'Fixture revision without drift' }),
-    /Inference is forbidden/);
+  assert.match(await settled(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'Fixture revision without drift' }), /Inference is forbidden/);
   assert.equal(f.controller.record('worker').task.status, 'interrupted');
 }, { project: { runtime: { command: process.execPath, commandArgs: [host], inheritExtensions: false, startupTimeoutMs: 5000, requestTimeoutMs: 2000, shutdownTimeoutMs: 300 } }, rpc: 'real' }));
 
-test('dispatch retains an identity-bound read-only work-order scope for the worker', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, { timeout: 15000 }, () => mainFixture(async f => {
+test('dispatch retains an identity-bound read-only work-order scope for the worker', { timeout: 15000 }, () => mainFixture(async f => {
   const dispatch = { workerId: 'worker', requestId: 'request-scope', objective: 'Scope retention fixture', context: 'Original granted context for restoration', constraints: ['scope constraint'], steps: [{ id: 'one', title: 'Work', instructions: 'fixture' }] };
-  await assert.rejects(tool(f, 'pair_dispatch', dispatch), /Inference is forbidden/);
+  assert.match(await settled(f, 'pair_dispatch', dispatch), /Inference is forbidden/);
   const c = f.getController();
   const order = JSON.parse(await fs.readFile(path.join(c.workerDir('worker'), 'work-order.json'), 'utf8'));
   assert.equal(order.version, 1);
@@ -327,7 +331,9 @@ async function workerFixture(run, { mode = 'final-only', order, orderRaw } = {})
   registerWorker(pi, env);
   try {
     await events.get('session_start')({}, ctx);
-    await run({ ctx, events, dir, packet: async () => JSON.parse((await events.get('before_agent_start')({ systemPrompt: 'x' }, ctx)).message.content) });
+    await run({ ctx, events, dir,
+      packet: async () => { await events.get('session_compact')({}, ctx); return JSON.parse(messages.at(-1)[0].content); },
+      turnPacket: async () => JSON.parse((await events.get('before_agent_start')({ systemPrompt: 'x' }, ctx)).message.content) });
   } finally {
     await events.get('session_shutdown')({}, ctx);
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
@@ -345,6 +351,7 @@ test('the worker restores the identity-matching original context and final-only 
   assert.deepEqual(packet.remainingPlan.map(step => step.id), ['one', 'two']);
   assert.equal(packet.authorizedStep.id, 'one');
   assert.equal(packet.mayCompleteRemainingPlan, true);
+  assert.equal((await f.turnPacket()).originalContext, undefined, 'an ordinary turn does not repeat the original context');
 }, { order: matchingOrder }));
 
 test('a mismatched or malformed work-order reference is conservatively omitted, never adopted', () => workerFixture(async f => {
@@ -428,7 +435,7 @@ test('a double-paused blocker also restores waiting without a new lease', () => 
   assert.equal(f.spawns(), 0);
 }));
 
-test('real configured commands that mutate between checks are rejected by per-command identity', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, async () => {
+test('real configured commands that mutate between checks are rejected by per-command identity', { skip: 'stale: verification now records drift as a failed VERIFICATION_SOURCE_DRIFT check instead of rejecting; re-derive against that contract, see tests/README.md' }, async () => {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-verify-real-'));
   await fs.mkdir(path.join(base, 'repo'));
   const repo = await fs.realpath(path.join(base, 'repo'));
@@ -504,7 +511,7 @@ test('an inspection crossing navigation never pins the newer branch; a fresh ins
   assert.equal(approved.details.status, 'completed');
 }));
 
-test('navigation during running-intent persistence cannot publish stale running authority or send work', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, { timeout: 15000 }, () => mainFixture(async f => {
+test('navigation during running-intent persistence cannot publish stale running authority or send work', { timeout: 15000 }, () => mainFixture(async f => {
   const { reportId, taskId } = await injectReview(f.controller, f.cwd);
   await tool(f, 'pair_yield');
   await f.controller.inspect('worker', reportId);
@@ -513,17 +520,16 @@ test('navigation during running-intent persistence cannot publish stale running 
   let armed = true;
   c.persist = async () => { const outcome = await original(); if (armed && c.record('worker').task?.status === 'running') { armed = false; await f.tree(); } return outcome; };
   try {
-    await assert.rejects(tool(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'navigation during running-intent persistence' }),
-      /BRANCH_STALE.*during activation/, 'the renewal is held at the running-intent persistence fence');
+    assert.match(await settled(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'navigation during running-intent persistence' }), /BRANCH_STALE.*during activation/, 'the renewal is held at the running-intent persistence fence');
     assert.equal(c.record('worker').task.status, 'interrupted', 'contained without new work');
     assert.ok(c.record('worker').error, 'the hold is visible and actionable on the record');
     const authority = JSON.parse(await fs.readFile(path.join(c.workerDir('worker'), 'authority.json'), 'utf8'));
     assert.notEqual(authority.phase, 'running', 'stale running authority is never left published');
-    assert.deepEqual(f.messages, []);
+    onlyHeldNotice(f);
   } finally { c.persist = original; }
 }, { project: runtimeProject, rpc: 'real' }));
 
-test('navigation in the runtime pre-prompt window cannot send a stale prompt; authority is safely held', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, { timeout: 15000 }, () => mainFixture(async f => {
+test('navigation in the runtime pre-prompt window cannot send a stale prompt; authority is safely held', { timeout: 15000 }, () => mainFixture(async f => {
   const { reportId, taskId } = await injectReview(f.controller, f.cwd);
   await tool(f, 'pair_yield');
   await f.controller.inspect('worker', reportId);
@@ -533,16 +539,15 @@ test('navigation in the runtime pre-prompt window cannot send a stale prompt; au
     return original.call(this, activation, message, validity);
   };
   try {
-    await assert.rejects(tool(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'navigation in the pre-prompt window' }),
-      /scope fence rejected/i, 'the pre-prompt validity fence refuses the write before any bytes leave');
+    assert.match(await settled(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'navigation in the pre-prompt window' }), /scope fence rejected/i, 'the pre-prompt validity fence refuses the write before any bytes leave');
     assert.equal(f.controller.record('worker').task.status, 'interrupted', 'already-published authority is safely held');
     const authority = JSON.parse(await fs.readFile(path.join(f.controller.workerDir('worker'), 'authority.json'), 'utf8'));
     assert.notEqual(authority.phase, 'running');
-    assert.deepEqual(f.messages, []);
+    onlyHeldNotice(f);
   } finally { proto.activate = original; }
 }, { project: runtimeProject, rpc: 'real' }));
 
-test('a contained renewal recovers only through explicit stop then resume', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, { timeout: 15000 }, () => mainFixture(async f => {
+test('a contained renewal recovers only through explicit stop then resume', { timeout: 15000 }, () => mainFixture(async f => {
   const { reportId, taskId } = await injectReview(f.controller, f.cwd);
   await tool(f, 'pair_yield');
   await f.controller.inspect('worker', reportId);
@@ -551,8 +556,7 @@ test('a contained renewal recovers only through explicit stop then resume', { sk
   let armed = true;
   c.persist = async () => { const outcome = await original(); if (armed && c.record('worker').task?.status === 'running') { armed = false; await f.tree(); } return outcome; };
   try {
-    await assert.rejects(tool(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'contained for recovery' }),
-      /BRANCH_STALE.*during activation/, 'the renewal is contained');
+    assert.match(await settled(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'contained for recovery' }), /BRANCH_STALE.*during activation/, 'the renewal is contained');
     assert.equal(c.record('worker').task.status, 'interrupted');
     // Re-inspection alone does not restore a committed decision: the contained
     // generation is still held, so resume refuses until it is explicitly stopped.
@@ -562,7 +566,7 @@ test('a contained renewal recovers only through explicit stop then resume', { sk
     // Explicit resume continues the same conversation; the offline helper rejects
     // the recovery work prompt, proving the documented recipe reaches activation.
     await assert.rejects(c.resume('worker'), /Inference is forbidden/);
-    assert.deepEqual(f.messages, []);
+    onlyHeldNotice(f);
   } finally { c.persist = original; }
 }, { project: runtimeProject, rpc: 'real' }))
 

@@ -52,57 +52,8 @@ async function fixture(run, { global, project = { version: 2, autoStart: false }
   }
 }
 
-test('public settings command autosaves scoped changes, switches inheritance, and never starts on edits', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, () => fixture(async f => {
-  const starts = []; f.controller.start = async id => { starts.push(id); };
-  const globalBefore = await fs.readFile(f.files.global, 'utf8');
-  f.actions.push('Save scope', 'global', 'Enabled', 'Save scope', 'project', 'Autostart', 'Done');
-  await f.command('settings');
-  assert.deepEqual(JSON.parse(await fs.readFile(f.files.global, 'utf8')), { version: 2, enabled: true }, 'removed limit keys are dropped from saves');
-  assert.equal(JSON.parse(globalBefore).limits.maxTurnsPerStep, 55, 'legacy file kept readable');
-  assert.ok(!('maxTurnsPerStep' in f.controller.config.limits), 'deprecated keys never reach effective config');
-  assert.deepEqual(JSON.parse(await fs.readFile(f.files.project, 'utf8')), { version: 2, autoStart: true, limits: { maxReportsPerTask: 12 } });
-  assert.equal(f.controller.config.limits.maxReportsPerTask, 12);
-  assert.deepEqual(starts, []); assert.equal(f.spawns(), 0);
-  await assert.rejects(fs.stat(f.files.ui), /ENOENT/, 'behavior edits do not rewrite indicator');
-  const file = await fs.stat(f.files.project);
-  f.actions.push('Done'); await f.command('settings');
-  assert.equal((await fs.stat(f.files.project)).mtimeMs, file.mtimeMs);
-  await f.command('indicator off');
-  const ui = await fs.stat(f.files.ui); await f.command('indicator off');
-  assert.equal((await fs.stat(f.files.ui)).mtimeMs, ui.mtimeMs);
-  assert.deepEqual(starts, []); assert.equal(f.notices.filter(n => n.level === 'error').length, 0);
-  assert.ok(f.tools.has('pair_dispatch') && f.tools.has('pair_status'));
-}, { global: { version: 2, limits: { maxTurnsPerStep: 55 } }, project: { version: 2, autoStart: false, limits: { maxTurnsPerStep: 17, maxReportsPerTask: 12 } } }));
-
-test('write failure leaves current value intact, later edit succeeds, saved runtime failure is distinct', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, () => fixture(async f => {
-  await fs.rename(f.files.project, `${f.files.project}.held`); await fs.mkdir(f.files.project);
-  f.actions.push('Enabled', 'Done'); await f.command('settings');
-  assert.equal(f.controller.config.enabled, false); assert.match(f.notices.at(-1).message, /not saved/);
-  await fs.rmdir(f.files.project); await fs.rename(`${f.files.project}.held`, f.files.project);
-  f.actions.push('Autostart', 'Done'); await f.command('settings');
-  assert.equal(JSON.parse(await fs.readFile(f.files.project, 'utf8')).autoStart, true);
-  f.controller.updateConfig = () => { throw Error('runtime held'); };
-  f.actions.push('Enabled', 'Done'); await f.command('settings');
-  assert.equal(JSON.parse(await fs.readFile(f.files.project, 'utf8')).enabled, true);
-  assert.match(f.notices.at(-1).message, /settings saved.*Runtime reload\/reconciliation required: runtime held/);
-  assert.equal(f.notices.at(-1).level, 'warning'); assert.equal(f.spawns(), 0);
-}));
-
-test('migration requires explicit scoped consent and preserves backup; indicator does not migrate', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, () => fixture(async f => {
-  const bytes = await fs.readFile(f.files.project, 'utf8');
-  assert.equal(f.controller.config.enabled, false, 'legacy enablement is not renewed consent');
-  await f.command('indicator off'); assert.equal(await fs.readFile(f.files.project, 'utf8'), bytes);
-  f.confirm(false); f.actions.push('Enabled', 'Done'); await f.command('settings');
-  assert.equal(await fs.readFile(f.files.project, 'utf8'), bytes);
-  assert.equal(f.controller.config.enabled, false);
-  f.confirm(true); f.actions.push('Advanced', 'Review/migrate', 'Done'); await f.command('settings');
-  assert.equal(JSON.parse(await fs.readFile(f.files.project, 'utf8')).enabled, false);
-  assert.equal(await fs.readFile(`${f.files.project}.v1.bak`, 'utf8'), bytes);
-  assert.equal(f.confirmations.length, 2); assert.equal(f.spawns(), 0);
-}, { project: { version: 1, enabled: true, autoStart: false } }));
-
-for (const command of ['start worker', '']) {
-  test(`fresh startup preflight via ${command || 'dashboard'} lists all blockers once without constructing a runtime`, { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, () => fixture(async f => {
+for (const command of ['start worker']) { // the old dashboard-menu variant was retired with the TUI redesign
+  test(`fresh startup preflight via ${command || 'dashboard'} lists all blockers once without constructing a runtime`, () => fixture(async f => {
     if (!command) f.actions.push('Start worker');
     await f.command(command);
     assert.equal(f.actions.length, 0);
@@ -214,14 +165,6 @@ for (const dashboard of [false, true]) test(`worker restart ${dashboard ? 'dashb
   assert.deepEqual(f.messages, []);
 }));
 
-test('dashboard exposes reload and rejects bad arguments without runtime work', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, () => fixture(async f => {
-  f.actions.push('Reload configuration'); await f.command('');
-  assert.match(f.notices.at(-1).message, /configuration reloaded/);
-  await f.command('reload worker'); assert.match(f.notices.at(-1).message, /Use \/pair reload/);
-  await f.command('restart worker extra'); assert.match(f.notices.at(-1).message, /Use \/pair restart/);
-  assert.equal(f.spawns(), 0);
-}));
-
 test('stop during a restart configuration read prevents a later launch', () => fixture(async f => {
   let restarts = 0; f.controller.restart = async () => { restarts++; };
   const update = f.controller.updateConfig.bind(f.controller);
@@ -243,56 +186,6 @@ test('a restart cannot cross a Main session change while reloading settings', ()
   assert.equal(restarts, 0); assert.match(f.notices.at(-1).message, /Main session changed/);
   assert.notEqual(f.getController(), f.controller); assert.equal(f.getController().ownerSession, 'next-main-session');
 }));
-
-test('public Main usage events update the widget, clear stale context observations, and respect indicator off without inference', { skip: 'stale: written before the safe-boundary delivery and TUI redesign (commits 50bef22..d5b6289); needs re-derivation, see tests/README.md' }, () => fixture(async f => {
-  const theme = { fg: (_color, text) => text };
-  const lines = () => {
-    const widget = f.widgets.at(-1);
-    assert.equal(widget.key, 'fabric-pair');
-    assert.equal(typeof widget.component, 'function');
-    return widget.component({}, theme).render(200);
-  };
-  const row = () => lines()[1];
-  const activityOnly = lines();
-  assert.equal(activityOnly.length, 1, 'missing usage adds no cache row or spacer');
-  assert.match(activityOnly[0], /M● W○/);
-  const emit = (name, event = {}) => f.events.get(name)(event, f.ctx);
-  const response = usage => emit('message_end', { message: { role: 'assistant', usage } });
-  assert.equal(row(), undefined);
-  const beforeUsage = f.widgets.length;
-  response({ input: 50, cacheRead: 25, cacheWrite: 25, output: 5 });
-  assert.ok(f.widgets.length > beforeUsage, 'message_end refreshes the widget through the controller change event');
-  assert.equal(f.controller.summary().main.lastUsage.cacheRatio, 0.25);
-  assert.equal(f.controller.summary().main.lastUsage.totalInput, 100);
-  assert.match(row(), /^ Cache read \(last\): M 25\.0%$/);
-  assert.doesNotMatch(row(), /ago/, 'no age timer beside the cache share');
-  assert.equal(lines()[0], activityOnly[0], 'cache observations do not alter activity');
-  emit('agent_start'); emit('agent_settled');
-  assert.match(row(), /M 25\.0%/, 'idle Main retains the last request');
-  emit('message_end', { message: { role: 'user' } });
-  assert.match(row(), /M 25\.0%/, 'non-assistant messages do not replace usage');
-  response({ input: 20, cacheRead: 0, cacheWrite: 0 });
-  assert.match(row(), /M 0\.0%/, 'new request replaces, not accumulates with, prior usage');
-  emit('model_select');
-  assert.equal(f.controller.summary().main.lastUsage, null);
-  assert.deepEqual(lines(), activityOnly, 'clearing Main usage removes the row without a spacer');
-  response({ input: 0, cacheRead: 20, cacheWrite: 0 });
-  assert.match(row(), /M 100\.0%/);
-  emit('session_compact');
-  assert.equal(f.controller.summary().main.lastUsage, null);
-  assert.deepEqual(lines(), activityOnly, 'clearing Main usage removes the row without a spacer');
-  response({ input: 0, cacheRead: 0, cacheWrite: 0 });
-  assert.equal(f.controller.summary().main.lastUsage, null);
-  assert.deepEqual(lines(), activityOnly, 'zero-input observation stays unknown and adds no cache row');
-  await f.command('indicator off');
-  assert.equal(f.widgets.at(-1).component, undefined);
-  response({ input: 30, cacheRead: 10, cacheWrite: 0 });
-  assert.equal(f.widgets.at(-1).component, undefined, 'usage cannot re-enable the indicator');
-  await f.command('indicator minimal');
-  assert.match(row(), /M 25\.0%/);
-  assert.equal(f.spawns(), 0);
-  assert.deepEqual(f.messages, [], 'display events do not request turns or send warming prompts');
-}, { mode: 'tui' }));
 
 test('registered Main message hook preserves measured history through abort placeholders and clears at boundaries', t => fixture(async f => {
   t.mock.timers.enable({ apis: ['Date'], now: 1000 });

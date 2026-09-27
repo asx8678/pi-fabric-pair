@@ -539,7 +539,7 @@ export class PairController extends EventEmitter {
   /** @param {TaskRecord} task @param {boolean} [first] */
   workMessage(task, first = false) {
     return `FABRIC PAIR WORK ORDER\n${JSON.stringify({ ownerEpoch: this.state.ownerEpoch, workerGeneration: this.record(task.workerId).workerGeneration, taskId: task.id, planRevision: task.planRevision, attemptId: task.attemptId, attemptNumber: task.attemptNumber, objective: task.objective, constraints: task.constraints,
-      authorizedStep: task.steps[task.stepIndex], ...(first || task.policy.mode === 'final-only' ? { plan: task.steps, context: task.context } : {}),
+      authorizedStep: task.steps[task.stepIndex], ...(first ? { plan: task.steps, context: task.context } : {}),
       supervision: task.policy.mode, ...(task.policy.mode === 'every-step' && 'maxStepFiles' in task.policy ? { maxStepFiles: task.policy.maxStepFiles } : {}), summaryDetail: task.policy.summaryDetail, finalStep: task.policy.mode === 'final-only' || task.stepIndex === task.steps.length - 1,
       lastDecision: task.lastDecision || null })}\nUse Fabric/Fovea and finish by calling pair_report. ${task.policy.mode === 'final-only' ? 'All listed steps are authorized; request review after the complete plan, and ask questions whenever needed.' : `Only the current step is authorized. Report a checkpoint before advancing.`}`;
   }
