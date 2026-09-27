@@ -223,6 +223,46 @@ Review/migrate selected scope** to review and confirm migration. An explicitly
 selected archived backup can be previewed with
 `/pair import-backup <global|project> <absolute-path>`.
 
+### Main supervision and peer review
+
+Both are off by default.
+
+```json
+{
+  "mainSupervision": true,
+  "maxMainRecoveries": 3,
+  "peerReview": { "enabled": true, "provider": "xai", "model": "grok-4.7", "on": "final", "timeoutMs": 600000 }
+}
+```
+
+**`mainSupervision`** tells Main when a task stops making progress, and starts a Main
+turn for it (or adds it to Main's running turn): the worker ended without
+`pair_report`, its process failed or exited, it did not settle after reporting, a
+work prompt or checkpoint failed, or a step time or budget limit paused it. The
+notice (`FABRIC PAIR SUPERVISION`) gives the reason. Main troubleshoots and may call
+`pair_recover({workerId, taskId, instruction})`, which stops a failed worker process
+whose exit Pair can confirm, resumes the task in the same conversation and sends
+Main's instruction. Each task allows `maxMainRecoveries` (0–20, per Main process)
+recoveries. `pair_recover` refuses a task the human paused, an unconfirmed exit
+(`/pair reconcile` stays with you) and a spent cost or token budget. A human
+`/pair pause` or `/pair cancel` is recorded in Main's context without starting a turn.
+When a final approval completes a task, `pair_decide` returns `next`: Main compares
+the user's request and its plan with the repository and dispatches whatever is still
+unfinished before reporting that it is done. Worker questions are answered by Main in
+the recommended way; only choices that belong to you are brought to you.
+
+**`peerReview`** runs a second model, once and read-only, over each finished
+checkpoint before Main sees the report: `on: "final"` reviews `final_review` reports,
+`"checkpoints"` also reviews each step checkpoint. Pair runs
+`pi -p --no-session --no-extensions --no-skills --tools read,grep,find,ls` in the
+repository with the objective, plan, the worker's summary and the checkpoint patch
+(clipped at 200 kB). The reviewer answers `VERDICT: PASS | CONCERNS | FAIL` with
+findings. The report delivered to Main carries them as `peerReview`; Main verifies
+each finding, sends real ones back with `revise`, and makes the final decision. A
+failed or timed-out review is recorded and shown as such; Main then reviews alone.
+Reviews are kept under Pair's state folder in `reviews/<task>/<report>.json`. These
+settings apply without restarting the worker.
+
 ### Verification commands
 
 Configure checks through **Advanced > Verification commands** or the corresponding
@@ -296,13 +336,14 @@ edits Fabric configuration itself.
       "pair_cancel": "write",
       "pair_dispatch": "agent",
       "pair_decide": "agent",
+      "pair_recover": "agent",
       "pair_report": "write"
     }
   }
 }
 ```
 
-`pair_dispatch` and `pair_decide` start or continue worker inference, so they are
+`pair_dispatch`, `pair_decide` and `pair_recover` start or continue worker inference, so they are
 `agent`. `pair_report` runs in the worker and ends its implementation lease.
 
 ## Context, warming and cost

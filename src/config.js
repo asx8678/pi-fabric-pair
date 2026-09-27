@@ -19,9 +19,10 @@ export function isIndicator(value) { return INDICATORS.some(mode => mode === val
 /** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], excludeExtensions: string[], extraSkills: string[], inheritExtensions: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
-/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean}} PairConfig */
-/** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence'} NestedConfigKey */
-/** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>}} ConfigLayer */
+/** @typedef {{enabled: boolean, provider: string, model: string, on: 'final' | 'checkpoints', timeoutMs: number}} PeerReviewConfig */
+/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, peerReview: PeerReviewConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean, mainSupervision: boolean, maxMainRecoveries: number}} PairConfig */
+/** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence' | 'peerReview'} NestedConfigKey */
+/** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>, peerReview?: Partial<PeerReviewConfig>}} ConfigLayer */
 /** @typedef {{scope: ConfigScope, kind: 'fabric-pair-v1' | 'handoff-v1', sourceFile: string, targetFile: string, fromVersion: 1, toVersion: 2, warnings: string[]}} ConfigMigration */
 /** @typedef {{migration?: ConfigMigration | null, layer?: boolean}} SaveConfigOptions */
 /** @typedef {{layer: ConfigLayer, migration: ConfigMigration | null}} ConfigLayerResult */
@@ -49,11 +50,14 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   },
   verification: { commands: [], requirePassing: true, timeoutMs: 120000 },
   evidence: { maxFiles: 25000, maxTotalBytes: 536870912, maxArtifactBytes: 67108864 },
+  peerReview: { enabled: false, provider: 'xai', model: 'grok-4.7', on: 'final', timeoutMs: 600000 },
   mainReadOnlyDuringTasks: true,
-  autoDeliverReports: true
+  autoDeliverReports: true,
+  mainSupervision: false,
+  maxMainRecoveries: 3
 }));
 /** @type {NestedConfigKey[]} */
-const NESTED = ['supervision', 'runtime', 'requirements', 'limits', 'verification', 'evidence'];
+const NESTED = ['supervision', 'runtime', 'requirements', 'limits', 'verification', 'evidence', 'peerReview'];
 /** @type {Record<string, import('./contracts.js').ReviewMode | undefined>} */
 const POLICY_ALIASES = { final: 'final-only', strict: 'every-step', 'final-only': 'final-only', milestones: 'milestones', 'every-step': 'every-step' };
 /** Removed top-level settings: accepted for existing files, then dropped. Warming is Fabric's cache provider now. */
@@ -99,9 +103,15 @@ export function validateConfig(raw = {}) {
 /** @param {unknown} c @returns {asserts c is PairConfig} */
 function assertMergedConfig(c) {
   assert(isObject(c), 'Pair configuration must be an object');
-  assert(isObject(c.supervision) && isObject(c.runtime) && isObject(c.requirements) && isObject(c.limits) && isObject(c.verification) && isObject(c.evidence), 'Pair configuration sections must be objects');
+  assert(isObject(c.supervision) && isObject(c.runtime) && isObject(c.requirements) && isObject(c.limits) && isObject(c.verification) && isObject(c.evidence) && isObject(c.peerReview), 'Pair configuration sections must be objects');
   assert(c.version === CONFIG_VERSION, `Unsupported Pair config version ${c.version}; expected ${CONFIG_VERSION}`);
-  for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks', 'autoDeliverReports']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
+  for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks', 'autoDeliverReports', 'mainSupervision']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
+  assert(typeof c.maxMainRecoveries === 'number' && Number.isSafeInteger(c.maxMainRecoveries) && c.maxMainRecoveries >= 0 && c.maxMainRecoveries <= 20, 'maxMainRecoveries must be 0–20');
+  assert(typeof c.peerReview.enabled === 'boolean', 'peerReview.enabled must be boolean');
+  for (const key of ['provider', 'model']) assert(typeof c.peerReview[key] === 'string' && c.peerReview[key].length < 1000 && !c.peerReview[key].includes('\0'), `peerReview.${key} must be a string`);
+  assert(!c.peerReview.enabled || (String(c.peerReview.provider).length > 0 && String(c.peerReview.model).length > 0), 'peerReview needs a provider and model when enabled');
+  assert(c.peerReview.on === 'final' || c.peerReview.on === 'checkpoints', 'peerReview.on must be final or checkpoints');
+  assert(typeof c.peerReview.timeoutMs === 'number' && Number.isSafeInteger(c.peerReview.timeoutMs) && c.peerReview.timeoutMs >= 10000, 'peerReview.timeoutMs must be at least 10000');
   assert(isIndicator(c.indicator), `indicator must be ${INDICATORS.join(', ')}`);
   assert(typeof c.maxWorkers === 'number' && Number.isInteger(c.maxWorkers) && c.maxWorkers >= 1 && c.maxWorkers <= 8, 'maxWorkers must be 1–8');
   assert(isArray(c.workers) && c.workers.length >= 1 && c.workers.length <= 8, 'Configure 1–8 workers');

@@ -58,5 +58,14 @@
     "maxArtifactBytes": 67108864
   },
   "mainReadOnlyDuringTasks": true,
-  "autoDeliverReports": true
+  "autoDeliverReports": true,
+  "peerReview": {
+    "enabled": false,
+    "provider": "xai",
+    "model": "grok-4.7",
+    "on": "final",
+    "timeoutMs": 600000
+  },
+  "mainSupervision": false,
+  "maxMainRecoveries": 3
 }

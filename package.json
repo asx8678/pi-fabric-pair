@@ -33,6 +33,7 @@
     "src/schema.js",
     "src/contracts.js",
     "src/evidence.js",
+    "src/peer-review.js",
     "src/native.js",
     "src/util.js",
     "src/metrics.js",

@@ -173,9 +173,67 @@ export async function preflightNativeProfile(cwd, requirements, trusted = null, 
     try { return { trust, blockers: nativeProfileBlockers(await nativeSettings(cwd, trust, env), requirements), error: '' }; }
     catch (error) { return { trust, blockers: [], error: error instanceof Error ? error.message : String(error) }; }
   }));
-  const blocked = profiles.every(profile => profile.blockers.length > 0 || profile.error);
+  // With unknown trust, a project file that would break the trusted profile blocks now; a
+  // worker that trusts it would otherwise hold its first task at readiness. A project file
+  // that only repairs a blocked global profile still defers to readiness.
+  const failed = (/** @type {typeof profiles[number]} */ profile) => profile.blockers.length > 0 || !!profile.error;
+  const blocked = trusted === null ? failed(profiles[1]) : failed(profiles[0]);
   const details = profiles.map(profile => `${profile.trust ? 'If worker trusts project (project overrides global)' : 'Without worker project trust (global only)'}:\n${profile.error || (profile.blockers.length ? profile.blockers.map(item => `  - ${item}`).join('\n') : '  No file-level blockers.')}`).join('\n');
-  return { blocked, message: `Pair profile setup for worker workspace ${cwd}\n${details}\nGlobal defaults: ${globalPath}\nProject override: ${projectPath} (only loaded by a trusted worker; takes precedence per field).\nSet the listed values in the applicable file(s), preserving unrelated settings, then retry /pair start. Pair does not edit native configuration. Worker trust/session overrides, installed capabilities and provider authentication are still checked at startup.` };
+  return { blocked, message: `Pair profile setup for worker workspace ${cwd}\n${details}\nGlobal defaults: ${globalPath}\nProject override: ${projectPath} (only loaded by a trusted worker; takes precedence per field).\nSet the listed values in the applicable file(s), preserving unrelated settings, then retry /pair start. Pair edits native configuration only when you approve its offer at /pair start. Worker trust/session overrides, installed capabilities and provider authentication are still checked at startup.` };
+}
+/** @typedef {{file: string, field: string, from: unknown, to: unknown}} ProfileRepair */
+/**
+ * The field edits that clear preflight blockers. Each edit goes to the file whose value
+ * wins: the project file when it sets the field (a trusted worker loads it), else global.
+ * @param {string} cwd
+ * @param {{prewalkDisabled: boolean}} requirements
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {Promise<ProfileRepair[]>}
+ */
+export async function nativeProfileRepairs(cwd, requirements, env = process.env) {
+  const globalPath = path.join(agentDir(env), 'fabric.json'), projectPath = path.join(cwd, '.pi', 'fabric.json');
+  const files = { [globalPath]: await nativeObject(globalPath), [projectPath]: await nativeObject(projectPath) };
+  /** @param {string} file @param {string} field */
+  const read = (file, field) => field.split('.').reduce((/** @type {unknown} */ at, key) => plain(at) ? at[key] : undefined, files[file]);
+  const native = await nativeSettings(cwd, true, env), required = [];
+  if (native.fabricShellHangMs !== 0) required.push(['executor.shellHangMs', 0]);
+  if (native.fabricAgentMaxDepth !== 0) required.push(['agents.maxDepth', 0]);
+  if (requirements.prewalkDisabled && prewalkAutoArms(native)) required.push(['prewalk.alwaysRearm', false]);
+  /** @type {ProfileRepair[]} */
+  const repairs = [];
+  for (const [field, to] of required) {
+    const inProject = read(projectPath, String(field)) !== undefined;
+    repairs.push({ file: inProject ? projectPath : globalPath, field: String(field), from: read(inProject ? projectPath : globalPath, String(field)) ?? null, to });
+    // A global value still applies to an untrusted worker, so repair it too.
+    const globalValue = read(globalPath, String(field));
+    if (inProject && globalValue !== undefined && globalValue !== to) repairs.push({ file: globalPath, field: String(field), from: read(globalPath, String(field)), to });
+  }
+  return repairs;
+}
+/**
+ * Applies the user-approved repairs. Each touched file is backed up first and keeps its
+ * mode; unrelated settings are preserved (JSONC comments are not, the backup keeps them).
+ * @param {ProfileRepair[]} repairs
+ * @returns {Promise<string[]>} backup paths
+ */
+export async function applyNativeProfileRepairs(repairs) {
+  const backups = [], stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  for (const file of [...new Set(repairs.map(repair => repair.file))]) {
+    const value = await nativeObject(file);
+    for (const { field, to } of repairs.filter(repair => repair.file === file)) {
+      const keys = field.split('.'), last = /** @type {string} */ (keys.pop());
+      let at = value;
+      for (const key of keys) { if (!plain(at[key])) at[key] = {}; at = /** @type {Record<string, unknown>} */ (at[key]); }
+      at[last] = to;
+    }
+    const stat = await fs.stat(file).catch(() => null), mode = stat ? stat.mode & 0o777 : 0o644;
+    if (stat) { const backup = `${file}.before-pair-repair-${stamp}`; await fs.copyFile(file, backup); backups.push(backup); }
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(value, null, 2) + '\n', { mode });
+    await fs.rename(tmp, file);
+  }
+  return backups;
 }
 /** @typedef {Omit<import('./contracts.js').HistoricalProbeV1, 'nonce' | 'workerId' | 'ownerSession' | 'native'> & {native: NativeSettings}} NativeProbe */
 /** @param {NativeAPI} pi @param {NativeContext} ctx @returns {Promise<NativeProbe>} */
@@ -227,7 +285,7 @@ export function checkReadiness(probe, rpcState, config, worker, cwd, expectedMes
   assert(!(worker.readOnly && probe.capabilities.fabric), 'UNSUPPORTED_PROFILE: read-only Pair workers cannot safely expose generic Fabric providers without a pre-effect authorization seam. Use the qualified single-writer profile.');
   if (probe.capabilities.fabric) {
     const blockers = nativeProfileBlockers(probe.native, config.requirements);
-    assert(!blockers.length, `UNSUPPORTED_PROFILE: ${blockers.join('; ')}. Check ${path.join(agentDir(), 'fabric.json')} and ${path.join(cwd, '.pi', 'fabric.json')} (trusted project fields override global). Pair never edits native configuration.`);
+    assert(!blockers.length, `UNSUPPORTED_PROFILE: ${blockers.join('; ')}. Check ${path.join(agentDir(), 'fabric.json')} and ${path.join(cwd, '.pi', 'fabric.json')} (trusted project fields override global). Run /pair start to have Pair offer the fix.`);
   }
   if (config.requirements.autoCompaction) assert(rpcState.autoCompactionEnabled, 'Worker automatic compaction is disabled in native Pi settings. Enable it before using Pair.');
 }

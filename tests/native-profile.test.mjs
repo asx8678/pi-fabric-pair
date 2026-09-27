@@ -31,7 +31,7 @@ test('project precedence and worker trust are explicit; Main trust is not borrow
   assert.equal((await preflightNativeProfile(cwd, { prewalkDisabled: true }, true, env)).blocked, true);
   assert.equal((await preflightNativeProfile(cwd, { prewalkDisabled: true }, false, env)).blocked, false);
   const uncertain = await preflightNativeProfile(cwd, { prewalkDisabled: true }, null, env);
-  assert.equal(uncertain.blocked, false, 'unknown worker trust defers conditional failures to worker readiness');
+  assert.equal(uncertain.blocked, true, 'unknown worker trust blocks project settings that would fail the trusted profile');
   assert.match(uncertain.message, /observed 25/);
   assert.equal(nativeProfileBlockers(await nativeSettings(cwd, true, env), { prewalkDisabled: true }).length, 2);
   const separate = path.join(cwd, 'separate'); await fs.mkdir(separate);

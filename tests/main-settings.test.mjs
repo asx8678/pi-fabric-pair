@@ -53,9 +53,12 @@ async function fixture(run, { global, project = { version: 2, autoStart: false }
 }
 
 for (const command of ['start worker']) { // the old dashboard-menu variant was retired with the TUI redesign
-  test(`fresh startup preflight via ${command || 'dashboard'} lists all blockers once without constructing a runtime`, () => fixture(async f => {
+  test(`fresh startup preflight via ${command || 'dashboard'} lists all blockers after repair is declined without constructing a runtime`, () => fixture(async f => {
+    f.confirm(false);
     if (!command) f.actions.push('Start worker');
     await f.command(command);
+    assert.equal(f.confirmations.length, 1);
+    assert.equal(f.confirmations[0][0], 'Fix Fabric settings for Pair');
     assert.equal(f.actions.length, 0);
     assert.equal(f.spawns(), 0); assert.equal(f.controller.handles.size, 0);
     assert.equal(Object.keys(f.controller.state.workers).length, 0);
