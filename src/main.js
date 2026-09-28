@@ -38,13 +38,16 @@ function workerModel(ctx, spec) { return spec?.provider && spec.model ? ctx.mode
 const WAKE_TEXT = 'Pair: a worker report has arrived (the FABRIC PAIR REPORT above). Review it as the Pair guide describes.';
 /** Fixed prompt that starts Main's turn for a supervision notice delivered while Main is idle. */
 const SUPERVISE_TEXT = 'Pair: the worker task needs supervision (the FABRIC PAIR SUPERVISION notice above). Troubleshoot it as the notice describes.';
+/** Fixed prompt that starts Main's turn when it went idle with unfinished Pair work and no worker running. */
+const CHECK_TEXT = 'Pair: Main is idle with unfinished Pair work (the FABRIC PAIR CHECK above). Check it as the notice describes.';
+const WAKE_TEXTS = [WAKE_TEXT, SUPERVISE_TEXT, CHECK_TEXT];
 /** @param {unknown} message */
 function isWake(message) {
   const m = /** @type {{role?: unknown, content?: unknown} | null | undefined} */ (message);
   if (m?.role !== 'user') return false;
   const content = /** @type {unknown} */ (m.content);
   const text = Array.isArray(content) && content.length === 1 && content[0]?.type === 'text' ? content[0].text : content;
-  return text === WAKE_TEXT || text === SUPERVISE_TEXT;
+  return WAKE_TEXTS.includes(text);
 }
 const RECEIPT_CHECK_MS = 30_000, RECEIPT_MAX_MS = 2 * 60 * 60_000;
 const INPUT_HOLD_MS = 60_000;
@@ -147,6 +150,27 @@ export function registerMain(pi) {
   /** @type {{text: string, images: import('@earendil-works/pi-coding-agent').InputEvent['images']} | null} */
   let rescued = null;
   let guideInContext = false;
+  /** Task states Main was already woken to check, so each state wakes it at most once. */
+  const checkedStates = new Set();
+  /**
+   * Main went idle with no report to deliver: wake it once for an unfinished task no worker is advancing
+   * (a question, review, block, pause or interruption), so the work does not sit until the human notices.
+   * @param {PairController} bound @param {() => boolean} current
+   */
+  function checkIdle(bound, current) {
+    if (bound.config.autoCheckIdle === false || bound.autoOfferNotices().length) return;
+    const tasks = Object.values(bound.state.workers).filter(r => r.task && !['completed', 'cancelled'].includes(r.task.status));
+    if (!tasks.length || tasks.some(r => ['activating', 'running', 'awaiting_settle'].includes(r.task?.status ?? ''))) return;
+    const fresh = tasks.filter(r => !String(r.task?.interruption || '').startsWith('Paused by the user') && !checkedStates.has(`${r.task?.id}:${r.task?.status}:${r.task?.updatedAt}`));
+    if (!fresh.length || !current()) return;
+    for (const r of fresh) checkedStates.add(`${r.task?.id}:${r.task?.status}:${r.task?.updatedAt}`);
+    const lines = fresh.map(r => { const t = /** @type {NonNullable<typeof r.task>} */ (r.task); return `- worker ${r.id}, task ${t.id} (${cleanText(String(t.objective), 200)}) is ${t.status}, step ${t.stepIndex + 1}/${t.steps.length}${t.interruption ? `: ${cleanText(String(t.interruption), 300)}` : ''}`; });
+    const content = `FABRIC PAIR CHECK — your turn ended with unfinished Pair work and no worker running:
+${lines.join('\n')}
+Call pair_status and handle what is yours: answer worker questions (pair_decide "answer"), decide reports waiting for review, and recover a paused or interrupted task with pair_recover when supervision allows it. Do not resume a task the human paused. If you already asked the user a decision this work depends on, do not repeat the question or act without the answer: continue only work that does not depend on it, or end the turn with one short line saying what you are waiting for. This check fires once per task state.`;
+    pi.sendMessage({ customType: 'fabric-pair.check', content, display: true }, { triggerTurn: false });
+    void Promise.resolve(pi.sendUserMessage(CHECK_TEXT)).catch(() => {});
+  }
   function mainOccupied() {
     if (busy || compacting || inputSince !== null) return true;
     const ctx = ctxRef;
@@ -664,7 +688,7 @@ export function registerMain(pi) {
   });
   pi.on('input', (event, ctx) => {
     ctxRef = ctx;
-    if (event.source === 'extension' && (event.text === WAKE_TEXT || event.text === SUPERVISE_TEXT)) return; // Pair's own report/supervision wake, not user input
+    if (event.source === 'extension' && WAKE_TEXTS.includes(event.text)) return; // Pair's own report/supervision/check wake, not user input
     let running = false;
     try { running = typeof ctx.isIdle === 'function' && ctx.isIdle() === false; } catch { running = false; }
     if (idleWake && running && event.streamingBehavior !== undefined) idleWake = false;
@@ -734,8 +758,8 @@ export function registerMain(pi) {
     if (!bound || !completed || compacting || stopped || bound.closing || !bound.config.enabled) return;
     let delivery = null;
     try { delivery = await bound.claimSettledDelivery(); } catch (error) { bound.notifyUser(`Pair: could not deliver a waiting report (${briefError(error)}); it stays in the inbox.`, 'warning'); return; }
-    if (!delivery) return;
     const current = () => !stopped && controller === bound && epoch === bindingEpoch;
+    if (!delivery) { checkIdle(bound, current); return; }
     if (!current()) { void bound.completeDelivery(delivery, Promise.reject(new DeliveryDeferred('Main binding changed'))); return; }
     void bound.completeDelivery(delivery, sendReport(current, delivery.message, delivery.details));
   });

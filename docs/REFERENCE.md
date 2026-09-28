@@ -136,6 +136,12 @@ and are retrieved explicitly.
   `limits.maxReportsPerTask` (default 40) per task; after that, reports wait
   for `/pair inbox`. `deliveries.jsonl` in Pair's state directory logs each
   claim, deferral, observation and retry.
+- **Idle check (`autoCheckIdle`, default `true`).** When Main's run settles with no
+  report to deliver, no worker activating or running, and a task still unfinished
+  (question, review, blocked, paused or interrupted), Pair sends a `FABRIC PAIR CHECK`
+  notice and starts one Main turn to handle it. Each task state (task, status, last
+  update) triggers at most once per Main process; tasks the human paused are skipped.
+  Set `autoCheckIdle: false` to turn it off.
 - **Manual fallback.** With `autoDeliverReports: false`, a result arriving after
   a yielded Main has settled stays retained with a waiting indicator until the
   next explicit `pair_yield`, or the human `/pair yield` / `/pair inbox`

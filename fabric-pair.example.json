@@ -59,6 +59,7 @@
   },
   "mainReadOnlyDuringTasks": true,
   "autoDeliverReports": true,
+  "autoCheckIdle": true,
   "peerReview": {
     "enabled": false,
     "provider": "xai",
