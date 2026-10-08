@@ -29,6 +29,10 @@ const HISTORY_BYTES = 4 * 1024 * 1024 * 1024, HISTORY_ENTRIES = 2_000_000, PROBE
 const TAIL_ENTRIES = 64;
 const FULL_COMPARE_BYTES = 8 * 1024 * 1024;
 const MAX_TIMEOUT = 300_000, UI_TIMEOUT = 120_000;
+/** Pi 0.99+ reports how it took a prompt (`handled`, `queued` or `started`); older Pi reports nothing. @param {unknown} data @param {string} expected */
+function promptTaken(data, expected) { return !isRpcRecord(data) || data.disposition === undefined || data.disposition === expected; }
+/** @param {unknown} data */
+function disposition(data) { return isRpcRecord(data) && typeof data.disposition === 'string' ? data.disposition : 'unknown'; }
 const THINKING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const COMPACTION_REASONS = new Set(['manual', 'threshold', 'overflow']);
 
@@ -304,7 +308,7 @@ export class PiRuntime {
   #settledSequence = 0; #settledAt = 0; #serial = 0; #scope = 0; #revision = 0;
   #ready = false; #started = false; #provenUnspawned = false; #closing = false; #revokedStartup = false;
   #streaming = false; #unsettled = false; #retrying = false; #summaryRetrying = false; #overflowRecovery = false;
-  #steering = 0; #followUp = 0; #idleKnown = false; #promptPending = false; #bridge = false; #rejecting = false;
+  #steering = 0; #followUp = 0; #idleKnown = false; #promptPending = false; #bridge = false; #rejecting = false; #reportSettling = false;
   /** @type {Set<string>} */ #strayTools = new Set();
   #startupController = new AbortController();
   /** @type {Set<() => void>} */ #waiters = new Set();
@@ -521,7 +525,8 @@ export class PiRuntime {
       const file = path.join(this.dir, 'probe.json');
       await fs.rm(file, { force: true }); this.#assertCurrent(activation);
       const began = Date.now();
-      await this.#send('prompt', { message: `/pair-bridge ${operation}` }, activation, this.#startupTimeout());
+      const sent = await this.#send('prompt', { message: `/pair-bridge ${operation}` }, activation, this.#startupTimeout());
+      requireValue(promptTaken(sent, 'handled'), `Pi did not run /pair-bridge as a command (prompt ${disposition(sent)})`);
       const raw = await readBounded(file, PROBE_BYTES); this.#assertCurrent(activation);
       /** @type {unknown} */ const probe = JSON.parse(raw); assertProbe(probe);
       const o = this.#options;
@@ -592,11 +597,14 @@ export class PiRuntime {
       requireValue(this.#lifecycleIdle(), 'Worker ceased to be idle before work');
       this.#promptPending = true;
       const busy = () => this.#compactions.size > 0 || this.#summaryRetrying || this.#retrying;
-      await this.#rpc.send('prompt', { message }, Math.max(this.#requestTimeout(), this.#startupTimeout()), { signal: active.controller.signal, observeAfterWrite: true, extend: busy, maxWaitMs: 30 * 60_000, guard: () => {
+      const sent = await this.#rpc.send('prompt', { message }, Math.max(this.#requestTimeout(), this.#startupTimeout()), { signal: active.controller.signal, observeAfterWrite: true, extend: busy, maxWaitMs: 30 * 60_000, guard: () => {
         if (!this.#current(activation) || !this.#lifecycleIdle() || (validity !== undefined && !validity())) return false;
         this.#unsettled = true; this.#idleKnown = false; this.#revision++; return true;
       } });
-      this.#assertCurrent(activation); active.accepted = true;
+      this.#assertCurrent(activation);
+      // No run follows a prompt an inherited extension's input handler or command consumed, so no agent_settled either.
+      if (!promptTaken(sent, 'started')) throw new RpcUncertainError(`The worker's Pi did not start a run for the work prompt (prompt ${disposition(sent)}); an inherited extension probably consumed it. List it in runtime.excludeExtensions.`);
+      active.accepted = true;
     } catch (error) {
       this.#assertCurrent(activation); this.#hold(error); throw error;
     }
@@ -719,7 +727,8 @@ export class PiRuntime {
   #rejectActivity(type, event) {
     if (this.#bridge) { this.#hold(new RpcUncertainError('Agent activity during bridge command; no work prompt authorized')); return; }
     if (type === 'tool_execution_start' && text(event.toolCallId)) this.#strayTools.add(event.toolCallId);
-    this.#enqueue({ type: 'notify', at: Date.now(), error: `Worker ${type.replace(/_/g, ' ')} began without a Pair lease (probably another extension); Pair aborted it.`, notifyType: 'warning' });
+    // A run that goes on after its report (the program did not return it) is the worker's own; abort it quietly.
+    if (!this.#reportSettling) this.#enqueue({ type: 'notify', at: Date.now(), error: `Worker ${type.replace(/_/g, ' ')} began without a Pair lease (probably another extension); Pair aborted it.`, notifyType: 'warning' });
     if (this.#rejecting || this.closed) return;
     this.#rejecting = true;
     const guard = () => this.#current(null, true);
@@ -817,6 +826,17 @@ export class PiRuntime {
       } finally { finishWait(); }
     }
     throw new RpcUncertainError('Worker did not reach verified true idle before deadline');
+  }
+  /**
+   * After an accepted report: pair_report's `terminate` ends the worker's run, so give it `graceMs` to
+   * settle on its own (usage recorded, no cancelled program) and abort only if it has not. The latched
+   * gate refuses tools meanwhile, and a new turn is aborted at turn_start.
+   * @param {string} reason @param {number} graceMs @returns {Promise<void>}
+   */
+  async settleOrAbort(reason, graceMs) {
+    this.revoke(reason); this.#reportSettling = true;
+    try { await this.#waitIdle(graceMs, null); } catch { await this.abortCurrent(reason); }
+    finally { this.#reportSettling = false; }
   }
   /** @param {string} reason @returns {Promise<void>} */
   abortCurrent(reason) {

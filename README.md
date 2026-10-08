@@ -11,7 +11,7 @@ dedicated coding worker. Keep talking with Main while the worker implements a
 bounded task. Main receives the result, inspects the code, and approves or asks
 for changes. The worker keeps its conversation across revisions and tasks.
 
-Both roles use your existing [Fabric](https://github.com/monotykamary/pi-fabric)
+Both roles use your existing [Fabric](https://github.com/fabric-runtime/pi-fabric)
 and [Fovea](https://github.com/monotykamary/pi-fovea) setup. Choose their models
 separately.
 
@@ -35,7 +35,7 @@ locally before Main is notified. See the
 
 ## Get started
 
-You need **Node.js 24+**, Git, and Pi with Fabric, Fovea, and an authenticated model.
+You need **Node.js 24+**, Git, and Pi 1.1 with Fabric, Fovea, and an authenticated model.
 
 ### 1. Install
 
@@ -45,7 +45,9 @@ cd pi-fabric-pair
 pi install "$PWD"
 ```
 
-The extension runs directly from source. Open Pi in your implementation project's
+The extension runs directly from source. Do not run `npm install` in this checkout:
+Pi would then load Pair's development copies of Pi's own packages instead of the
+running Pi's. Use a separate clone for `npm test`. Open Pi in your implementation project's
 Git working tree. Keep Pair state outside that tree; the default
 `~/.pi/agent` location does this.
 
@@ -175,8 +177,8 @@ before it runs, and never changes one Pi already knows. Pi stops 30 minutes afte
 session's last request. Pair never warms a Codex model, because Pi cannot cap that
 refresh; `/pair doctor` says when Main or the worker uses one. Fabric's `cache.hold` (Fabric 0.97.0 or newer, on a Pi with scoped
 warming) is a separate paid opt-in for Main. Pair holds no leases and never changes
-Pi's settings. Pair's inference budgets exclude Main usage and warming. Stock Pi
-0.87.1 does not yet send these refreshes in a Pair session (its warmer stops once
+Pi's settings. Pair's inference budgets exclude Main usage and warming. Pi (through
+1.1.0) does not yet send these refreshes in a Pair session (its warmer stops once
 Pair's messages are in context); see the
 [cache reference](docs/REFERENCE.md#context-warming-and-cost).
 

@@ -83,6 +83,7 @@ async function fixture(options, run) {
             return {};
           case 'get_commands': return { commands: [{ name: 'pair-bridge', source: 'extension', sourceInfo: { path: entryPath } }] };
           case 'prompt': {
+            if (options.workPrompt && !/^\/pair-bridge (probe|load)$/.test(fields.message)) return { disposition: options.workPrompt };
             assert.match(fields.message, /^\/pair-bridge (probe|load)$/, 'startup must not request inference');
             const configuredMeshRoot = 'meshRoot' in options ? options.meshRoot : path.join(dir, 'fabric', 'mesh');
             const meshRoot = typeof configuredMeshRoot === 'function' ? configuredMeshRoot(dir, generation) : configuredMeshRoot;
@@ -99,7 +100,7 @@ async function fixture(options, run) {
               checkedAt: Date.now(),
             };
             await fs.writeFile(path.join(dir, 'probe.json'), JSON.stringify(probe));
-            return {};
+            return options.bridgeDisposition ? { disposition: options.bridgeDisposition } : {};
           }
           default: throw new Error(`Unexpected fixture RPC command: ${command}`);
         }
@@ -219,6 +220,28 @@ test('activation recheck still requires the exact private mesh root before any w
   });
 });
 
+test('startup accepts the bridge Pi 1.x reports as handled and refuses one it did not run as a command', async () => {
+  await fixture({ bridgeDisposition: 'handled' }, async f => {
+    const { runtime } = f.createRuntime();
+    await runtime.ensureStarted();
+    assert.equal(runtime.ready, true);
+  });
+  await fixture({ bridgeDisposition: 'started' }, async f => {
+    const { runtime } = f.createRuntime();
+    await assert.rejects(runtime.ensureStarted(), /did not run \/pair-bridge as a command \(prompt started\)/);
+    assert.equal(runtime.ready, false);
+  });
+});
+
+test('a work prompt an inherited extension consumed fails at once instead of waiting for a settle', () => fixture({ bridgeDisposition: 'handled', workPrompt: 'handled' }, async f => {
+  const { runtime, rpc } = f.createRuntime();
+  await runtime.ensureStarted();
+  const token = runtime.reserveActivation({ taskId: 'task', attemptId: 'attempt', leaseId: 'lease', workerGeneration: 1 });
+  await runtime.prepareActivation(token);
+  await assert.rejects(runtime.activate(token, 'Implement the step.'), /did not start a run for the work prompt \(prompt handled\).*runtime\.excludeExtensions/);
+  assert.equal(rpc.calls.filter(call => call.command === 'prompt' && call.fields.message === 'Implement the step.').length, 1, 'the work prompt is never resent');
+}));
+
 test('Pair stays inert inside Fabric child agents, including children of a Pair worker', () => {
   const worker = { PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: 'worker', PI_FABRIC_PAIR_NONCE: 'n' };
   assert.equal(roleFromEnvironment({}), 'main');
@@ -226,6 +249,9 @@ test('Pair stays inert inside Fabric child agents, including children of a Pair 
   assert.equal(roleFromEnvironment({ PI_FABRIC_PARENT_RUN: 'run-1' }), 'inert', 'a Fabric child of Main never starts its own controller');
   assert.equal(roleFromEnvironment({ ...worker, PI_FABRIC_PARENT_RUN: 'run-2' }), 'inert', 'inherited worker variables grant a Fabric child nothing');
   assert.equal(roleFromEnvironment({ PI_FABRIC_PARENT_RUN: '' }), 'main');
+  assert.equal(roleFromEnvironment({ ...worker, PI_FABRIC_LINEAGE: '{"version":1}' }), 'inert', "Fabric's documented lineage marks a child");
+  assert.equal(roleFromEnvironment({ ...worker, PI_FABRIC_DEPTH: '1' }), 'inert', 'a child sits below depth 0');
+  assert.equal(roleFromEnvironment({ ...worker, PI_FABRIC_DEPTH: '0' }), 'worker', 'depth 0 is a root');
   assert.throws(() => roleFromEnvironment({ PI_FABRIC_PAIR_WORKER_ID: 'worker' }), /Ambiguous Pair role/);
   const previous = process.env.PI_FABRIC_PARENT_RUN;
   const registered = [];

@@ -150,7 +150,7 @@ Do not send status messages or invoke Main merely to keep a cache warm. Native P
 owns scheduling, TTL/cost eligibility and safety windows. Prompt-cache warming is
 Fabric's `cache` provider (Fabric 0.97.0 or newer), not Pair's: `cache.status()` observes the local session,
 `cache.hold({durationMs})` is an explicit paid opt-in bounded to 30 minutes, and
-`cache.release({id})` ends it; on a Pi without scoped warming (stock 0.87.1) it
+`cache.release({id})` ends it; on a Pi without scoped warming (stock Pi through 1.1.0) it
 returns unsupported, so do not offer it there. Pair requests no leases and has no
 warming setting. The worker cannot be warmed through `cache.hold`; when the user
 has chosen Pi's native `idle` warming, Pair keeps your refreshes going while the

@@ -62,6 +62,8 @@ async function fixture() {
     sessionId: record.sessionId, ready: true, closed: false, fault: null, settledSequence: 1,
     takeObservations: () => [], abortCurrent: () => Promise.resolve(), abortAndStop: () => Promise.resolve(),
     waitIdle: () => Promise.resolve(), snapshot: () => ({ idle: true }), revoke: () => {},
+    // A run that has not ended itself within the grace: the report's settlement falls back to an abort.
+    settleOrAbort(reason) { return this.abortCurrent(reason); },
   };
   controller.handles.set(id, runtime);
   controller.runtimeData.set(runtime, {

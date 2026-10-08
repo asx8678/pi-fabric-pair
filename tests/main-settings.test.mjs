@@ -246,7 +246,7 @@ test('registered Main message hook preserves measured history through abort plac
 test('Main is pointed at cache.* only when the loaded Fabric has the cache provider', async () => {
   const guide = async fabric => {
     let content;
-    await fixture(async f => { content = (await f.events.get('before_agent_start')({ systemPrompt: 'Fixture' }, f.ctx))?.message?.content; },
+    await fixture(async f => { content = (await f.events.get('before_agent_start')({ systemPrompt: 'Fixture' }, f.ctx))?.systemPrompt; },
       { project: { version: 2, enabled: true, autoStart: false }, fabric });
     return content;
   };
@@ -254,7 +254,10 @@ test('Main is pointed at cache.* only when the loaded Fabric has the cache provi
   assert.match(old, /This Fabric \(0\.96\.3\) has no cache provider \(added in 0\.97\.0\)/);
   assert.doesNotMatch(old, /inspect warming with cache\.status\(\)/);
   const current = await guide('0.97.0');
-  assert.match(current, /Fabric's cache provider is loaded, but this Pi has no scoped warming API/, 'stock Pi 0.87.1 has no acquireCacheWarming');
+  assert.match(current, /Fabric's cache provider is loaded, but this Pi has no scoped warming API/, 'stock Pi (through 1.1.0) has no acquireCacheWarming');
   assert.match(await guide(undefined), /this version is unknown/, 'no readable Fabric version is stated as unknown');
-  for (const text of [old, current]) assert.match(text, /Never simulate warming/);
+  for (const text of [old, current]) {
+    assert.match(text, /^Fixture\n\nFabric Pair provides/, 'the guide is appended to the system prompt');
+    assert.match(text, /Never simulate warming/);
+  }
 });

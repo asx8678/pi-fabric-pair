@@ -1,11 +1,19 @@
 # Compatibility and inspected upstream contracts
 
+## Scripted local run: Pi 1.1.0, Fabric 0.109.5 (2026-10-08)
+
+This checkout was run end to end on **Pi 1.1.0 (its bundled build on Bun 1.4.2), Fabric 0.109.5, Fovea 0.31.4 and macOS**, in a disposable Git workspace and a private agent directory. Main ran in RPC mode, plus one pass in the interactive TUI. Both roles used a scripted OpenAI-compatible model on localhost, so no provider credentials or paid inference were involved.
+
+Observed: extension loading and worker readiness; dispatch; a revision and the next step in the same worker conversation; inspection and approval to completion; delivery of each report to an idle Main; `/pair restart worker`, then a second task on the retained session; a reasoning worker at effort `medium`; peer review through `pi -p`; a whole-context Fabric compaction inside a worker run, with Pair's history check and task-state restore; the worker refusing durable and background shells, `programs.run`, `sessions.open` and `thinking.set` before they run; `/pair stop` leaving no process behind; and the doctor, status, settings, dashboard, inbox and transcript panels in the TUI. With the previous code, a worker's durable shell job kept running after Pair stopped the worker and Main exited.
+
+Not covered: real providers, Pi's cache-warming refreshes, other installed extensions, crash recovery, Windows and Linux. This checks the integration path; it does not certify providers.
+
 ## Historical supervised MVP observation (predates the handoff changes)
 
-**Current native qualification: NOT RUN.** The observation below predates the
+The observation below predates the
 report-delivery, phase/branch-fencing, retained-scope, reconciliation, repository-lock and
 background-activation changes; it is
-retained as historical evidence and does not qualify this checkout.
+retained as historical evidence. The 2026-10-08 run above covers this checkout on the versions it names.
 
 The historical public Controller/PiRuntime/PiRpc/Worker path was exercised on **Pi 0.87.1, Fabric 0.96.3, Fovea 0.31.1, Node 24 and macOS**. A disposable Git workspace and private temporary agent directory used an OpenAI-compatible deterministic loopback model, with no real provider credentials or paid inference.
 
@@ -21,14 +29,29 @@ Originally inspected on **2026-09-23** from the supplied reference sources: Pi 0
 
 | Project | Package version inspected | Repository |
 |---|---|---|
-| Pi coding agent | 0.87.1 | https://github.com/earendil-works/pi |
-| Fabric | 0.93.0 (contracts); 0.97.0 `cache` provider, result proxy and `fabric_exec` input (installed: 0.97.0) | https://github.com/monotykamary/pi-fabric |
-| Fovea | 0.29.2 | https://github.com/monotykamary/pi-fovea |
+| Pi coding agent | 1.1.0 (run 2026-10-08); contracts first inspected at 0.87.1 | https://github.com/earendil-works/pi |
+| Fabric | 0.109.5 (run 2026-10-08); contracts first inspected at 0.93.0, and the `cache` provider, result proxy and `fabric_exec` input at 0.97.0 | https://github.com/fabric-runtime/pi-fabric |
+| Fovea | 0.31.4 (run 2026-10-08); first inspected at 0.29.2 | https://github.com/monotykamary/pi-fovea |
 
 Versions identify the source inspected, not npm publication status or a live
 compatibility certification. Use the versions already proven in your environment,
 compare these contracts and run the permitted static checks before updating.
 Behavioral/native qualification requires separate owner authorization.
+
+## Pi 1.x and Fabric 0.109 notes (2026-10-08)
+
+The touchpoints above were re-read against the Pi 1.1.0 and Fabric 0.109.5 sources; the scripted run at the top exercised them. Pair's dev toolchain pins Pi 1.1.0, and Pair warns outside `>=1.1.0 <1.2.0`.
+
+- Pi: RPC command names and request/response shapes, `get_state` fields, the event names Pair handles, compaction reasons, session format version 3, entry types, thinking levels and stop reasons are unchanged; only optional fields were added (prompt `data.disposition`, `tool_execution_*` `parentToolCallId`/`durationMs`, `agent_settled.aborted`, and `fromHook`/`systemMessage` on compaction entries). `cache-warmer.ts` is unchanged and still has no `acquireCacheWarming`.
+- Fabric's tool placement query (`pi-fabric:tool-placement:v1` on `pi.events`, 0.103.0+) answers synchronously with `{mode, tools: {name: model|program|unavailable}}`. A tool reads `unavailable` until Fabric's runtime starts, so Pair words its guides from `model` and the mode, and treats `enforce` as unreachable.
+- Pi's `terminate` on a tool result ends the run after that tool batch, and Fabric (checked at 0.104.1 and 0.109.5) sets it on `fabric_exec`'s result when the program returns a result carrying it. Pi's `registerMessageRenderer` (already in 0.87.1) renders Pair's custom messages in the TUI; the model still receives their content.
+- The worker's environment sets `PI_FABRIC_THINKING_BOUNDS` (`{min, max}` both the worker's effort); a root Fabric session clamps its own level selection into it (0.103.0+; older Fabric ignores it).
+- RPC prompt replies carry `data.disposition` (0.99.0): `handled` (an extension command ran, or an `input` handler consumed the prompt), `queued` or `started`. Pair requires `handled` for `/pair-bridge` and `started` for the work prompt, and skips the check when the field is absent.
+- In code mode Fabric hides Pair's tool declarations while they stay active, and Pi 1.x drops a hidden tool's `promptGuidelines`; Fabric 0.109.5 (not 0.104.1) adds them back to `fabric_exec`'s description. So Pair appends its Main guide to the system prompt. Inside a program a captured tool's result is `{content, text, details?, isError, structuredContent?, terminate?, source}` (`providers/captured-tools-provider.ts`) and Fabric shows all of it; Pair's tools return their value only as text.
+- Pi compacts inside a run, before the next model request, and holds a `triggerTurn: false` message until that turn ends (already so in 0.87.1). Fabric 0.109.5's whole-context summary can cut the current work order down to its first line. So the worker also adds its task state to each model request through Pi's `context` event until the queued copy is in context; the run above lost the step without it.
+- Pi maps an extension's `@earendil-works/*` imports to its own copies, but a physical copy in the extension's directory bypasses that (Pi's `docs/packages.md`). A checkout with dev dependencies installed made Pair read `VERSION`, `keyHint` and pi-tui from its own `node_modules` (seen with Pi 1.1.0's bundled build on Bun, where `/pair doctor` named the dev pin, 0.87.1, as the running Pi). Load Pair from a checkout without `node_modules`, and run the tests in a separate clone.
+- Pi 0.99.0 and later load built-in extensions (llama.cpp, codemode, tool-search, MCP) in every process, including workers. `--no-extensions` (used when `runtime.inheritExtensions` is false) now also drops them, and `--no-mcp` (1.0.4) drops MCP alone. With inherited extensions a writer worker connects the user's MCP servers, whose `mcp__*` tools Pair's mutation check does not classify.
+- Pi 0.99.0 sends no output cap for OpenAI models used with a ChatGPT sign-in (`provider: openai`, non-`sk-` key), like Codex. Pair's 240 s default lifetime and warming decisions exclude only `openai-codex-responses`, so such a model would get full-reply refreshes. Pi 1.0.3 renames the Azure provider `azure-openai-responses` to `azure`; stored worker specs that name the old one fail to launch.
 
 ## Source provenance
 
@@ -62,11 +85,11 @@ that every fetched `main` file came from that exact commit.
 - Fabric replay of nested host `tool_call` events with fully qualified tool refs.
 - Normal Fabric capture of `pair_*` registered extension tools.
 - Fabric 0.97.0 `cache.status` / `cache.hold` / `cache.release` provider actions for prompt-cache warming (Pair holds no native leases itself). Pair reads the loaded Fabric's package version: below 0.97.0 Main's guide says warming is unavailable and `/pair doctor` notes it; everything else works on 0.96.3.
-- Fabric's nested result proxy: provider actions (`agents.*`, `jev.*`, `mesh.*`, …) raise no `tool_call`, but their successful results pass through Pi's `tool_result` with `toolName` set to the action ref and `details.kind` `pi-fabric.tool-result-proxy.v1` (present in 0.96.3 and 0.97.0, `src/core/tool-result-proxy.ts`). The worker treats a successful `agents.spawn`, `agents.create`, `agents.import`, `agents.subscribe`, `jev.spawn`, `cache.hold` or `components.apply` as a detached effect, and so is a `schema.commit` (which writes files with no `tool_call`, `src/schema/controller.ts`) after the report latched.
+- Fabric's nested result proxy: provider actions (`agents.*`, `jev.*`, `mesh.*`, …) raise no `tool_call`, but their successful results pass through Pi's `tool_result` with `toolName` set to the action ref and `details.kind` `pi-fabric.tool-result-proxy.v1` (present in 0.96.3 and 0.97.0, `src/core/tool-result-proxy.ts`). The worker treats a successful `agents.spawn`, `agents.create`, `agents.import`, `agents.subscribe`, `jev.spawn`, `cache.hold`, `components.apply`, `sessions.open` (an interactive jev-fabric child), `tasks.adopt` or `mesh.grant` as a detached effect, and so is a `schema.commit` (which writes files with no `tool_call`, `src/schema/controller.ts`) after the report latched. The last three, `programs.*`, `thinking.*` and durable `pi.bash({durable, notify})` arrived after 0.97.0 and are present in the installed 0.104.1. A worker program that calls `programs.run` (saved code the program check cannot read) or `thinking.set` (the worker's effort) is refused before it runs; a durable bash is refused like a background one. A scheduled `mesh.publish` (`notBefore`/`afterMs`, result `scheduled: true`) is not treated as detached: the event lands later on the worker's private mesh, and a turn it starts outside an active lease is aborted. The proxy kind and fields are unchanged at 0.109.5.
 - Fabric's `fabric_exec` input is one `code` string (`src/fabric-exec-tool.ts`) and its outer `tool_call` fires before the program runs. Pair reads that code, outside strings and comments, to block a worker program that calls a detaching action directly and, while Main supervises a task, a Main program that calls `schema.commit`.
-- Pi's native cache warmer (0.87.1 `core/cache-warmer.js`): modes `off`/`streaming`/`idle` read from global settings only; a `cache_warming_decision` event carries `warmCost`, `missCost`, `continuationProbability` (0.15 when idle) and Pi's `action`, and the last handler's `action` wins. Pi refreshes when expected savings reach $0.05. Pi 0.87.1 has no `acquireCacheWarming`, which Fabric's `cache.hold` needs. Pi warms only models with a `promptCache` lifetime (built-in: Anthropic only; `models.json` `modelOverrides` add one, including for extension providers); Pair sets a 240 s default on the model object Pi passes to its warmer (`ctx.model` is `agent.state.model`, checked in a live process) when none is known. Pi refreshes at 90% of the lifetime, stops idle warming 30 minutes after the last real request, and records each refresh as a `usage` session entry announced by an `entry_appended` RPC event, which the worker's history check tolerates. Pair answers `cache_warming_decision` for Main while the worker works and for the worker while its report waits. Its Codex request builder (`openai-codex-responses`) sends no output cap, so a refresh there is a full reply; Pair never requests one. The ChatGPT Codex backend rejects `max_output_tokens`, `prompt_cache_options` and `prompt_cache_retention` for `gpt-6-astra` (checked 2026-09-27), so neither Pi nor Fabric can refresh or extend a Codex cache there.
-- Fabric's resident-host layout: a durable request writes `<PI_FABRIC_MESH_ROOT>/residency/<sha256(root id)>/owner.json` with `format: 1`, `hostId`, `pid` and `startedAt` (0.96.3 and 0.97.0, `src/residency/protocol.ts`). Fabric launches the host before its depth check. Pair reads these files under the worker's private mesh and never signals the recorded PID.
-- Fabric's `PI_FABRIC_PARENT_RUN`, which Fabric sets on every child agent and actor it launches (inspected in Fabric 0.97.0 `src/worker.ts`). Pair loads inert when it is present. The variable is not a documented Fabric contract; an upstream request asks for one. Without it, role detection is unchanged.
+- Pi's native cache warmer (0.87.1 `core/cache-warmer.js`, unchanged through 1.1.0): modes `off`/`streaming`/`idle` read from global settings only; a `cache_warming_decision` event carries `warmCost`, `missCost`, `continuationProbability` (0.15 when idle) and Pi's `action`, and the last handler's `action` wins. Pi refreshes when expected savings reach $0.05. Pi through 1.1.0 has no `acquireCacheWarming`, which Fabric's `cache.hold` needs. Pi warms only models with a `promptCache` lifetime (built-in: Anthropic only; `models.json` `modelOverrides` add one, including for extension providers); Pair sets a 240 s default on the model object Pi passes to its warmer (`ctx.model` is `agent.state.model`, checked in a live process) when none is known. Pi refreshes at 90% of the lifetime, stops idle warming 30 minutes after the last real request, and records each refresh as a `usage` session entry announced by an `entry_appended` RPC event, which the worker's history check tolerates. Pair answers `cache_warming_decision` for Main while the worker works and for the worker while its report waits. Its Codex request builder (`openai-codex-responses`) sends no output cap, so a refresh there is a full reply; Pair never requests one. The ChatGPT Codex backend rejects `max_output_tokens`, `prompt_cache_options` and `prompt_cache_retention` for `gpt-6-astra` (checked 2026-09-27), so neither Pi nor Fabric can refresh or extend a Codex cache there.
+- Fabric's resident-host layout: a durable request writes `<PI_FABRIC_MESH_ROOT>/residency/<sha256(root id)>/owner.json` with `format: 1`, `hostId`, `pid` and `startedAt` (0.96.3 through 0.109.5, `src/residency/protocol.ts`; later releases add `identity` and `heartbeatAt`, which Pair ignores). Fabric launches the host before its depth check. Pair reads these files under the worker's private mesh and never signals the recorded PID.
+- Fabric's child markers. Fabric now documents `PI_FABRIC_LINEAGE` and `PI_FABRIC_DEPTH` (root 0) as its child environment contract and calls every other `PI_FABRIC_*` variable internal (`docs/agents.md`, "Child environment contract"). `PI_FABRIC_PARENT_RUN` is still set on every child it launches, including durable runners (`src/worker.ts`, 0.109.5). Pair loads inert when `PI_FABRIC_PARENT_RUN` or `PI_FABRIC_LINEAGE` is set or `PI_FABRIC_DEPTH` is above 0. Without them, role detection is unchanged. `PI_FABRIC_MESH_ROOT` is likewise internal by that rule; its meaning is unchanged.
 - Fabric's Prewalk auto-arm rule: only a root session with `prewalk.alwaysRearm: true` arms itself (Fabric 0.97.0 `src/prewalk/arm.ts`). Pair's profile check requires that auto-arm is off, not that Prewalk is disabled.
 - Pi's RPC `agent_end` and `turn_end` lines repeat the run's messages and the turn's tool results. Pair delivers an oversized one by type only, since it reads neither payload; any other oversized line still faults the worker.
 
@@ -76,7 +99,7 @@ Source/documentation references:
 - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md
 - https://pi.dev/docs/latest/packages
 - https://pi.dev/docs/latest/settings
-- https://github.com/monotykamary/pi-fabric/blob/main/docs/providers.md
+- https://github.com/fabric-runtime/pi-fabric/blob/main/docs/providers.md
 - https://github.com/monotykamary/pi-fovea
 
 ## Adapter choice
@@ -138,7 +161,7 @@ The [held-carrier amendment](D5-HELD-CARRIER-CONTRACT.md) extends only `projectL
 
 ## Environment
 
-**Pinned static toolchain restored:** the authorized local install uses SDK/TUI 0.87.1, MCP 1.30.0, Node declarations 24.13.6 and TypeScript 5.9.3. `npm run typecheck -- --pretty false` now passes unchanged project options without path mappings, shims or suppressions. A direct TUI dev pin is required by `src/ui.js`'s type-only `Component` import; SDK-private nesting is not a root dependency. Production source is unchanged. Lifecycle scripts were disabled and no native/runtime qualification follows; [checkpoint](T10-CONTRACT-FREEZE-CANDIDATE.md#8-authorized-pinned-toolchain-follow-up).
+**Pinned static toolchain restored:** the authorized local install uses SDK/TUI 1.1.0, MCP 1.30.0, Node declarations 24.13.6 and TypeScript 5.9.3. `npm run typecheck -- --pretty false` now passes unchanged project options without path mappings, shims or suppressions. A direct TUI dev pin is required by `src/ui.js`'s type-only `Component` import; SDK-private nesting is not a root dependency. Production source is unchanged. Lifecycle scripts were disabled and no native/runtime qualification follows; [checkpoint](T10-CONTRACT-FREEZE-CANDIDATE.md#8-authorized-pinned-toolchain-follow-up).
 
 Target: Node >=24, because Fabric 0.93.0 requires it. The current working-tree checks passed on Darwin 27.2.0 arm64, Node 24.21.0, and Apple Git 2.54.0. The historical source artifact also ran its earlier 55-test suite on Linux/Node 22, but that does **not** qualify the upstream Fabric stack on Node 22.
 
@@ -176,6 +199,7 @@ them is NOT RUN, and a Pair package loaded into a running session may differ fro
 the checkout source.
 
 ## Upgrade checklist
+Install development dependencies only in a clone that Pi does not load Pair from (see the Pi 1.x notes above).
 Record installed versions and any patches. Inspect source and run the retained
 static checks: `npm run typecheck` (pinned strict project check) and
 `npm run pack:check` (an npm package dry run); neither loads or behaviorally

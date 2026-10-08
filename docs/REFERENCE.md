@@ -329,8 +329,9 @@ Fabric captures Pair's tools like any extension tool and gives them its
 conservative default risk, `execute`, because Pi tool definitions carry no effect
 metadata. With Fabric's default policy (`allow` for every risk class) this changes
 nothing. If you set `ask`, `auto` or `deny` for some classes, add Pair's tools to
-`capture.risks` in `fabric.json`; entries merge over Fabric's defaults. Pair never
-edits Fabric configuration itself.
+`capture.risks` in `fabric.json`; entries merge over Fabric's defaults. Pair edits
+Fabric configuration only through the profile repair `/pair start` offers, and only
+after you confirm it.
 
 ```json
 {
@@ -351,6 +352,44 @@ edits Fabric configuration itself.
 
 `pair_dispatch`, `pair_decide` and `pair_recover` start or continue worker inference, so they are
 `agent`. `pair_report` runs in the worker and ends its implementation lease.
+
+Fabric 0.103.0 and later also accept per-action overrides under `approvals.actions`,
+keyed by exact ref (`extensions.pair_status`) or a provider wildcard (`extensions.*`).
+Values are `allow`, `ask` or `deny`; an exact ref beats a wildcard, which beats the
+risk class, and `deny` cannot be lifted by a session grant. For example, to keep
+Pair's reads unprompted while every other extension tool asks:
+
+```json
+{ "approvals": { "actions": { "extensions.*": "ask", "extensions.pair_status": "allow", "extensions.pair_inspect": "allow" } } }
+```
+
+### Optional Fabric and Pi settings
+
+- **Pair's tools as model tools.** In full code mode Main reaches Pair's tools only
+  inside `fabric_exec`. Fabric 0.103.0 and later can declare a few extension tools
+  beside it with `foreground`, so the model sees their schemas and calls them
+  directly. The setting is shared by
+  every session that reads the same `fabric.json`, and Fabric warns once per
+  session about a listed tool that session lacks (the worker has only
+  `pair_report`, Main has everything else). Main's guide names the tools it may
+  call directly and sends the rest through `fabric_exec`. To give Main the four it
+  uses most:
+
+  ```json
+  { "foreground": { "tools": [
+    { "name": "pair_status", "owner": "pi-fabric-pair", "reason": "turn-steering" },
+    { "name": "pair_dispatch", "owner": "pi-fabric-pair", "reason": "turn-steering" },
+    { "name": "pair_inspect", "owner": "pi-fabric-pair", "reason": "turn-steering" },
+    { "name": "pair_decide", "owner": "pi-fabric-pair", "reason": "turn-steering" }
+  ], "maxTools": 4 } }
+  ```
+
+- **No MCP servers in the worker.** Pi 1.x loads its built-in MCP support in every
+  process, so a worker with inherited extensions connects your MCP servers and
+  their tool roster is part of every worker request. Add `"--no-mcp"` to
+  `runtime.commandArgs` to skip them. An inherited extension that registers an MCP
+  server then fails to load in the worker, and Pair holds the worker on that
+  error; exclude such an extension with `runtime.excludeExtensions`.
 
 ## Context, warming and cost
 
@@ -383,7 +422,7 @@ accepted and ignored. Native eligibility, economics and safety windows remain
 authoritative; holding a lease does not prove a refresh occurred or guarantee a
 cache hit. See Fabric's `docs/prompt-cache.md`. With an older Fabric, Main's guide
 says warming is unavailable instead of pointing at `cache.*`, and `/pair doctor`
-notes the missing provider. Stock Pi 0.87.1 has no scoped warming API
+notes the missing provider. Pi through 1.1.0 has no scoped warming API
 (`acquireCacheWarming`), so `cache.hold` returns `unsupported` there even on
 Fabric 0.97.0; Main's guide and `/pair doctor` say so.
 
@@ -403,10 +442,10 @@ request treated as certain):
   continues the same worker session. Final reviews and finished tasks are left to Pi.
 
 Pair never stops a refresh Pi chose, never changes the setting, and never asks Pi
-to warm a Codex model (`openai-codex-responses`): Pi 0.87.1 sends that API no output
+to warm a Codex model (`openai-codex-responses`): Pi (through 1.1.0) sends that API no output
 cap, and the ChatGPT backend accepts no cache-lifetime option either.
 
-Pi warms only models with a `promptCache` lifetime, and Pi 0.87.1 ships one only for
+Pi warms only models with a `promptCache` lifetime, and Pi (through 1.1.0) ships one only for
 Anthropic models. So that warming covers every model, each role gives the model
 about to run a 240-second lifetime (`DEFAULT_CACHE_LIFETIME_S`) when Pi knows none,
 at `before_agent_start`. Provider caches mostly fade after 3–5 idle minutes. A
@@ -417,20 +456,20 @@ stops 30 minutes after the session's last request. With `off` or Pi's default
 `streaming`, the hook never fires for an idle session. `/pair doctor` says when a
 role uses a Codex model.
 
-**Pi 0.87.1 does not run these refreshes with Pair.** Live checks found that Pi's
+**Pi does not run these refreshes with Pair (0.87.1 through 1.1.0).** Live checks on 0.87.1 found that Pi's
 idle warmer stops, before its first refresh, in any session that holds a custom
 message (Pair's guide, task-state and report messages) or a compaction summary
 while an extension handles `agent_before_settle` (Pair, Fabric and Fovea do). Each
 settle rebuilds those messages as new objects, and Pi reads that as a changed
-conversation. So Pair's decisions above take effect only on a Pi that compares
+conversation; Pi 1.1.0 still compares them by identity. So Pair's decisions above take effect only on a Pi that compares
 them by value. With that one-line change in a scratch copy of Pi, the worker's
 first request after a 270-second review read 99% from cache instead of 2%, and a
 143k-token Main got its refresh while the worker ran. Until Pi fixes it, each
 role's cache lasts only as long as the provider keeps it.
 
-Pi prices a refresh from the last assistant message on the branch. A report made
-through `fabric_exec` ends the worker's run on an aborted request with no usage, so
-Pi sees a zero-token prompt; when Pi's `missCost` is 0, Pair prices the role's last
+Pi prices a refresh from the last assistant message on the branch. A report whose
+run Pair had to abort (the program went on after `pair_report`) can end on a
+request with no usage, so Pi sees a zero-token prompt; when Pi's `missCost` is 0, Pair prices the role's last
 measured prompt with the model's rates and tiers instead. Pi's own status line may
 still read "cache economics unavailable" while refreshes continue; the session's
 `cache_warm` usage entries show what actually ran.
@@ -474,7 +513,10 @@ what processes can do.
   services, ignored files, or arbitrary shell side effects. Pair does not create
   branches, merge, commit, push, or deploy on your behalf.
 
-A bounded integration run exercised actual **Pi 0.87.1, Fabric 0.96.3,
+On 2026-10-08 a scripted local run exercised this checkout on **Pi 1.1.0 (on Bun),
+Fabric 0.109.5 and Fovea 0.31.4**: the full review loop, restart onto a retained session,
+peer review, a compaction inside a worker run, the worker's refusals and the TUI panels
+(see [compatibility](COMPATIBILITY.md)). An earlier bounded integration run exercised actual **Pi 0.87.1, Fabric 0.96.3,
 Fovea 0.31.1, and Node 24 on macOS**, using a deterministic local model. It covered
 the question/review/revision loop, retained sessions, rejection of stale or
 duplicate decisions, cancellation, and confirmed stop. It did not qualify paid
@@ -484,5 +526,5 @@ providers, the interactive Main TUI, or other platforms. See
 phase/branch-fencing, retained-scope, reconciliation, repository-lock and
 background-activation behavior described above: those are covered by offline
 tests with fakes of Pi and the worker RPC, and have **not** been natively qualified.
-Pair is verified against Pi `>=0.87.1 <0.88.0` and warns on other versions. The Pair package loaded into a running session
+Pair is verified against Pi `>=1.1.0 <1.2.0` and warns on other versions. The Pair package loaded into a running session
 may differ from this checkout's source.

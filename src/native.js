@@ -4,7 +4,7 @@ import { agentDir, assert, canonical, merge, ownerAlive, plain, readJSON, readJS
 
 /**
  * @typedef {{name: string, source?: string, sourceInfo?: {path?: string}}} NativeRegistration
- * @typedef {{getAllTools: () => NativeRegistration[], getCommands: () => NativeRegistration[], getThinkingLevel: import('@earendil-works/pi-coding-agent').ExtensionAPI['getThinkingLevel']}} NativeAPI
+ * @typedef {{getAllTools: () => NativeRegistration[], getCommands: () => NativeRegistration[], getThinkingLevel: import('@earendil-works/pi-coding-agent').ExtensionAPI['getThinkingLevel'], events?: {emit(channel: string, data: unknown): void}}} NativeAPI
  * @typedef {{cwd: string, model?: {provider: string, id: string, contextWindow: number}, sessionManager: {getSessionId: () => string, getSessionFile: () => string | undefined}, isProjectTrusted?: () => boolean, getContextUsage?: () => import('./contracts.js').StoredContextUsage | undefined}} NativeContext
  */
 /** @param {unknown} name */
@@ -98,6 +98,29 @@ export function fabricHasCache(version) {
   const want = FABRIC_CACHE_VERSION.split('.').map(Number);
   for (let i = 0; i < 3; i++) if (Number(have[i + 1]) !== want[i]) return Number(have[i + 1]) > want[i];
   return true;
+}
+/**
+ * Fabric's tool placement query (0.103.0+): how the model can reach each named tool this turn.
+ * `null` without a reply (no Fabric, or an older one).
+ * @param {{events?: {emit(channel: string, data: unknown): void}}} pi @param {string[]} tools
+ * @returns {{mode: string, tools: Record<string, unknown>} | null}
+ */
+export function toolPlacement(pi, tools) {
+  /** @type {unknown} */ let result = null;
+  try { pi.events?.emit('pi-fabric:tool-placement:v1', { tools, reply: (/** @type {unknown} */ value) => { result = value; } }); } catch { return null; }
+  return plain(result) && plain(result.tools) && typeof result.mode === 'string' ? /** @type {{mode: string, tools: Record<string, unknown>}} */ (result) : null;
+}
+/**
+ * How a role calls one of Pair's tools: `direct` (declared to the model), `program` (inside
+ * fabric_exec) or `unreachable` (Schema enforce mode mounts no extensions provider). A tool reads
+ * `unavailable` until Fabric's runtime starts, so only `model` and the mode decide.
+ * @param {{mode: string, tools: Record<string, unknown>} | null} placement @param {string} name @param {boolean} fabricLoaded
+ * @returns {'direct' | 'program' | 'unreachable'}
+ */
+export function pairToolRoute(placement, name, fabricLoaded) {
+  if (!placement) return fabricLoaded ? 'program' : 'direct';
+  if (placement.tools[name] === 'model') return 'direct';
+  return placement.mode === 'enforce' ? 'unreachable' : 'program';
 }
 /** @param {Pick<NativeAPI, 'getAllTools' | 'getCommands'>} pi @returns {Promise<unknown>} */
 export function fabricVersion(pi) {
@@ -251,7 +274,7 @@ export async function probeNative(pi, ctx) {
     sessionId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile(),
     model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id, contextWindow: ctx.model.contextWindow } : null,
     thinkingLevel: pi.getThinkingLevel(),
-    capabilities: { fabric: hasFabric, fovea: hasFovea, pairReport: names.some(n => toolName(n) === 'pair_report') },
+    capabilities: { fabric: hasFabric, fovea: hasFovea, pairReport: names.some(n => toolName(n) === 'pair_report') && pairToolRoute(toolPlacement(pi, ['pair_report']), 'pair_report', hasFabric) !== 'unreachable' },
     versions: { fabric: await fabricVersion(pi), fovea: await packageVersion(foveaSource, 'pi-fovea') },
     sourcePaths: sourcePaths(pi),
     context: ctx.getContextUsage?.() || null,
@@ -281,7 +304,7 @@ export function checkReadiness(probe, rpcState, config, worker, cwd, expectedMes
   assert(probe.thinkingLevel === rpcState.thinkingLevel, 'Worker bridge and RPC thinking levels differ');
   if (config.requirements.fabric) assert(probe.capabilities.fabric, 'Worker has no fabric_exec. Install/load pi-fabric or specify runtime.extraExtensions.');
   if (config.requirements.fovea) assert(probe.capabilities.fovea, 'Worker has no registered Fovea tools/command. Install/load pi-fovea or specify runtime.extraExtensions.');
-  assert(probe.capabilities.pairReport, 'Worker reporting bridge did not load');
+  assert(probe.capabilities.pairReport, 'Worker cannot reach pair_report: its reporting bridge did not load, or Fabric Schema enforce mode hides it from programs. Leave enforce mode for the worker.');
   assert(!(worker.readOnly && probe.capabilities.fabric), 'UNSUPPORTED_PROFILE: read-only Pair workers cannot safely expose generic Fabric providers without a pre-effect authorization seam. Use the qualified single-writer profile.');
   if (probe.capabilities.fabric) {
     const blockers = nativeProfileBlockers(probe.native, config.requirements);
@@ -302,7 +325,9 @@ function isReadCapability(name) {
 /** @param {unknown} name @param {unknown} input */
 export function requestsDetachedEffect(name, input) {
   const n = toolName(name);
-  return /^(bash|powershell)$/.test(n) && input !== null && (typeof input === 'object' || typeof input === 'function') && (('background' in input && input.background === true) || ('run_in_background' in input && input.run_in_background === true) || ('monitor' in input && input.monitor !== undefined));
+  return /^(bash|powershell)$/.test(n) && input !== null && (typeof input === 'object' || typeof input === 'function') && (('background' in input && input.background === true) || ('run_in_background' in input && input.run_in_background === true) || ('monitor' in input && input.monitor !== undefined)
+    // Fabric's durable bash hands the job to jev-fabric, which keeps it running after the worker exits.
+    || ('durable' in input && input.durable === true) || ('notify' in input && input.notify !== undefined));
 }
 /** Fabric provider actions whose effect outlives the call, with what each one leaves behind. */
 const DETACHING_FABRIC_ACTIONS = new Map([
@@ -312,8 +337,22 @@ const DETACHING_FABRIC_ACTIONS = new Map([
   ['agents.subscribe', 'registered a lasting lifecycle subscription that can start later turns'],
   ['jev.spawn', 'left a background program running'],
   ['cache.hold', 'started a paid prompt-cache warming lease'],
-  ['components.apply', 'changed Fabric component configuration']
+  ['components.apply', 'changed Fabric component configuration'],
+  ['sessions.open', 'left an interactive child process running'],
+  ['tasks.adopt', 'took over a background task that keeps running'],
+  ['mesh.grant', 'issued a token that lets another process post to the mesh']
 ]);
+/**
+ * Fabric actions Pair refuses in a worker program before it runs. `programs.run` executes saved
+ * code that the program check cannot read; `thinking.set` changes the effort Pair fixed at startup
+ * (Pi's `thinking_level_changed` still holds the worker if a computed ref gets through).
+ */
+const REFUSED_WORKER_ACTIONS = new Map([
+  ['programs.run', 'runs saved code Pair cannot check before it runs'],
+  ['thinking.set', 'changes the effort Pair fixed for this worker']
+]);
+/** Fabric actions that run saved code, which may write files Pair cannot see coming. */
+export const FABRIC_PROGRAM_RUNNERS = ['programs.run'];
 /** @param {unknown} name @param {unknown} details */
 function fabricResultProxy(name, details) {
   return typeof name === 'string' && plain(details) && details.kind === 'pi-fabric.tool-result-proxy.v1' && details.ref === name;
@@ -381,15 +420,20 @@ export function programCalls(code, refs) {
 export function detachingProgramCalls(name, input) {
   return toolName(name) === 'fabric_exec' && plain(input) ? programCalls(input.code, DETACHING_FABRIC_ACTIONS.keys()) : [];
 }
+/** @param {unknown} name @param {unknown} input @returns {string | null} why Pair refuses this worker program, if it does */
+export function refusedProgramReason(name, input) {
+  const refs = toolName(name) === 'fabric_exec' && plain(input) ? programCalls(input.code, REFUSED_WORKER_ACTIONS.keys()) : [];
+  return refs.length ? `Pair workers cannot call ${refs.map(ref => `${ref}: it ${REFUSED_WORKER_ACTIONS.get(ref)}`).join('; ')}. Do this step's work directly in this session.` : null;
+}
 /** Pi's cache warmer refreshes when expected savings reach this many dollars. */
 const PI_MIN_EXPECTED_SAVINGS_USD = 0.05;
 /**
  * @typedef {{provider?: unknown, id?: unknown, api?: unknown, cost?: unknown, promptCache?: {short?: unknown, long?: unknown}}} WarmedModel
  */
 /**
- * Pi prices a refresh from the last assistant message on the branch. A Pair report ends the
- * worker's run on an aborted request with no usage, so Pi sees a zero-token prompt and never
- * warms. This prices a measured prompt of `tokens` the way Pi does (dollars per million, tiers).
+ * Pi prices a refresh from the last assistant message on the branch. A report run Pair had to
+ * abort (the program went on after pair_report) can end on a request with no usage, so Pi sees a
+ * zero-token prompt and never warms. This prices a measured prompt of `tokens` the way Pi does (dollars per million, tiers).
  * @param {WarmedModel | null | undefined} model @param {number} tokens
  * @returns {{missCost: number, warmCost: number} | null}
  */

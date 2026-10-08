@@ -979,3 +979,57 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
     } catch (error) { ctx.ui.notify(`Setting not saved: ${briefError(error)}`, 'error'); }
   }
 }
+
+/** @param {unknown} content @returns {string} */
+function messageText(content) {
+  if (typeof content === 'string') return content;
+  return Array.isArray(content) ? content.map(part => (part && typeof part === 'object' && 'text' in part && typeof part.text === 'string' ? part.text : '')).join('\n') : '';
+}
+/**
+ * Transcript lines for a Pair message (report, notice, supervision, check): a short card instead of
+ * the raw text. The model still reads the full content. `null` leaves Pi's default rendering.
+ * @param {string} text @param {boolean} expanded @returns {[string | null, string][] | null}
+ */
+export function pairMessageLines(text, expanded) {
+  const kind = /^FABRIC PAIR (REPORT|NOTICE|SUPERVISION|CHECK)\b/.exec(text)?.[1];
+  if (!kind) return null;
+  if (kind !== 'REPORT') {
+    const body = text.replace(/^FABRIC PAIR [A-Z]+\s*[—-]?\s*/, '').split('\n');
+    return [['accent', `Pair ${kind.toLowerCase()}`], ...(expanded ? body : body.slice(0, 2)).map(/** @returns {[string | null, string]} */ line => ['muted', `  ${line}`])];
+  }
+  /** @type {Record<string, any>} */ let r;
+  try { r = JSON.parse(text.slice(text.indexOf('\n{') + 1)); } catch { return null; }
+  if (!r || typeof r !== 'object') return null;
+  const summary = typeof r.summary === 'string' ? r.summary.split('\n') : [];
+  const files = Array.isArray(r.actualChangedFiles) ? r.actualChangedFiles : Array.isArray(r.changedFiles) ? r.changedFiles : [];
+  const checks = Array.isArray(r.checks) ? r.checks : [];
+  const failed = checks.filter(c => c && c.result === 'fail').length;
+  const peer = r.peerReview && typeof r.peerReview.verdict === 'string' ? ` · peer review ${r.peerReview.verdict}` : '';
+  /** @type {[string | null, string][]} */
+  const lines = [['accent', `Pair report · ${r.workerId} · ${r.kind} · step ${r.stepId}${peer}`]];
+  lines.push(...(expanded ? summary : summary.slice(0, 1)).map(/** @returns {[string | null, string]} */ line => [null, `  ${line}`]));
+  if (typeof r.question === 'string') lines.push(['warning', `  Question: ${expanded ? r.question : inline(r.question, 200)}`]);
+  const shown = expanded ? files : files.slice(0, 5);
+  lines.push(['muted', `  ${r.changedFileCount ?? files.length} changed${shown.length ? `: ${shown.join(', ')}` : ''}${shown.length < files.length ? ', …' : ''}`]);
+  if (checks.length) lines.push([failed ? 'error' : 'muted', `  checks: ${checks.length - failed} pass${failed ? `, ${failed} fail` : ''}${expanded ? ` (${checks.map(c => `${c.name}: ${c.result}`).join('; ')})` : ''}`]);
+  if (expanded) lines.push(['dim', `  report ${r.reportId} · checkpoint ${String(r.checkpointHash || '').slice(0, 12)}`]);
+  return lines;
+}
+/**
+ * @param {{content: unknown}} message @param {{expanded: boolean, outputPad?: number}} options
+ * @param {{fg(color: any, text: string): string} | undefined} theme
+ * @returns {import('@earendil-works/pi-tui').Component | undefined}
+ */
+export function pairMessageComponent(message, options, theme) {
+  const lines = pairMessageLines(messageText(message.content), options.expanded);
+  if (!lines) return undefined;
+  const pad = ' '.repeat(Math.max(0, options.outputPad ?? 1));
+  return {
+    invalidate() {},
+    /** @param {number} width */
+    render(width) {
+      const inner = Math.max(10, width - pad.length * 2);
+      return lines.flatMap(([color, line]) => wrapTextWithAnsi(color && theme ? theme.fg(color, line) : line, inner).map(part => pad + part));
+    },
+  };
+}

@@ -33,6 +33,8 @@ const MAX_AUTO_ATTEMPTS = 3;
 const RETAINED_TASKS = 5;
 const RETAINED_REQUESTS = 200;
 const FREEZE_ATTEMPTS = 3;
+/** How long an accepted report's run may take to end itself (pair_report's `terminate`) before Pair aborts it. */
+const REPORT_SETTLE_GRACE_MS = 2000;
 const DELIVERY_LOG_BYTES = 1024 * 1024;
 const TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024;
 export class DeliveryDeferred extends Error {
@@ -319,7 +321,7 @@ export class PairController extends EventEmitter {
       for (const extension of new Set([...inherited, ...config.runtime.extraExtensions, ENTRY])) args.push('-e', extension);
       for (const skill of config.runtime.extraSkills) args.push('--skill', skill);
       const runtime = new PiRuntime({ rpcOptions: { command: config.runtime.command, args, cwd, requestTimeoutMs: config.runtime.requestTimeoutMs, shutdownTimeoutMs: config.runtime.shutdownTimeoutMs,
-        env: { PI_FABRIC_MESH_ROOT: meshRootFor(dir), PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: id, PI_FABRIC_PAIR_WORKER_DIR: dir, PI_FABRIC_PAIR_OWNER: this.ownerSession, PI_FABRIC_PAIR_OWNER_EPOCH: String(this.state.ownerEpoch), PI_FABRIC_PAIR_WORKER_GENERATION: String(r.workerGeneration), PI_FABRIC_PAIR_NONCE: nonce, PI_FABRIC_PAIR_PARENT_PID: String(process.pid) } },
+        env: { PI_FABRIC_MESH_ROOT: meshRootFor(dir), PI_FABRIC_THINKING_BOUNDS: JSON.stringify({ min: spec.effort, max: spec.effort }), PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: id, PI_FABRIC_PAIR_WORKER_DIR: dir, PI_FABRIC_PAIR_OWNER: this.ownerSession, PI_FABRIC_PAIR_OWNER_EPOCH: String(this.state.ownerEpoch), PI_FABRIC_PAIR_WORKER_GENERATION: String(r.workerGeneration), PI_FABRIC_PAIR_NONCE: nonce, PI_FABRIC_PAIR_PARENT_PID: String(process.pid) } },
         rpcFactory: this.rpcFactory, ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch, workerId: id, workerGeneration: r.workerGeneration, nonce, dir, cwd,
         sessionFile: r.sessionFile, sessionId: r.sessionId, freshSession, config, spec, entryPath: ENTRY,
         promptUser: (workerId, event, options) => this.callbacks.promptUser?.(workerId, event, options) || Promise.resolve({ cancelled: true }),
@@ -861,7 +863,7 @@ export class PairController extends EventEmitter {
     assert(incoming.payloadHash === digest(incoming.payload), 'Report payload hash mismatch');
     if (incoming.payload.kind === 'final_review') assert(t.policy.mode === 'final-only' || t.stepIndex === t.steps.length - 1, 'Premature final review');
     this.revoke(id, 'Report accepted; implementation lease ended');
-    const drain = h.abortCurrent('Report accepted; implementation lease ended')
+    const drain = h.settleOrAbort('Report accepted; implementation lease ended', REPORT_SETTLE_GRACE_MS)
       .catch(error => this.notifyUser(`[${id}] Report settlement failed: ${briefError(error)}`, 'error'))
       .finally(() => this.containmentWork.delete(drain));
     this.containmentWork.add(drain);

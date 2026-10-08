@@ -97,7 +97,11 @@ async function injectReview(c, cwd, { kind = 'checkpoint', question, decisions, 
   return { task, record, notice: c.state.notices[reportId], reportId, taskId };
 }
 
-const tool = (f, name, params = {}) => f.tools.get(name).execute('call', params, undefined, undefined, f.ctx);
+// Pair's tools return their value only as JSON text (what the model reads); decode it for assertions.
+const tool = async (f, name, params = {}) => {
+  const result = await f.tools.get(name).execute('call', params, undefined, undefined, f.ctx);
+  return { ...result, details: JSON.parse(result.content[0].text) };
+};
 /** pair_decide and pair_dispatch return once recorded; the worker activation runs in the background. Returns the held reason. */
 async function settled(f, name, params) {
   await tool(f, name, params);

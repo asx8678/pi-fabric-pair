@@ -3,7 +3,7 @@ import path from 'node:path';
 import { atomicJSON, assert, bounded, digest, inside, mkdirPrivate, plain, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
 import { assertReportSize, reportSchema, validateReport } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
-import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, isDirectMutation, nativeSettings, probeNative, providerFileWrite, requestsDetachedEffect, reviewWarmingAction, toolName } from './native.js';
+import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, pairToolRoute, isDirectMutation, nativeSettings, probeNative, providerFileWrite, refusedProgramReason, requestsDetachedEffect, reviewWarmingAction, toolName, toolPlacement } from './native.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionAPI} ExtensionAPI */
@@ -41,11 +41,18 @@ async function runSerial(serial, operation) {
   return result.completed.value;
 }
 
-const WORKER_GUIDE = `You are a persistent implementation worker in Fabric Pair.
+/** How the worker calls pair_report, by route (see pairToolRoute in native.js). */
+const WORKER_CALLS = {
+  program: "When using Fabric, end the fabric_exec program with return await extensions.pair_report({...}) (the same form works in Python), without searching for it first, so the run ends cleanly; only after an argument-shape error, read its schema once with tools.describe({ref: \"extensions.pair_report\"}).",
+  direct: 'Call pair_report directly as a tool, not inside fabric_exec.',
+  unreachable: 'Fabric Schema enforce mode hides pair_report; stop and report nothing.'
+};
+/** @param {string} calls */
+const workerGuideFor = calls => `You are a persistent implementation worker in Fabric Pair.
 The Main model is your supervisor. A controller grants one bounded implementation lease at a time.
 Use your normal Fabric and Fovea tools. Before changing unfamiliar code, inspect the relevant Fovea context and source.
 The current task-state packet contains authoritative IDs, constraints, and the authorized step. Do not infer permission from ordinary conversation text, Fovea updates, cached history, or previous approvals.
-Ask questions early with pair_report(kind="question"). Submit a checkpoint when the authorized step is complete; use final_review only for the authorized final step. pair_report accepts only these fields: taskId and stepId (copy them from the task-state packet), kind ("checkpoint" | "question" | "blocked" | "final_review"), summary (at most 8000 characters), and optionally question, decisions (strings), changedFiles (paths), checks ([{name, result: "pass" | "fail" | "not_run", detail}]) and stepComplete (boolean). When using Fabric, call it directly inside fabric_exec as await extensions.pair_report({...}) (the same form works in Python) without searching for it first; only after an argument-shape error, read its schema once with tools.describe({ref: "extensions.pair_report"}). Do not emit a prose-only completion.
+Ask questions early with pair_report(kind="question"). Submit a checkpoint when the authorized step is complete; use final_review only for the authorized final step. pair_report accepts only these fields: taskId and stepId (copy them from the task-state packet), kind ("checkpoint" | "question" | "blocked" | "final_review"), summary (at most 8000 characters), and optionally question, decisions (strings), changedFiles (paths), checks ([{name, result: "pass" | "fail" | "not_run", detail}]) and stepComplete (boolean). ${calls} Do not emit a prose-only completion.
 Call pair_report by itself, not in parallel with other work. After reporting, stop. Main will answer, approve, or request revisions in this SAME conversation. Do not poll, send keepalive text, spawn subagents, or work around a PAIR_WAIT response.
 Report concise changes and reasons, affected paths, and honestly labeled test evidence. Your claim that tests pass is not independently verified evidence.
 Do not deploy, push, commit, remove history, access unrelated secrets, or run destructive operations without the human's normal permission. Do not mutate Pair's coordination files. This is workflow control, not a sandbox.`;
@@ -254,7 +261,6 @@ export function registerWorker(pi, env = process.env) {
       await publishReport(retained);
       await telemetry(ctx);
       ctx.ui.notify(`fabric-pair:report:${retained.reportId}`, 'info');
-      ctx.abort();
       return { content: [{ type: 'text', text: `Report ${retained.reportId} already submitted. Stop and wait.` }], details: { pairReportId: retained.reportId }, terminate: true };
     }
     if (task.policy.mode === 'final-only') assert(params.kind !== 'checkpoint', 'Final-only policy requires final_review after the whole plan, or a question/blocker.');
@@ -267,7 +273,8 @@ export function registerWorker(pi, env = process.env) {
     await publishReport(result);
     await telemetry(ctx);
     ctx.ui.notify(`fabric-pair:report:${result.reportId}`, 'info');
-    ctx.abort();
+    // `terminate` ends the run after this result (Fabric carries it out of a program that returns it);
+    // the controller aborts only a run that has not settled shortly after accepting the report.
     return { content: [{ type: 'text', text: `Report ${result.reportId} recorded. Do not call more tools. Yield and wait for Main in this session.` }], details: { pairReportId: result.reportId }, terminate: true };
   }
   pi.registerCommand('pair-bridge', {
@@ -290,6 +297,8 @@ export function registerWorker(pi, env = process.env) {
       }, 2000); parentTimer.unref?.();
     }
   });
+  /** The worker's guide, worded once from Fabric's tool placement so the system prompt stays byte-stable. @type {string | undefined} */
+  let workerGuide;
   pi.on('before_agent_start', async (event, ctx) => {
     ctxRef = ctx;
     try {
@@ -299,7 +308,8 @@ export function registerWorker(pi, env = process.env) {
       assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
     } catch (error) { ctx.abort(); throw error; }
     ensureCacheLifetime(ctx.model);
-    return { systemPrompt: `${event.systemPrompt}\n\n${WORKER_GUIDE}`, message: {
+    workerGuide ??= workerGuideFor(WORKER_CALLS[pairToolRoute(toolPlacement(pi, ['pair_report']), 'pair_report', (pi.getAllTools?.() || []).some(t => t.name === 'fabric_exec'))]);
+    return { systemPrompt: `${event.systemPrompt}\n\n${workerGuide}`, message: {
       customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false,
       details: { ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: authority.task.attemptId, planRevision: authority.task.planRevision }
     } };
@@ -319,6 +329,8 @@ export function registerWorker(pi, env = process.env) {
     if (!expectedModel(ctx)) { ctx.abort(); return { block: true, reason: 'Pair worker model changed unexpectedly' }; }
     const detaching = detachingProgramCalls(event.toolName, event.input);
     if (detaching.length) return { block: true, reason: `Pair workers cannot call ${detaching.join(', ')}: each leaves work running or changes shared state after the call. Do this step's work directly in this session.` };
+    const refused = refusedProgramReason(event.toolName, event.input);
+    if (refused) return { block: true, reason: refused };
     const n = toolName(event.toolName);
     if (/^(bash|powershell)$/.test(n)) {
       const policy = await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true, env);
@@ -373,10 +385,22 @@ export function registerWorker(pi, env = process.env) {
     if (event.message?.role === 'assistant' && event.message.usage) { lastUsage = selectLastMeasuredUsage(lastUsage, event.message.usage); await telemetry(ctx); }
   });
   pi.on('session_before_compact', async (_event, ctx) => { compacting = true; speedStart = null; await telemetry(ctx); });
+  /** The task state sent after the last compaction, until the queued copy is in the model's context. @type {string | null} */
+  let restored = null;
   pi.on('session_compact', async (_event, ctx) => {
     compacting = false; await load();
-    pi.sendMessage({ customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder, true), display: false }, { triggerTurn: false });
+    restored = statePacket(authority, report, workOrder, true);
+    pi.sendMessage({ customType: 'fabric-pair.task-state', content: restored, display: false }, { triggerTurn: false });
     await telemetry(ctx);
+  });
+  // Pi compacts inside a run before the next model request and holds the message above until that
+  // turn ends, while Fabric's summary can cut the current work order short. Until the queued copy
+  // lands, add the task state to each request so the first response after compaction has it.
+  pi.on('context', event => {
+    const packet = restored;
+    if (packet === null) return undefined;
+    if (event.messages.some(m => m.role === 'custom' && m.customType === 'fabric-pair.task-state' && m.content === packet)) { restored = null; return undefined; }
+    return { messages: [...event.messages, { role: 'custom', customType: 'fabric-pair.task-state', content: packet, display: false, timestamp: Date.now() }] };
   });
   pi.on('session_compact_failed', async (_event, ctx) => { compacting = false; await telemetry(ctx); });
   pi.on('agent_before_settle', async (_event, ctx) => { if (waiting()) ctx.abort(); });

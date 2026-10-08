@@ -2,7 +2,7 @@
 
 One Main, one retained writer, one unresolved assignment. Start manually and review every step. Begin in a disposable Git repository; do not run another Main/Pair process or another writer against the same workspace.
 
-The public workflow was exercised with actual **Pi 0.87.1, Fabric 0.96.3 and Fovea 0.31.1**, using a deterministic loopback model on Node 24/macOS. This qualifies the observed integration path, not paid-provider behavior, interactive UI, crash recovery or unattended operation. Pair is workflow coordination, not a security sandbox.
+The public workflow was last exercised on 2026-10-08 with **Pi 1.1.0 (on Bun), Fabric 0.109.5 and Fovea 0.31.4**, using a scripted local model on macOS (earlier: Pi 0.87.1, Fabric 0.96.3 and Fovea 0.31.1). This qualifies the observed integration path, not paid-provider behavior, crash recovery or unattended operation; the interactive TUI got one smoke pass. Pair is workflow coordination, not a security sandbox.
 
 ## 1. Load Pair
 
@@ -52,7 +52,7 @@ Add `.pi/fabric/` to the implementation repository's `.gitignore`. The worker's 
 Pair has no warming setting (a legacy `cacheWarming` key in `fabric-pair.json` is
 accepted and ignored). To keep both roles' prompt caches warm, set
 `"cacheWarming": "idle"` in Pi's `~/.pi/agent/settings.json`. That covers every
-model except Codex ones, which `/pair doctor` points out. Stock Pi 0.87.1 does not
+model except Codex ones, which `/pair doctor` points out. Pi (through 1.1.0) does not
 yet send the refreshes in a Pair session; see the reference's
 "Context, warming and cost" section. Fabric's
 `cache.hold` (Fabric 0.97.0 or newer; paid, explicit, time-bounded) is a separate

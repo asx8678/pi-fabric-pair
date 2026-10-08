@@ -154,6 +154,26 @@ test('compaction keeps the completed aggregate and clears only pending timing', 
   assert.deepEqual((await f.packet()).speed, done, 'the abandoned pending sample never lands');
 }));
 
+test('after a compaction each model request carries the task state until the queued copy lands', () => fixture(async f => {
+  const summary = [{ role: 'user', content: 'The conversation history before this point was compacted.', timestamp: 1 }];
+  assert.equal(await f.emit('context', { type: 'context', messages: summary }), undefined, 'no compaction, no change');
+  await f.emit('session_before_compact');
+  await f.emit('session_compact');
+  const [queued, options] = f.messages.at(-1);
+  assert.equal(queued.customType, 'fabric-pair.task-state');
+  assert.deepEqual(options, { triggerTurn: false }, 'the persisted copy never starts a turn');
+  const first = await f.emit('context', { type: 'context', messages: summary });
+  const added = first.messages.at(-1);
+  assert.deepEqual({ role: added.role, customType: added.customType, display: added.display, content: added.content },
+    { role: 'custom', customType: 'fabric-pair.task-state', display: false, content: queued.content });
+  assert.match(added.content, /"taskId":"speed-task"/);
+  assert.equal(first.messages.length, 2, 'the summary itself is untouched');
+  // Pi appends the queued copy when the turn ends; from then on nothing is added.
+  const persisted = { role: 'custom', customType: 'fabric-pair.task-state', content: queued.content, display: false, timestamp: 2 };
+  assert.equal(await f.emit('context', { type: 'context', messages: [...summary, persisted] }), undefined);
+  assert.equal(await f.emit('context', { type: 'context', messages: summary }), undefined, 'cleared once delivered');
+}));
+
 test('a Fabric provider result that leaves an actor running is a detached effect', () => fixture(async f => {
   const proxy = ref => ({ toolName: ref, toolCallId: `fabric_${ref}`, input: {}, isError: false, content: [{ type: 'text', text: '{}' }],
     details: { kind: 'pi-fabric.tool-result-proxy.v1', ref, result: { id: 'actor-1' } } });

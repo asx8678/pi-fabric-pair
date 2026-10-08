@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { meshRootFor, nativeSettings, nativeProfileBlockers, preflightNativeProfile, prewalkAutoArms, checkReadiness, detachedProviderEffect, fabricHasCache, gateTool, liveResidentHosts } from '../src/native.js';
+import { meshRootFor, nativeSettings, nativeProfileBlockers, preflightNativeProfile, prewalkAutoArms, checkReadiness, detachedProviderEffect, detachingProgramCalls, fabricHasCache, gateTool, liveResidentHosts, pairToolRoute, refusedProgramReason, toolPlacement, requestsDetachedEffect } from '../src/native.js';
 
 const valid = { executor: { shellHangMs: 0 }, agents: { maxDepth: 0 }, prewalk: { enabled: false } };
 async function fixture(run) {
@@ -105,6 +105,28 @@ test('Fabric provider results that leave something running are detached effects'
   assert.equal(gateTool('bash', running, false), undefined);
 });
 
+test('Fabric sessions, adopted tasks and mesh grants outlive the call', () => {
+  const proxy = ref => ({ kind: 'pi-fabric.tool-result-proxy.v1', ref, result: { id: 'x' } });
+  for (const ref of ['sessions.open', 'tasks.adopt', 'mesh.grant']) {
+    assert.equal(detachedProviderEffect(ref, proxy(ref)), true, ref);
+    assert.deepEqual(detachingProgramCalls('fabric_exec', { code: `await ${ref}({ id: "x" })` }), [ref]);
+  }
+  for (const ref of ['sessions.read', 'sessions.stop', 'tasks.get', 'tasks.stop', 'mesh.publish', 'programs.run']) assert.equal(detachedProviderEffect(ref, proxy(ref)), false, ref);
+});
+
+test('durable shell tasks and their completion notices are detached shell work', () => {
+  for (const input of [{ command: 'npm run dev', durable: true }, { command: 'make', durable: true, notify: { topic: 'build' } }, { command: 'make', notify: { topic: 'build' } }]) assert.equal(requestsDetachedEffect('bash', input), true, JSON.stringify(input));
+  for (const input of [{ command: 'ls' }, { command: 'ls', durable: false }]) assert.equal(requestsDetachedEffect('bash', input), false, JSON.stringify(input));
+});
+
+test('worker programs cannot run saved programs or change their effort', () => {
+  assert.match(refusedProgramReason('fabric_exec', { code: 'return await programs.run({ id: "p1" })' }) ?? '', /programs\.run: it runs saved code/);
+  assert.match(refusedProgramReason('fabric_exec', { code: 'await thinking.set({ level: "high", scope: "session" })' }) ?? '', /thinking\.set: it changes the effort/);
+  assert.match(refusedProgramReason('fabric_exec', { code: 'await tools.call({ ref: "programs.run", input: {} })' }) ?? '', /programs\.run/);
+  for (const code of ['await thinking.status()', 'await programs.list()', 'const note = "programs.run(x)"; // thinking.set(y)']) assert.equal(refusedProgramReason('fabric_exec', { code }), null, code);
+  assert.equal(refusedProgramReason('bash', { code: 'programs.run()' }), null);
+});
+
 test('resident hosts are read from owner.json under the mesh root and never signalled', async () => {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-resident-'));
   const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
@@ -132,4 +154,16 @@ test('resident hosts are read from owner.json under the mesh root and never sign
     live.kill();
     await fs.rm(base, { recursive: true, force: true });
   }
+});
+
+test('Fabric tool placement decides how a role calls Pair tools', () => {
+  const reply = result => ({ events: { emit: (channel, data) => { assert.equal(channel, 'pi-fabric:tool-placement:v1'); assert.deepEqual(data.tools, ['pair_report']); data.reply(result); } } });
+  const full = toolPlacement(reply({ version: 1, mode: 'full-code', tools: { pair_report: 'unavailable' } }), ['pair_report']);
+  assert.equal(pairToolRoute(full, 'pair_report', true), 'program', 'unavailable before Fabric starts its runtime still means a program call');
+  assert.equal(pairToolRoute(toolPlacement(reply({ version: 1, mode: 'full-code', tools: { pair_report: 'model' } }), ['pair_report']), 'pair_report', true), 'direct');
+  assert.equal(pairToolRoute(toolPlacement(reply({ version: 1, mode: 'enforce', tools: { pair_report: 'unavailable' } }), ['pair_report']), 'pair_report', true), 'unreachable');
+  assert.equal(toolPlacement({ events: { emit() {} } }, ['pair_report']), null, 'no reply: no Fabric, or one older than 0.103.0');
+  assert.equal(pairToolRoute(null, 'pair_report', true), 'program');
+  assert.equal(pairToolRoute(null, 'pair_report', false), 'direct');
+  assert.equal(toolPlacement({}, ['pair_report']), null);
 });
