@@ -386,10 +386,9 @@ Pair's reads unprompted while every other extension tool asks:
 
 - **No MCP servers in the worker.** Pi 1.x loads its built-in MCP support in every
   process, so a worker with inherited extensions connects your MCP servers and
-  their tool roster is part of every worker request. Add `"--no-mcp"` to
-  `runtime.commandArgs` to skip them. An inherited extension that registers an MCP
-  server then fails to load in the worker, and Pair holds the worker on that
-  error; exclude such an extension with `runtime.excludeExtensions`.
+  their tool roster is part of every worker request. Set `"runtime": {"mcp": false}`
+  to start the worker with `--no-mcp` (Pi 1.0.4+). An inherited extension that
+  registers an MCP server then gets only a warning in Main; the worker keeps running.
 
 ## Context, warming and cost
 

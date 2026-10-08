@@ -66,19 +66,23 @@ export function bounded(value, limit = 16000) {
 }
 /** @param {string} dir @returns {Promise<void>} */
 export async function mkdirPrivate(dir) { await fs.mkdir(dir, { recursive: true, mode: 0o700 }); }
-/** @param {string} file @param {unknown} value @returns {Promise<void>} */
-export async function atomicJSON(file, value) {
+/**
+ * Write JSON by rename, so readers never see a partial file. `durable: false` skips the fsyncs for
+ * display-only files (a crash may lose the latest write, never tear it); `compact` drops indentation.
+ * @param {string} file @param {unknown} value @param {{durable?: boolean, compact?: boolean}} [options] @returns {Promise<void>}
+ */
+export async function atomicJSON(file, value, { durable = true, compact = false } = {}) {
   await mkdirPrivate(path.dirname(file));
   const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   /** @type {import('node:fs/promises').FileHandle | undefined} */
   let handle;
   try {
     handle = await fs.open(tmp, 'wx', 0o600);
-    await handle.writeFile(JSON.stringify(value, null, 2) + '\n', 'utf8');
-    await handle.sync();
+    await handle.writeFile((compact ? JSON.stringify(value) : JSON.stringify(value, null, 2)) + '\n', 'utf8');
+    if (durable) await handle.sync();
     await handle.close(); handle = undefined;
     await fs.rename(tmp, file);
-    await syncDirectory(path.dirname(file));
+    if (durable) await syncDirectory(path.dirname(file));
   } finally { await handle?.close().catch(() => {}); await fs.unlink(tmp).catch(() => {}); }
 }
 /** @param {string} dir */

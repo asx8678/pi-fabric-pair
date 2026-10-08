@@ -433,7 +433,7 @@ export function createTextView(raw, { title, theme, keys, rows = () => undefined
     jump(line => line.toLowerCase().includes(needle), step, inclusive, `not found: ${lastQuery}`);
   };
   /** @param {string} data @param {string} id @param {...string} fallbacks */
-  const is = (data, id, ...fallbacks) => (keys?.matches(data, id) ?? false) || fallbacks.includes(data);
+  const is = (data, id, ...fallbacks) => keyIs(keys, data, id, fallbacks);
   return {
     render(w) {
       width = w;
@@ -494,7 +494,7 @@ export function createMenuView(entries, { title, subtitle = [], confirm = 'selec
   let selected = Math.max(0, items.findIndex(index => /** @type {{id: string}} */ (entries[index]).id === initial));
   const labelWidth = Math.min(36, Math.max(0, ...entries.map(entry => ('id' in entry && entry.value !== undefined ? visibleWidth(entry.label) : 0))));
   /** @param {string} data @param {string} id @param {...string} fallbacks */
-  const is = (data, id, ...fallbacks) => (keys?.matches(data, id) ?? false) || fallbacks.includes(data);
+  const is = (data, id, ...fallbacks) => keyIs(keys, data, id, fallbacks);
   return {
     render(width) {
       /** @type {string[]} */ const body = [];
@@ -774,9 +774,13 @@ export function clampEffort(model, effort) {
   if (levels.includes(effort)) return effort;
   return EFFORT_LEVELS.slice(at + 1).find(level => levels.includes(level)) || EFFORT_LEVELS.slice(0, Math.max(0, at)).reverse().find(level => levels.includes(level)) || levels[0] || 'off';
 }
-/** @param {UIContext} ctx @param {import('./contracts.js').WorkerSpec} worker @returns {EffortModel | undefined} */
-function workerModel(ctx, worker) {
-  return worker.provider && worker.model ? ctx.modelRegistry?.find(worker.provider, worker.model) : undefined;
+/**
+ * The registry's model for a worker spec, when both are known.
+ * @template M @param {{modelRegistry?: {find(provider: string, id: string): M | undefined}}} ctx
+ * @param {{provider?: string | null, model?: string | null} | undefined} spec @returns {M | undefined}
+ */
+export function workerModel(ctx, spec) {
+  return spec?.provider && spec.model ? ctx.modelRegistry?.find(spec.provider, spec.model) : undefined;
 }
 /** @param {UIContext} ctx @param {import('./contracts.js').WorkerSpec} worker @returns {Promise<void>} */
 async function pickEffort(ctx, worker) {
@@ -980,6 +984,8 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
   }
 }
 
+/** Whether input `data` is keybinding `id` (or one of the literal fallbacks). @param {{matches(data: string, id: string): boolean} | null | undefined} keys @param {string} data @param {string} id @param {string[]} fallbacks */
+function keyIs(keys, data, id, fallbacks) { return (keys?.matches(data, id) ?? false) || fallbacks.includes(data); }
 /** @param {unknown} content @returns {string} */
 function messageText(content) {
   if (typeof content === 'string') return content;

@@ -28,7 +28,9 @@ export async function runCommand(command, args, { cwd, timeoutMs = 30000, maxByt
   assert(typeof command === 'string' && Array.isArray(args), 'Command and argv must be explicit');
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat' }, stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true, detached: process.platform !== 'win32' });
-    let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), total = 0, truncated = false, timedOut = false, aborted = false, finished = false;
+    /** Chunks per stream, joined once at close (concatenating per chunk copied quadratically). */
+    const out = { stdout: /** @type {Buffer[]} */ ([]), stderr: /** @type {Buffer[]} */ ([]) }, kept = { stdout: 0, stderr: 0 };
+    let total = 0, truncated = false, timedOut = false, aborted = false, finished = false;
     let stopping = false;
     /** @type {Promise<void>} */
     let containment = Promise.resolve();
@@ -45,16 +47,14 @@ export async function runCommand(command, args, { cwd, timeoutMs = 30000, maxByt
     /** @param {'stdout' | 'stderr'} which @param {Buffer} data */
     const collect = (which, data) => {
       total += data.length;
-      const current = which === 'stdout' ? stdout : stderr;
-      const remaining = Math.max(0, maxBytes - current.length);
+      const remaining = Math.max(0, maxBytes - kept[which]);
       if (data.length > remaining) truncated = true;
-      const next = Buffer.concat([current, data.subarray(0, remaining)]);
-      if (which === 'stdout') stdout = next; else stderr = next;
+      if (remaining > 0) { const part = data.subarray(0, remaining); out[which].push(part); kept[which] += part.length; }
     };
     child.stdout.on('data', chunk => collect('stdout', chunk)); child.stderr.on('data', chunk => collect('stderr', chunk));
     const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
     child.once('error', error => { if (!finished) { finished = true; cleanup(); void containment.then(() => reject(error)); } });
-    child.once('close', (code, terminationSignal) => { if (!finished) { finished = true; cleanup(); void containment.then(() => resolve({ code, signal: terminationSignal, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), bytes: total, truncated, timedOut, aborted })); } });
+    child.once('close', (code, terminationSignal) => { if (!finished) { finished = true; cleanup(); void containment.then(() => resolve({ code, signal: terminationSignal, stdout: Buffer.concat(out.stdout).toString('utf8'), stderr: Buffer.concat(out.stderr).toString('utf8'), bytes: total, truncated, timedOut, aborted })); } });
   });
 }
 /** @param {string} cwd @param {string[]} args @param {CommandOptions} [options] @returns {Promise<string>} */
@@ -155,12 +155,16 @@ async function indexModes(root) {
   }
   return modes;
 }
+/** Files up to this size are copied into the blob store from the bytes already read for hashing. */
+const MEMORY_COPY_BYTES = 1024 * 1024;
 export class Evidence {
   /** @param {string} baseDir @param {import('./config.js').EvidenceConfig} limits */
   constructor(baseDir, limits) {
     this.baseDir = baseDir; this.blobs = path.join(baseDir, 'blobs'); this.limits = limits;
     /** @type {Map<string, {key: string, sha: string, size: number, executable: boolean}>} */
     this.hashCache = new Map();
+    /** Snapshots validated in this process; frozen first, so a member cannot change after its check. @type {WeakSet<object>} */
+    this.validated = new WeakSet();
     /** @type {Set<string>} */
     this.knownBlobs = new Set();
   }
@@ -218,23 +222,35 @@ export class Evidence {
       try {
         const before = await handle.stat({ bigint: true });
         assert(sameEntry(stat, before) && before.isFile(), `Evidence path changed before capture: ${name}`);
+        // Hash first and copy only content the blob store lacks: after a restart most files are already
+        // stored. A small file keeps its bytes from this read; a large new one is read again below.
         const hash = createHash('sha256'); let actual = 0;
-        const transform = new Transform({
-          /** @param {Buffer} chunk @param {BufferEncoding} _encoding @param {import('node:stream').TransformCallback} done */
-          transform(chunk, _encoding, done) {
-            actual += chunk.length;
-            if (actual > remaining) { done(new Error('Workspace exceeds evidence.maxTotalBytes while reading')); return; }
-            hash.update(chunk); done(null, chunk);
-          }
-        });
-        await pipeline(handle.createReadStream({ autoClose: false }), transform, createWriteStream(tmp, { flags: 'wx', mode: 0o600 }));
+        /** @type {Buffer[] | null} */ let kept = size <= MEMORY_COPY_BYTES ? [] : null;
+        for await (const chunk of handle.createReadStream({ autoClose: false })) {
+          actual += chunk.length;
+          assert(actual <= remaining, 'Workspace exceeds evidence.maxTotalBytes while reading');
+          hash.update(chunk);
+          if (kept) { if (actual > MEMORY_COPY_BYTES) kept = null; else kept.push(chunk); }
+        }
         const after = await handle.stat({ bigint: true });
         const stable = await workspaceEntry(root, name, memo);
         assert(sameEntry(before, after) && !stable.missing && stable.stat.isFile() && sameEntry(after, stable.stat) && actual === Number(after.size), `File or evidence path changed while capturing: ${name}`);
         const resolved = await fs.realpath(absolute);
         assert(inside(root, resolved), `Evidence path resolves outside the workspace: ${name}`);
         const sha = hash.digest('hex');
-        if (await this.hasBlob(sha)) await fs.unlink(tmp); else { await fs.rename(tmp, path.join(this.blobs, sha)); this.knownBlobs.add(sha); }
+        if (!await this.hasBlob(sha)) {
+          if (kept) await fs.writeFile(tmp, Buffer.concat(kept), { flag: 'wx', mode: 0o600 });
+          else {
+            const again = createHash('sha256');
+            const copy = new Transform({
+              /** @param {Buffer} chunk @param {BufferEncoding} _encoding @param {import('node:stream').TransformCallback} done */
+              transform(chunk, _encoding, done) { again.update(chunk); done(null, chunk); }
+            });
+            await pipeline(handle.createReadStream({ start: 0, autoClose: false }), copy, createWriteStream(tmp, { flags: 'wx', mode: 0o600 }));
+            assert(again.digest('hex') === sha && sameEntry(after, await handle.stat({ bigint: true })), `File changed while capturing: ${name}`);
+          }
+          if (await this.hasBlob(sha)) await fs.unlink(tmp); else { await fs.rename(tmp, path.join(this.blobs, sha)); this.knownBlobs.add(sha); }
+        }
         const executable = (Number(after.mode) & 0o111) !== 0;
         if (now - after.mtimeNs > RACY_NS && now - after.ctimeNs > RACY_NS) this.hashCache.set(name, { key: statKey(after), sha, size: actual, executable });
         else this.hashCache.delete(name);
@@ -246,11 +262,20 @@ export class Evidence {
     const identity = { root, head, entries };
     return { ...identity, hash: digest(identity), capturedAt: Date.now(), totalBytes: total };
   }
+  /** @template {Snapshot} T @param {T} snapshot @returns {T} validated once per object */
+  validSnapshot(snapshot) {
+    if (this.validated.has(snapshot)) return snapshot;
+    validateSnapshot(snapshot, this.limits);
+    for (const entry of snapshot.entries) Object.freeze(entry);
+    Object.freeze(snapshot.entries); Object.freeze(snapshot);
+    this.validated.add(snapshot);
+    return snapshot;
+  }
   /** @param {Snapshot} snapshot @returns {Promise<string>} */
   async saveSnapshot(snapshot) {
-    validateSnapshot(snapshot, this.limits);
+    this.validSnapshot(snapshot);
     const file = path.join(this.baseDir, 'snapshots', `${snapshot.hash}.json`);
-    if (!await exists(file)) await atomicJSON(file, snapshot);
+    if (!await exists(file)) await atomicJSON(file, snapshot, { compact: true }); // machine-read only; a quarter smaller
     return file;
   }
   /** @returns {Promise<string>} */
@@ -265,7 +290,7 @@ export class Evidence {
     const owned = `${blobPath(path.join(this.baseDir, 'snapshots'), sha)}.json`;
     assert(name === `${sha}.json` && reference === owned, 'Snapshot reference is not an owned content-addressed file');
     const bytes = await readEvidenceBytes(owned, 64 * 1024 * 1024);
-    const snapshot = validateSnapshot(JSON.parse(bytes.toString('utf8')), this.limits);
+    const snapshot = this.validSnapshot(JSON.parse(bytes.toString('utf8')));
     assert(snapshot.hash === sha && snapshot.root === expectedRoot, 'Snapshot reference/hash/repository mismatch');
     return snapshot;
   }
@@ -278,7 +303,7 @@ export class Evidence {
    * @returns {Promise<import('./contracts.js').Checkpoint>}
    */
   async checkpoint(taskId, reportId, base, current, verification = []) {
-    validateSnapshot(base, this.limits); validateSnapshot(current, this.limits);
+    this.validSnapshot(base); this.validSnapshot(current);
     assert(base.root === current.root, 'Checkpoint snapshots belong to different repositories');
     const dir = path.join(this.baseDir, 'reports', taskId, reportId); await mkdirPrivate(dir);
     await this.saveSnapshot(current);
@@ -402,10 +427,13 @@ export async function verifyConfigured(config, cwd, artifactDir, signal, identit
   await mkdirPrivate(artifactDir);
   /** @type {import('./contracts.js').VerificationResult[]} */
   const results = [];
+  // Each check starts from the state the last capture saw (the checkpoint itself for the first), so
+  // N checks take N captures instead of 2N; a change in between still shows in the next after-capture.
+  /** @type {string | null} */ let known = identity.expectedHash ?? null;
   for (const [i, check] of config.commands.entries()) {
     let sourceHash = null, drift = null;
     if (identity.captureSource) {
-      sourceHash = await identity.captureSource();
+      sourceHash = known ?? await identity.captureSource();
       if (identity.expectedHash && sourceHash !== identity.expectedHash) drift = `VERIFICATION_SOURCE_DRIFT: check ${check.name} would run against a different workspace state than the checkpointed evidence; it was not run.`;
     }
     if (drift) {
@@ -420,7 +448,7 @@ export async function verifyConfigured(config, cwd, artifactDir, signal, identit
     catch (e) { result = { code: null, stderr: String(e), stdout: '', timedOut: false, truncated: false }; }
     let afterHash = null;
     if (identity.captureSource) {
-      afterHash = await identity.captureSource();
+      afterHash = known = await identity.captureSource();
       if (afterHash !== sourceHash) drift = `VERIFICATION_SOURCE_DRIFT: the workspace changed while running check ${check.name}; this result does not describe the checkpointed source.`;
     }
     const evidencePath = path.join(artifactDir, `check-${i + 1}.json`);

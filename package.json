@@ -57,11 +57,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test tests/*.test.mjs",
-    "build:host": "npm run typecheck:staged && node scripts/build-host.mjs",
-    "check:host": "node scripts/build-host.mjs --check",
     "prepack": "npm run typecheck",
-    "pack:check": "npm pack --dry-run --ignore-scripts",
-    "typecheck:staged": "tsc -p tsconfig.staged.json"
+    "pack:check": "npm pack --dry-run --ignore-scripts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

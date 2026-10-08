@@ -16,7 +16,7 @@ function isArray(value) { return Array.isArray(value); }
 export const INDICATORS = ['minimal', 'compact', 'off'];
 /** @param {unknown} value @returns {value is Indicator} */
 export function isIndicator(value) { return INDICATORS.some(mode => mode === value); }
-/** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], excludeExtensions: string[], extraSkills: string[], inheritExtensions: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
+/** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], excludeExtensions: string[], extraSkills: string[], inheritExtensions: boolean, mcp: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
 /** @typedef {{enabled: boolean, provider: string, model: string, on: 'final' | 'checkpoints', timeoutMs: number}} PeerReviewConfig */
@@ -41,7 +41,7 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   maxWorkers: 1,
   workers: [{ id: 'worker', provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }],
   supervision: { mode: 'milestones', finalReview: true, maxRevisions: 20, maxRevisionsPerStep: 3, summaryDetail: 'normal', maxStepFiles: 5 },
-  runtime: { command: 'pi', commandArgs: [], extraExtensions: [], excludeExtensions: [], extraSkills: [], inheritExtensions: true, startupTimeoutMs: 120000, requestTimeoutMs: 30000, shutdownTimeoutMs: 5000 },
+  runtime: { command: 'pi', commandArgs: [], extraExtensions: [], excludeExtensions: [], extraSkills: [], inheritExtensions: true, mcp: true, startupTimeoutMs: 120000, requestTimeoutMs: 30000, shutdownTimeoutMs: 5000 },
   requirements: { fabric: true, fovea: true, prewalkDisabled: true, autoCompaction: true },
   limits: {
     activeStepTimeoutMs: 1800000,
@@ -133,6 +133,7 @@ function assertMergedConfig(c) {
   assert(typeof c.supervision.summaryDetail === 'string' && ['minimal', 'normal', 'detailed'].includes(c.supervision.summaryDetail), 'Invalid summary detail');
   assert(typeof c.runtime.command === 'string' && c.runtime.command.length > 0 && !c.runtime.command.includes('\0'), 'runtime.command is required');
   assert(typeof c.runtime.inheritExtensions === 'boolean', 'runtime.inheritExtensions must be boolean');
+  assert(typeof c.runtime.mcp === 'boolean', 'runtime.mcp must be boolean');
   assert(typeof c.verification.requirePassing === 'boolean', 'verification.requirePassing must be boolean');
   assert(typeof c.verification.timeoutMs === 'number' && Number.isSafeInteger(c.verification.timeoutMs) && c.verification.timeoutMs > 0, 'verification.timeoutMs must be a positive integer');
   for (const key of ['commandArgs', 'extraExtensions', 'excludeExtensions', 'extraSkills']) assert(isArray(c.runtime[key]) && c.runtime[key].every(v => typeof v === 'string' && !v.includes('\0')), `runtime.${key} must be a string array`);

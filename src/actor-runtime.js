@@ -11,7 +11,7 @@ import { checkReadiness, meshRootFor } from './native.js';
 /** @typedef {import('./rpc.js').RpcExit} RpcExit */
 /** @typedef {import('./contracts.js').WorkerSpec} WorkerSpec */
 /** @typedef {import('./contracts.js').StoredProbeV1} Probe */
-/** @typedef {{runtime: {startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}, requirements: {fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}}} RuntimeConfig */
+/** @typedef {{runtime: {startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number, mcp?: boolean}, requirements: {fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}}} RuntimeConfig */
 /** @typedef {{taskId: string, attemptId: string, leaseId: string, workerGeneration: number}} ActivationIdentity */
 /** @typedef {Readonly<ActivationIdentity & {serial: number}>} Activation */
 /** @typedef {{token: Activation, controller: AbortController, prepared: boolean, attempted: boolean, accepted: boolean, settled: boolean}} ActivationState */
@@ -308,7 +308,7 @@ export class PiRuntime {
   #settledSequence = 0; #settledAt = 0; #serial = 0; #scope = 0; #revision = 0;
   #ready = false; #started = false; #provenUnspawned = false; #closing = false; #revokedStartup = false;
   #streaming = false; #unsettled = false; #retrying = false; #summaryRetrying = false; #overflowRecovery = false;
-  #steering = 0; #followUp = 0; #idleKnown = false; #promptPending = false; #bridge = false; #rejecting = false; #reportSettling = false;
+  #steering = 0; #followUp = 0; #idleKnown = false; #promptPending = false; #bridge = false; #rejecting = false; #reportSettling = false; #settledAborted = false;
   /** @type {Set<string>} */ #strayTools = new Set();
   #startupController = new AbortController();
   /** @type {Set<() => void>} */ #waiters = new Set();
@@ -421,13 +421,15 @@ export class PiRuntime {
     this.#history = materialized;
     await this.#send('set_model', { provider: o.spec.provider, modelId: o.spec.model }, null);
     const modelState = await this.#readState(null);
-    const afterModel = await this.#extend(materialized, null);
+    // The model and effort setters append a short suffix between two full comparisons (the launch
+    // tail above, the probe below), so these passes check only that suffix against the file.
+    const afterModel = await this.#extend(materialized, null, false);
     this.#checkInitSuffix(materialized.lastId, afterModel.suffix, modelState.thinkingLevel);
     const levels = record(await this.#send('get_available_thinking_levels', {}, null), 'Thinking levels');
     requireValue(Array.isArray(levels.levels) && levels.levels.includes(o.spec.effort), `Unsupported worker effort: ${o.spec.effort}`);
     await this.#send('set_thinking_level', { level: o.spec.effort }, null);
     const state = await this.#readState(null); this.#exactState(state);
-    const afterSetters = await this.#extend(afterModel.history, null);
+    const afterSetters = await this.#extend(afterModel.history, null, false);
     requireValue(afterSetters.history.count - materialized.count <= 4, 'Session history has an unexpected initialization suffix');
     this.#checkInitSuffix(afterModel.history.lastId, afterSetters.suffix, o.spec.effort); this.#history = afterSetters.history;
     await this.#waitIdle(this.#startupTimeout(), null); // separately scoped startup dialogs must finish first
@@ -472,13 +474,18 @@ export class PiRuntime {
     const entries = await this.#entriesSince(full ? null : String(tail[0].id), known, verified.parents, activation);
     requireValue(isDeepStrictEqual(entries, expected), 'Pi history differs from prelaunch/materialized history');
   }
-  /** @param {VerifiedHistory} base @param {Activation | null} activation */
-  async #extend(base, activation) {
+  /**
+   * @param {VerifiedHistory} base @param {Activation | null} activation
+   * @param {boolean | 'changed'} [full] compare the whole history too: always, never (a pass between two
+   * full ones), or only when the file changed since `base` was fully verified
+   */
+  async #extend(base, activation, full = true) {
     const scanned = await scanHistory(this.#options.sessionFile, this.#options.cwd, base); this.#assertCurrent(activation);
     requireValue(isDeepStrictEqual(scanned.history.header, base.header), 'Bound session header changed/disappeared');
     const entries = await this.#entriesSince(base.lastId, base.known, scanned.history.parents, activation); this.#assertCurrent(activation);
     requireValue(isDeepStrictEqual(entries, scanned.suffix), 'RPC/persisted full session histories differ');
-    if (scanned.history.bytes <= FULL_COMPARE_BYTES) await this.#compareAll(scanned.history, activation);
+    const compare = full === true || (full === 'changed' && scanned.history.sha256 !== base.sha256);
+    if (compare && scanned.history.bytes <= FULL_COMPARE_BYTES) await this.#compareAll(scanned.history, activation);
     return scanned;
   }
   /** @param {VerifiedHistory} verified @param {Activation | null} activation */
@@ -535,7 +542,7 @@ export class PiRuntime {
       const state = await this.#readState(activation); this.#exactState(state);
       requireValue(probe.sessionId === state.sessionId && probe.sessionFile === state.sessionFile && probe.cwd === o.cwd && probe.model?.provider === o.spec.provider && probe.model.id === o.spec.model && probe.thinkingLevel === o.spec.effort, 'Bridge/RPC exact identity or selection mismatch');
       requireValue(this.#lifecycleIdle(), 'Agent activity occurred during bridge verification');
-      await this.#verifyRetainedHistory(activation); this.#assertCurrent(activation);
+      await this.#verifyRetainedHistory(activation, operation); this.#assertCurrent(activation);
       const finalState = await this.#readState(activation); this.#exactState(finalState);
       requireValue(this.#lifecycleIdle() && isDeepStrictEqual(state, finalState), 'State changed while verifying bridge/history');
       checkReadiness(probe, finalState, o.config, o.spec, o.cwd, meshRootFor(o.dir));
@@ -543,13 +550,13 @@ export class PiRuntime {
     } finally { this.#bridge = false; }
   }
 
-  /** @param {Activation | null} activation */
-  async #verifyRetainedHistory(activation) {
+  /** @param {Activation | null} activation @param {'probe' | 'load'} operation the load bridge follows the prepare probe's full check */
+  async #verifyRetainedHistory(activation, operation) {
     for (let attempt = 1; ; attempt++) {
       requireValue(this.#history, 'Bound session history is unavailable');
       const appended = this.#appended;
       try {
-        const extended = await this.#extend(this.#history, activation); this.#assertCurrent(activation);
+        const extended = await this.#extend(this.#history, activation, operation === 'load' ? 'changed' : true); this.#assertCurrent(activation);
         this.#history = extended.history; return;
       } catch (error) {
         // An idle session still grows: a native cache-warm refresh appends its usage entry. If one
@@ -626,7 +633,7 @@ export class PiRuntime {
       pendingMessageCount: Math.max(this.#steering + this.#followUp, this.#state?.pendingMessageCount || 0), steering: this.#steering, followUp: this.#followUp,
       tools: this.#tools.size, dialogs: this.#dialogs.size, displayedDialog: this.#displayed, permission: this.permission, currentTool: this.currentTool,
       activation: this.#activation?.token || null, accepted: this.#activation?.accepted || false, awaitingSettlement: this.#unsettled, promptPending: this.#promptPending,
-      settledSequence: this.settledSequence, settledAt: this.settledAt, fault: this.fault, exit: this.exit });
+      settledSequence: this.settledSequence, settledAt: this.settledAt, settledAborted: this.#settledAborted, fault: this.fault, exit: this.exit });
   }
   /** @returns {RuntimeObservation[]} */
   takeObservations() {
@@ -645,7 +652,12 @@ export class PiRuntime {
     const type = String(event.type);
     if (!['message_update', 'tool_execution_update', 'extension_ui_request', 'entry_appended', 'session_info_changed'].includes(type)) this.#revision++;
     const activity = /^(agent_|turn_|message_|tool_execution_|compaction_|auto_retry_|summarization_retry_)/.test(type);
-    if (type === 'extension_error') { this.#hold(new RpcUncertainError(`Worker extension_error: ${reasonOf(event.error)}`)); return; }
+    if (type === 'extension_error') {
+      // With runtime.mcp off (--no-mcp), Pi reports an inherited extension's MCP server registration as an
+      // error; that registration is all it refused, so warn instead of holding the worker.
+      if (event.event === 'register_mcp_server' && this.#options.config.runtime?.mcp === false) { this.#enqueue({ type: 'notify', at: Date.now(), error: `Worker MCP is off (runtime.mcp): an extension's MCP server was not registered: ${reasonOf(event.error)}`, notifyType: 'warning' }); return; }
+      this.#hold(new RpcUncertainError(`Worker extension_error: ${reasonOf(event.error)}`)); return;
+    }
     const startsWork = ['agent_start', 'turn_start', 'tool_execution_start', 'compaction_start', 'auto_retry_start', 'summarization_retry_scheduled', 'summarization_retry_attempt_start'].includes(type);
     const unauthorizedActivity = (activity && this.#bridge) || (startsWork && !this.#closing && !this.#abortPromise && (!this.#activation?.attempted || this.#activation.settled || !this.#current(this.#activation.token)));
     const activityError = () => this.#rejectActivity(type, event);
@@ -661,6 +673,7 @@ export class PiRuntime {
         this.#streaming = false; this.#unsettled = false; this.#idleKnown = true; this.#overflowRecovery = false;
         if (this.#state) this.#state = { ...this.#state, isStreaming: false, isCompacting: false, pendingMessageCount: 0 };
         this.#settledSequence++; this.#settledAt = Date.now(); if (this.#activation) this.#activation.settled = true;
+        this.#settledAborted = event.aborted === true; // Pi 1.1+: the run ended by abort rather than on its own
         break; // retain stdin; no timer or implicit stop
       case 'compaction_start': {
         requireValue(typeof event.reason === 'string' && COMPACTION_REASONS.has(event.reason), 'Invalid compaction reason');

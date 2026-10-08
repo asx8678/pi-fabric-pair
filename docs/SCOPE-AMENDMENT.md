@@ -1,8 +1,8 @@
 # Handoff scope amendment (current)
 
 This is a concise amendment to the historical scope documents
-([SCOPE-OF-WORK.md](SCOPE-OF-WORK.md),
-[NEXT-IMPLEMENTATION-PLAN.md](NEXT-IMPLEMENTATION-PLAN.md)). It records what the
+([SCOPE-OF-WORK.md](https://github.com/asx8678/pi-fabric-pair/blob/archive/actor-redesign/docs/SCOPE-OF-WORK.md),
+[NEXT-IMPLEMENTATION-PLAN.md](https://github.com/asx8678/pi-fabric-pair/blob/archive/actor-redesign/docs/NEXT-IMPLEMENTATION-PLAN.md)). It records what the
 bounded non-interrupting handoff change actually delivers and accepts. It does
 not rewrite, satisfy or reclassify any historical V1 requirement; those remain
 open unless explicitly listed here.

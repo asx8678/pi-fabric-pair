@@ -2,11 +2,11 @@ import { DeliveryDeferred, PairController } from './controller.js';
 import { configPaths, configForScope, INDICATORS, isIndicator, loadConfig, previewBackupImport, saveBackupImport, saveConfig, saveIndicator, updateConfigLayer } from './config.js';
 import { VERSION as PI_VERSION } from '@earendil-works/pi-coding-agent';
 import { decisionSchema, dispatchSchema, inspectSchema, statusSchema, yieldSchema, validate, validateDecision, validateDispatch } from './schema.js';
-import { applyNativeProfileRepairs, excludedExtension, pairToolRoute, toolPlacement, FABRIC_CACHE_VERSION, FABRIC_FILE_WRITERS, FABRIC_PROGRAM_RUNNERS, ensureCacheLifetime, fabricHasCache, fabricVersion, isDirectMutation, nativeProfileBlockers, nativeProfileRepairs, nativeSettings, prewalkAutoArms, probeNative, programCalls, providerFileWrite, reviewWarmingAction, scopedCacheWarming, shortWarmReplay, sourcePaths, turnStartingExtensions } from './native.js';
+import { applyNativeProfileRepairs, excludedExtension, signedIn, loadedCapabilities, pairToolRoute, toolPlacement, FABRIC_CACHE_VERSION, FABRIC_FILE_WRITERS, FABRIC_PROGRAM_RUNNERS, ensureCacheLifetime, fabricHasCache, fabricVersion, isDirectMutation, nativeProfileBlockers, nativeProfileRepairs, nativeSettings, prewalkAutoArms, probeNative, programCalls, providerFileWrite, reviewWarmingAction, scopedCacheWarming, shortWarmReplay, sourcePaths, turnStartingExtensions } from './native.js';
 import { selectLastMeasuredUsage } from './metrics.js';
 import { gitIgnores } from './evidence.js';
 import { assert, briefError, canonical, cleanText, digest, Serial } from './util.js';
-import { ageLabel, chooseWorkerEffort, chooseWorkerModel, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, diffLineColor, doctorText, humanPatch, inboxText, indicator, kindLabel, menu, pairMessageComponent, planLine, planWidget, reportCardLines, settingsUI, staleWorkers, statusText, textView } from './ui.js';
+import { ageLabel, chooseWorkerEffort, chooseWorkerModel, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, diffLineColor, doctorText, humanPatch, inboxText, indicator, kindLabel, menu, pairMessageComponent, planLine, workerModel, planWidget, reportCardLines, settingsUI, staleWorkers, statusText, textView } from './ui.js';
 
 /** How Main calls Pair's tools, by route (see pairToolRoute in native.js). */
 const MAIN_CALLS = {
@@ -14,6 +14,11 @@ const MAIN_CALLS = {
   direct: "Call Pair's tools (pair_status, pair_dispatch, pair_inspect, pair_decide, pair_cancel, pair_yield, pair_recover) directly as tools, not inside fabric_exec. Do not use agents.handoff or enable Prewalk for a Pair task.",
   unreachable: "Fabric's Schema enforce mode leaves Pair's tools unreachable in this session: do not plan Pair delegation, and tell the user that Pair needs Fabric outside enforce mode."
 };
+/** Whether a task or report notice is still unresolved, so Main still needs Pair's guide. @param {PairController} c */
+function pairWorkOpen(c) {
+  return Object.values(c.state.workers).some(r => r.task && !['completed', 'cancelled'].includes(r.task.status))
+    || Object.values(c.state.notices).some(n => !['resolved', 'superseded'].includes(n.status));
+}
 const MAIN_TOOLS = ['pair_status', 'pair_dispatch', 'pair_inspect', 'pair_decide', 'pair_cancel', 'pair_yield', 'pair_recover'];
 /**
  * How Main calls Pair's tools: all inside fabric_exec, all directly (Fabric's foreground tools, or no
@@ -45,13 +50,13 @@ function cacheGuide(version, scoped) {
   if (cache === false) return `This Fabric (${String(version)}) has no cache provider (added in ${FABRIC_CACHE_VERSION}), so prompt-cache warming is unavailable here; do not call cache.*.`;
   return `Fabric's cache provider needs Fabric ${FABRIC_CACHE_VERSION} or newer and this version is unknown. If cache.status() is missing inside fabric_exec, warming is unavailable; otherwise hold only through cache.hold({durationMs}) after the user accepts paid refreshes.`;
 }
-/** @param {string} role @param {import('./native.js').WarmedModel | null | undefined} model @returns {string | null} why this role's model is never warmed */
-function warmingNote(role, model) {
-  if (!model || shortWarmReplay(model)) return null;
-  return `${role} model ${String(model.provider)}/${String(model.id)} uses the Codex API, where Pi cannot cap a cache refresh (it would regenerate a whole reply), so Pair never warms it`;
+/** @param {string} role @param {import('./native.js').WarmedModel | null | undefined} model @param {boolean} [oauth] @returns {string | null} why this role's model is never warmed */
+function warmingNote(role, model, oauth = false) {
+  if (!model || shortWarmReplay(model, oauth)) return null;
+  return `${role} model ${String(model.provider)}/${String(model.id)} uses ${model.api === 'openai-codex-responses' ? 'the Codex API' : 'a ChatGPT sign-in'}, where Pi cannot cap a cache refresh (it would regenerate a whole reply), so Pair never warms it`;
 }
-/** @param {BoundMainContext} ctx @param {{provider: string | null, model: string | null} | undefined} spec */
-function workerModel(ctx, spec) { return spec?.provider && spec.model ? ctx.modelRegistry?.find(spec.provider, spec.model) : undefined; }
+/** Task statuses in which the worker is (or is about to be) working. */
+const WORKING_STATUSES = ['activating', 'running', 'awaiting_settle'];
 /** Fixed prompt that starts Main's turn for a report delivered while Main is idle. */
 const WAKE_TEXT = 'Pair: a worker report has arrived (the FABRIC PAIR REPORT above). Review it as the Pair guide describes.';
 /** Fixed prompt that starts Main's turn for a supervision notice delivered while Main is idle. */
@@ -183,7 +188,7 @@ export function registerMain(pi) {
   function checkIdle(bound, current) {
     if (bound.config.autoCheckIdle === false || bound.autoOfferNotices().length) return;
     const tasks = Object.values(bound.state.workers).filter(r => r.task && !['completed', 'cancelled'].includes(r.task.status));
-    if (!tasks.length || tasks.some(r => ['activating', 'running', 'awaiting_settle'].includes(r.task?.status ?? ''))) return;
+    if (!tasks.length || tasks.some(r => WORKING_STATUSES.includes(r.task?.status ?? ''))) return;
     const fresh = tasks.filter(r => !String(r.task?.interruption || '').startsWith('Paused by the user') && !checkedStates.has(`${r.task?.id}:${r.task?.status}:${r.task?.updatedAt}`));
     if (!fresh.length || !current()) return;
     for (const r of fresh) checkedStates.add(`${r.task?.id}:${r.task?.status}:${r.task?.updatedAt}`);
@@ -239,7 +244,13 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     if (shownStatus.ui === ui && shownStatus.text === text) return;
     shownStatus = { ui, text }; ui.setStatus('fabric-pair', text);
   }
-  function render() {
+  /** Display only: it runs inside the controller's change event, so an error here must not fail a state change. */
+  /** @param {ReturnType<PairController['summary']>} [summary] the controller's own, when it just emitted one */
+  function render(summary) {
+    try { renderNow(summary); } catch { /* the status line keeps its last text */ }
+  }
+  /** @param {ReturnType<PairController['summary']>} [summary] */
+  function renderNow(summary) {
     if (!ctxRef || ctxRef.mode !== 'tui') return;
     const ui = ctxRef.ui, current = controller, mode = config?.indicator ?? 'minimal';
     if (widget && widget.ui !== ui) widget = null;
@@ -248,7 +259,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
       if (widget) { ui.setWidget('fabric-pair', undefined); widget = null; }
       return;
     }
-    snapshot = current.summary();
+    snapshot = summary ?? current.summary();
     showStatus(ui, indicator(snapshot, busy, ui.theme));
     if (mode !== 'minimal') {
       if (widget) { ui.setWidget('fabric-pair', undefined); widget = null; }
@@ -261,10 +272,13 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   /** @type {Set<string>} */
   const staleWarned = new Set();
   function pulse() {
+    try { pulseNow(); } catch { /* a timer callback must not throw */ }
+  }
+  function pulseNow() {
     render();
     const c = controller;
     if (!c || stopped || !ctxRef || ctxRef.mode !== 'tui') return;
-    const stale = staleWorkers(c.summary());
+    const stale = staleWorkers(snapshot ?? c.summary()); // render() just took this tick's summary
     const ids = new Set(stale.map(worker => worker.id));
     for (const worker of stale) if (!staleWarned.has(worker.id)) {
       staleWarned.add(worker.id);
@@ -279,6 +293,18 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
       context: ctx.getContextUsage?.() || null, ...(usage === undefined ? {} : { lastUsage: usage }) };
   }
   /** @returns {ConfigObservation} */
+  /**
+   * What Main needs from pair_status: workers, their tasks and Pair's switches. Session files, PIDs,
+   * telemetry and config provenance stay in /pair status and /pair doctor.
+   * @param {PairController} c
+   */
+  function mainStatus(c) {
+    const s = c.summary(), configuration = configObservation();
+    return { enabled: s.enabled, autoDeliverReports: s.autoDeliverReports, settingsPending: s.settingsPending, waitingReports: s.waitingReports, mainPhase: s.mainPhase?.status ?? null,
+      workers: s.workers.map(w => ({ id: w.id, model: w.model, effort: w.effort, readOnly: w.readOnly, status: w.status, cwd: w.cwd, workspaceGit: w.workspaceGit,
+        task: w.task, lastExchange: w.lastExchange, error: w.error, pendingConfiguration: w.pendingConfiguration })),
+      configuration: { version: configuration.version, scope: configuration.scope, pendingMigrations: configuration.pendingMigrations } };
+  }
   function configObservation() {
     return { version: config?.version, scope, provenance: configState?.provenance || {}, pendingMigrations: (configState?.migrations || []).filter(item => item !== null).map(({ scope: migrationScope, kind, sourceFile, targetFile, fromVersion, toVersion, warnings }) => ({ scope: migrationScope, kind, sourceFile, targetFile, fromVersion, toVersion, warnings })) };
   }
@@ -366,7 +392,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
       heldBindings.add(candidate); await candidate.close(); heldBindings.delete(candidate); return null;
     }
     controller = candidate; boundEpoch = epoch;
-    controller.on('change', () => { if (current()) render(); }); controller.setMainObservation(modelObservation(ctx, null)); render();
+    controller.on('change', summary => { if (current()) render(summary); }); controller.setMainObservation(modelObservation(ctx, null)); render();
     if (loaded.migrations.length) ctx.ui.notify(`Pair configuration migration pending for ${loaded.migrations.flatMap(item => item ? [item.scope] : []).join(', ')}. Review each affected scope under /pair settings → Advanced → Review/migrate selected scope.`, 'warning');
     return controller;
   }
@@ -389,18 +415,19 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     pi.registerTool(definition);
   };
   tool('pair_dispatch', 'Dispatch a plan step asynchronously to a retained worker. Main stays available. Reuse requestId only to retry exactly the same assignment.', dispatchSchema, async (c, p, ctx) => {
-    const probe = await probeMain(ctx);
+    // Registrations and native settings only: the full probe's package-version walks are not needed here.
+    const capabilities = loadedCapabilities(pi), native = await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true);
     assert(config, 'Pair configuration is not loaded');
-    if (config.requirements.fabric) assert(probe.capabilities.fabric, 'Main has no Fabric runtime. Load pi-fabric before dispatching.');
-    if (config.requirements.fovea) assert(probe.capabilities.fovea, 'Main has no Fovea capability. Load pi-fovea before dispatching.');
-    if (config.requirements.prewalkDisabled && probe.capabilities.fabric) assert(!prewalkAutoArms(probe.native), 'Turn off Prewalk auto-arm (prewalk.alwaysRearm) before Pair delegation. Manual /fabric prewalk stays available; do not arm it for a Pair task.');
+    if (config.requirements.fabric) assert(capabilities.fabric, 'Main has no Fabric runtime. Load pi-fabric before dispatching.');
+    if (config.requirements.fovea) assert(capabilities.fovea, 'Main has no Fovea capability. Load pi-fovea before dispatching.');
+    if (config.requirements.prewalkDisabled && capabilities.fabric) assert(!prewalkAutoArms(native), 'Turn off Prewalk auto-arm (prewalk.alwaysRearm) before Pair delegation. Manual /fabric prewalk stays available; do not arm it for a Pair task.');
     return c.dispatch(validateDispatch(p));
   });
   tool('pair_decide', 'Answer, approve, revise or cancel an exact worker report. Approval requires the current checkpoint hash and inspected evidence. revise may pass steps to replace the plan (completed steps unchanged as its prefix).', decisionSchema, (c, p) => c.decide(validateDecision(p)));
   tool('pair_inspect', 'Read immutable checkpoint evidence or one changed file. Use before approval; ordinary live workspace reads can change underneath a review.', inspectSchema, (c, p) => { assertInspectInput(p); return c.inspect(p.workerId, p.reportId, p.file, p.taskId); });
   // Short cards in Main's transcript; the model still reads each message's full text.
   for (const type of ['fabric-pair.report', 'fabric-pair.notice', 'fabric-pair.supervision', 'fabric-pair.check']) pi.registerMessageRenderer?.(type, pairMessageComponent);
-  tool('pair_status', 'Read Pair readiness, active task, context and observed cache usage. Do not poll; finished reports are delivered to you automatically (or retrieve them with pair_yield when autoDeliverReports is off).', statusSchema, c => ({ ...c.summary(), configuration: configObservation() }));
+  tool('pair_status', 'Read Pair readiness, active task, context and observed cache usage. Do not poll; finished reports are delivered to you automatically (or retrieve them with pair_yield when autoDeliverReports is off).', statusSchema, mainStatus);
   tool('pair_recover', 'Resume a paused or interrupted worker task after troubleshooting it (Main supervision). Restarts a failed worker process when its exit is confirmed, keeps the conversation and sends your instruction. Limited per task; never overrides a human pause, spent budget or unconfirmed exit.', recoverSchema, (c, p) => {
     validate(recoverSchema, p); const input = /** @type {{workerId: string, taskId: string, instruction: string}} */ (p);
     return c.recover(input.workerId, input.taskId, input.instruction);
@@ -522,7 +549,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
    * @returns {Promise<boolean>}
    */
   async function confirmStop(ctx, c, ids) {
-    const running = c.summary().workers.filter(w => ids.includes(w.id) && ['activating', 'running', 'awaiting_settle'].includes(w.task?.status || '')).map(w => w.id);
+    const running = c.summary().workers.filter(w => ids.includes(w.id) && WORKING_STATUSES.includes(w.task?.status || '')).map(w => w.id);
     if (!running.length) return true;
     return ctx.ui.confirm('Stop worker', `${running.join(', ')} ${running.length === 1 ? 'is' : 'are'} running a task. Stopping interrupts it; the conversation and file changes are kept. Inspect the changes, then /pair resume to continue. Stop now?`);
   }
@@ -624,7 +651,9 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           const blockers = main.capabilities.fabric ? nativeProfileBlockers(main.native, requirements) : [];
           const runtime = c.config.runtime;
           const inherited = runtime.inheritExtensions ? sourcePaths(pi).filter(source => !excludedExtension(source, runtime.excludeExtensions)) : [];
-          const starters = await turnStartingExtensions(inherited);
+          // Fabric and Fovea can start turns, but Pair requires them in the worker; naming them would advise breaking it.
+          const required = new Set([...(requirements.fabric ? ['pi-fabric'] : []), ...(requirements.fovea ? ['pi-fovea'] : [])]);
+          const starters = (await turnStartingExtensions(inherited)).filter(s => !required.has(s.name));
           const workerSpec = c.config.workers.find(worker => worker.id === id), workspace = workerSpec ? c.workspaceFor(workerSpec) : null;
           const fabricStateShown = !!workspace && c.workspaceGit.get(workspace) !== false && !await gitIgnores(workspace, '.pi/fabric/mcp-cache.json').catch(() => true);
           const notes = [
@@ -637,7 +666,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
             ...(main.capabilities.fabric && fabricHasCache(main.versions.fabric) === true && !scopedCacheWarming(ctx) ? [`Pi ${PI_VERSION} has no scoped warming API, so Fabric's cache.hold returns unsupported and Main is told not to offer it`] : []),
             ...(main.native.cacheWarming === 'idle' ? [] : [`Native cacheWarming is ${String(main.native.cacheWarming)}: Pi does not refresh a settled session, so Main is not warmed while the worker works and the worker is not warmed while its report waits (choose "idle" in Pi's settings; Pair never changes it)`]),
             ...(fabricStateShown ? [`${workspace} does not ignore .pi/fabric/: the worker's Fabric writes runtime state there (such as mcp-cache.json), so it appears as a changed file in every checkpoint. Add .pi/fabric/ to its .gitignore`] : []),
-            ...[warmingNote('Main', ctx.model), warmingNote('Worker', workerModel(ctx, workerSpec))].flatMap(note => note ? [note] : [])];
+            ...[warmingNote('Main', ctx.model, signedIn(ctx.modelRegistry, ctx.model)), warmingNote('Worker', workerModel(ctx, workerSpec), signedIn(ctx.modelRegistry, workerModel(ctx, workerSpec)))].flatMap(note => note ? [note] : [])];
           await textView(ctx, 'Pair · Doctor (no inference)', doctorText({ main, pair, configuration, blockers, notes, raw: { main, pair, configuration, requirements, pi: PI_VERSION } }), { panel: true });
         };
         if (command === 'report') return await showReport(id);
@@ -737,8 +766,8 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   pi.on('before_agent_start', async (event, ctx) => {
     ctxRef = ctx;
     controller?.noteActivity();
-    if (!controller || !config?.enabled) return;
-    ensureCacheLifetime(ctx.model);
+    if (!controller || !(config?.enabled || pairWorkOpen(controller))) return; // reports can still arrive after Pair is switched off
+    ensureCacheLifetime(ctx.model, signedIn(ctx.modelRegistry, ctx.model));
     controller.setMainObservation(modelObservation(ctx));
     // In the system prompt, like the worker's guide: a compaction cannot summarise it away, and Pi 1.x
     // drops the prompt guidelines of tools Fabric's code mode hides. Worded once per session from
@@ -768,9 +797,9 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   pi.on('cache_warming_decision', (event, ctx) => {
     const c = controller;
     if (!c || stopped || c.closing || !c.config.enabled || c.config.autoDeliverReports === false) return undefined;
-    const awaitingWorker = c.autoOfferNotices().length > 0 || Object.values(c.state.workers).some(r => ['activating', 'running', 'awaiting_settle'].includes(r.task?.status ?? ''));
+    const awaitingWorker = c.autoOfferNotices().length > 0 || Object.values(c.state.workers).some(r => WORKING_STATUSES.includes(r.task?.status ?? ''));
     const usage = /** @type {{totalInput?: unknown} | null | undefined} */ (c.mainObservation?.lastUsage);
-    const action = awaitingWorker ? reviewWarmingAction(event, ctx.model, typeof usage?.totalInput === 'number' ? usage.totalInput : 0) : undefined;
+    const action = awaitingWorker ? reviewWarmingAction(event, ctx.model, typeof usage?.totalInput === 'number' ? usage.totalInput : 0, signedIn(ctx.modelRegistry, ctx.model)) : undefined;
     return action ? { action } : undefined;
   });
   pi.on('agent_start', (_event, ctx) => { ctxRef = ctx; busy = true; runOutcome = null; agentRuns++; clearInput(); controller?.noteActivity(); controller?.setMainObservation(modelObservation(ctx)); render(); });
@@ -832,7 +861,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   });
   /** Leaving this session closes its controller, which stops owned workers. @param {BoundMainContext} ctx @param {string} action @returns {Promise<{cancel: true} | undefined>} */
   async function confirmLeave(ctx, action) {
-    const running = controller?.summary().workers.filter(w => ['activating', 'running', 'awaiting_settle'].includes(w.task?.status || '')).map(w => w.id) ?? [];
+    const running = controller?.summary().workers.filter(w => WORKING_STATUSES.includes(w.task?.status || '')).map(w => w.id) ?? [];
     if (!running.length || !ctx.hasUI) return undefined;
     const proceed = await ctx.ui.confirm('Pair worker is running', `${action} closes this session's Pair controller, which stops ${running.join(', ')} and interrupts its task. The conversation and file changes are kept; return to this session and run /pair resume to continue. Continue?`);
     return proceed ? undefined : { cancel: true };

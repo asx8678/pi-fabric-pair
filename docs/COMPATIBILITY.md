@@ -152,16 +152,16 @@ option; Main's own editor/UI remains unchanged. An ambiguous prior generation
 blocks launches and reset until its exit is proven at startup or with
 `/pair reconcile`.
 
-See [the AR-02 checkpoint](ACTOR-RPC-IMPLEMENTATION-PLAN.md#11-ar-02-source-checkpoint)
+See [the AR-02 checkpoint](https://github.com/asx8678/pi-fabric-pair/blob/archive/actor-redesign/docs/ACTOR-RPC-IMPLEMENTATION-PLAN.md#11-ar-02-source-checkpoint)
 for source/static evidence and remaining gaps. None of this is native qualification.
 
 ## Pure D5 held-carrier boundary (not runtime activation)
 
-The [held-carrier amendment](D5-HELD-CARRIER-CONTRACT.md) extends only `projectLegacyWorkerView` with an explicit `HeldLegacyProjectionContext` alongside its unchanged archive context. It reads the existing non-authorizing held-evidence record against exact supplied source/backup bytes, preserves recognized historical profiles and unknown/corrupt data visibility, and never generates an actor, workflow, supervisor or execution identity. Raw bytes remain caller-owned until durable backup; equality is not durability or provenance. State/model/reducer admission does not accept this context. Active Config V2/State V1/wire V1, Main/Worker registrations, defaults and package entrypoints are unchanged. The source amendment is boundedly checked, not independently frozen; Host loading/adoption/public-tool routing remain gated on T09/T10.
+The [held-carrier amendment](https://github.com/asx8678/pi-fabric-pair/blob/archive/actor-redesign/docs/D5-HELD-CARRIER-CONTRACT.md) extends only `projectLegacyWorkerView` with an explicit `HeldLegacyProjectionContext` alongside its unchanged archive context. It reads the existing non-authorizing held-evidence record against exact supplied source/backup bytes, preserves recognized historical profiles and unknown/corrupt data visibility, and never generates an actor, workflow, supervisor or execution identity. Raw bytes remain caller-owned until durable backup; equality is not durability or provenance. State/model/reducer admission does not accept this context. Active Config V2/State V1/wire V1, Main/Worker registrations, defaults and package entrypoints are unchanged. The source amendment is boundedly checked, not independently frozen; Host loading/adoption/public-tool routing remain gated on T09/T10.
 
 ## Environment
 
-**Pinned static toolchain restored:** the authorized local install uses SDK/TUI 1.1.0, MCP 1.30.0, Node declarations 24.13.6 and TypeScript 5.9.3. `npm run typecheck -- --pretty false` now passes unchanged project options without path mappings, shims or suppressions. A direct TUI dev pin is required by `src/ui.js`'s type-only `Component` import; SDK-private nesting is not a root dependency. Production source is unchanged. Lifecycle scripts were disabled and no native/runtime qualification follows; [checkpoint](T10-CONTRACT-FREEZE-CANDIDATE.md#8-authorized-pinned-toolchain-follow-up).
+**Pinned static toolchain restored:** the authorized local install uses SDK/TUI 1.1.0, MCP 1.30.0, Node declarations 24.13.6 and TypeScript 5.9.3. `npm run typecheck -- --pretty false` now passes unchanged project options without path mappings, shims or suppressions. A direct TUI dev pin is required by `src/ui.js`'s type-only `Component` import; SDK-private nesting is not a root dependency. Production source is unchanged. Lifecycle scripts were disabled and no native/runtime qualification follows; [checkpoint](https://github.com/asx8678/pi-fabric-pair/blob/archive/actor-redesign/docs/T10-CONTRACT-FREEZE-CANDIDATE.md#8-authorized-pinned-toolchain-follow-up).
 
 Target: Node >=24, because Fabric 0.93.0 requires it. The current working-tree checks passed on Darwin 27.2.0 arm64, Node 24.21.0, and Apple Git 2.54.0. The historical source artifact also ran its earlier 55-test suite on Linux/Node 22, but that does **not** qualify the upstream Fabric stack on Node 22.
 
@@ -203,10 +203,9 @@ Install development dependencies only in a clone that Pi does not load Pair from
 Record installed versions and any patches. Inspect source and run the retained
 static checks: `npm run typecheck` (pinned strict project check) and
 `npm run pack:check` (an npm package dry run); neither loads or behaviorally
-qualifies the extension. On macOS/arm64, the optional `npm run build:host` /
-`npm run check:host` commands concern the parked native source only
-([private storage contract](H1-PERSISTENT-STORAGE-CONTRACT.md)) and are not
-installation or packaging prerequisites. Install from the committed lockfile
+qualifies the extension. The parked native store and its build scripts live on the
+`archive/actor-redesign` branch
+([private storage contract](https://github.com/asx8678/pi-fabric-pair/blob/archive/actor-redesign/docs/H1-PERSISTENT-STORAGE-CONTRACT.md)). Install from the committed lockfile
 with `npm ci --ignore-scripts --no-audit --no-fund`; lifecycle scripts stay
 disabled, so that setup does not qualify native components. The offline suite
 (`npm test`) covers the transport, runtime startup, controller recovery and

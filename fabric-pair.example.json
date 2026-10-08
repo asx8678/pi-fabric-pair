@@ -29,6 +29,7 @@
     "excludeExtensions": [],
     "extraSkills": [],
     "inheritExtensions": true,
+    "mcp": true,
     "startupTimeoutMs": 120000,
     "requestTimeoutMs": 30000,
     "shutdownTimeoutMs": 5000

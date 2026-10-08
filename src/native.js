@@ -144,15 +144,22 @@ async function nativeObject(file) {
   return value;
 }
 /** @typedef {Omit<import('./contracts.js').StoredNativeSettings, 'fabricShellHangMs' | 'fabricAgentMaxDepth'> & {fabricShellHangMs: unknown, fabricAgentMaxDepth: unknown}} NativeSettings */
-/** @param {string} cwd @param {boolean} trusted @param {NodeJS.ProcessEnv} [env] @returns {Promise<NativeSettings>} */
-export async function nativeSettings(cwd, trusted, env = process.env) {
+/**
+ * @param {string} cwd @param {boolean} trusted @param {NodeJS.ProcessEnv} [env]
+ * @param {Record<string, Record<string, unknown>>} [loaded] configuration files the caller already read, by path
+ * @returns {Promise<NativeSettings>}
+ */
+export async function nativeSettings(cwd, trusted, env = process.env, loaded = {}) {
   const home = agentDir(env);
-  const settings = merge(await nativeObject(path.join(home, 'settings.json')), trusted ? await nativeObject(path.join(cwd, '.pi', 'settings.json')) : {});
-  const fabric = merge(await nativeObject(path.join(home, 'fabric.json')), trusted ? await nativeObject(path.join(cwd, '.pi', 'fabric.json')) : {});
+  /** @param {string} file */
+  const object = file => Object.hasOwn(loaded, file) ? loaded[file] : nativeObject(file);
+  const globalSettings = await nativeObject(path.join(home, 'settings.json'));
+  const settings = merge(globalSettings, trusted ? await nativeObject(path.join(cwd, '.pi', 'settings.json')) : {});
+  const fabric = merge(await object(path.join(home, 'fabric.json')), trusted ? await object(path.join(cwd, '.pi', 'fabric.json')) : {});
   return {
     agentDir: home,
     piCompaction: settings.compaction || {},
-    cacheWarming: (await nativeObject(path.join(home, 'settings.json'))).cacheWarming ?? 'streaming',
+    cacheWarming: globalSettings.cacheWarming ?? 'streaming', // Pi reads cacheWarming from global settings only
     fabricCompaction: fabric.compaction || {},
     fabricShellHangMs: (plain(fabric.executor) ? fabric.executor.shellHangMs : undefined) ?? null,
     fabricAgentMaxDepth: (plain(fabric.agents) ? fabric.agents.maxDepth : undefined) ?? null,
@@ -218,7 +225,7 @@ export async function nativeProfileRepairs(cwd, requirements, env = process.env)
   const files = { [globalPath]: await nativeObject(globalPath), [projectPath]: await nativeObject(projectPath) };
   /** @param {string} file @param {string} field */
   const read = (file, field) => field.split('.').reduce((/** @type {unknown} */ at, key) => plain(at) ? at[key] : undefined, files[file]);
-  const native = await nativeSettings(cwd, true, env), required = [];
+  const native = await nativeSettings(cwd, true, env, files), required = [];
   if (native.fabricShellHangMs !== 0) required.push(['executor.shellHangMs', 0]);
   if (native.fabricAgentMaxDepth !== 0) required.push(['agents.maxDepth', 0]);
   if (requirements.prewalkDisabled && prewalkAutoArms(native)) required.push(['prewalk.alwaysRearm', false]);
@@ -259,13 +266,17 @@ export async function applyNativeProfileRepairs(repairs) {
   return backups;
 }
 /** @typedef {Omit<import('./contracts.js').HistoricalProbeV1, 'nonce' | 'workerId' | 'ownerSession' | 'native'> & {native: NativeSettings}} NativeProbe */
+/** Whether Fabric and Fovea are loaded in this session, from their registrations. @param {Pick<NativeAPI, 'getAllTools' | 'getCommands'>} pi */
+export function loadedCapabilities(pi) {
+  const names = (pi.getAllTools?.() || []).map(t => t.name), commands = pi.getCommands?.() || [];
+  return { fabric: names.includes('fabric_exec'), fovea: names.some(n => /^(extensions\.)?fovea_/.test(n)) || commands.some(c => /^fovea(?:$|[ :-])/.test(c.name)) };
+}
 /** @param {NativeAPI} pi @param {NativeContext} ctx @returns {Promise<NativeProbe>} */
 export async function probeNative(pi, ctx) {
   const tools = pi.getAllTools?.() || [];
   const commands = pi.getCommands?.() || [];
   const names = tools.map(t => t.name);
-  const hasFabric = names.includes('fabric_exec');
-  const hasFovea = names.some(n => /^(extensions\.)?fovea_/.test(n)) || commands.some(c => /^fovea(?:$|[ :-])/.test(c.name));
+  const { fabric: hasFabric, fovea: hasFovea } = loadedCapabilities(pi);
   const foveaSource = tools.find(t => /fovea_/.test(t.name))?.sourceInfo?.path || commands.find(c => /^fovea/.test(c.name))?.sourceInfo?.path;
   const trusted = ctx.isProjectTrusted?.() === true;
   return {
@@ -451,11 +462,18 @@ function refreshCosts(model, tokens) {
   return { missCost: Math.max(0, miss - hit), warmCost: hit + rate('output') };
 }
 /**
- * Whether Pi can replay this model's request as a short refresh. Pi 0.87.1's Codex request
- * builder sends no output cap, so a Codex "refresh" would regenerate a whole reply.
- * @param {WarmedModel | null | undefined} model
+ * Whether Pi can replay this model's request as a short refresh. Pi sends the Codex API no output
+ * cap, and since 0.99.0 none to OpenAI's Responses API under a ChatGPT sign-in (`signedIn`), so a
+ * "refresh" there would regenerate a whole reply.
+ * @param {WarmedModel | null | undefined} model @param {boolean} [signedIn] the model's provider uses a subscription sign-in
  */
-export function shortWarmReplay(model) { return model?.api !== 'openai-codex-responses'; }
+export function shortWarmReplay(model, signedIn = false) {
+  return model?.api !== 'openai-codex-responses' && !(signedIn && model?.provider === 'openai' && model?.api === 'openai-responses');
+}
+/** Whether `model`'s provider is authenticated by a sign-in (OAuth) rather than an API key. @param {{isUsingOAuth?: (model: any) => boolean} | undefined} registry @param {unknown} model */
+export function signedIn(registry, model) {
+  try { return !!model && registry?.isUsingOAuth?.(model) === true; } catch { return false; }
+}
 /** Whether Pi knows a prompt-cache lifetime for this model; without one Pi never warms it. @param {WarmedModel | null | undefined} model */
 function hasCacheLifetime(model) {
   const cache = model?.promptCache;
@@ -467,10 +485,10 @@ export const DEFAULT_CACHE_LIFETIME_S = 240;
  * Pi's warmer runs only for models with a `promptCache` lifetime, and Pi 0.87.1 ships one only for
  * Anthropic models. Give the model about to run a default so warming works for every model. A
  * lifetime Pi already knows is never changed, and Codex models are left without one.
- * @param {WarmedModel | null | undefined} model @returns {boolean} whether the default was applied
+ * @param {WarmedModel | null | undefined} model @param {boolean} [oauth] see shortWarmReplay @returns {boolean} whether the default was applied
  */
-export function ensureCacheLifetime(model) {
-  if (!model || hasCacheLifetime(model) || !shortWarmReplay(model)) return false;
+export function ensureCacheLifetime(model, oauth = false) {
+  if (!model || hasCacheLifetime(model) || !shortWarmReplay(model, oauth)) return false;
   try { model.promptCache = { ...(plain(model.promptCache) ? model.promptCache : {}), short: DEFAULT_CACHE_LIFETIME_S }; return true; }
   catch { return false; } // a frozen model keeps Pi's own behaviour
 }
@@ -481,11 +499,11 @@ export function ensureCacheLifetime(model) {
  * own savings rule with that request treated as certain. Returns `warm` only where that rule
  * warms and Pi's estimate did not; never a stop Pi did not choose. When Pi saw no saving
  * (a zero-token prompt), `measuredPrompt` (the last measured request's input tokens) is priced instead.
- * @param {unknown} event @param {WarmedModel | null | undefined} [model] @param {number} [measuredPrompt]
+ * @param {unknown} event @param {WarmedModel | null | undefined} [model] @param {number} [measuredPrompt] @param {boolean} [oauth] see shortWarmReplay
  * @returns {'warm' | undefined}
  */
-export function reviewWarmingAction(event, model, measuredPrompt = 0) {
-  if (!plain(event) || !shortWarmReplay(model)) return undefined;
+export function reviewWarmingAction(event, model, measuredPrompt = 0, oauth = false) {
+  if (!plain(event) || !shortWarmReplay(model, oauth)) return undefined;
   const { continuationProbability: p, action } = event;
   // Pi still prices the refresh's one output token, so a zero-token prompt shows as missCost 0 alone.
   const { missCost, warmCost } = event.missCost === 0 ? refreshCosts(model, measuredPrompt) ?? event : event;

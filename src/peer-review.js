@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { runCommand } from './evidence.js';
@@ -18,7 +18,12 @@ export function peerReviewFile(dir, taskId, reportId) { return path.join(dir, 'r
 
 /** @param {string} dir @param {string} taskId @param {string} reportId @returns {PeerReview | null} */
 export function readPeerReview(dir, taskId, reportId) {
-  try { return JSON.parse(readFileSync(peerReviewFile(dir, taskId, reportId), 'utf8')); } catch { return null; }
+  try {
+    const review = JSON.parse(readFileSync(peerReviewFile(dir, taskId, reportId), 'utf8'));
+    const ok = review && typeof review === 'object' && review.version === 1 && review.reportId === reportId && typeof review.checkpointHash === 'string'
+      && ['completed', 'failed'].includes(review.status) && typeof review.text === 'string' && typeof review.provider === 'string' && typeof review.model === 'string';
+    return ok ? review : null; // anything else is not a review: show none rather than undefined fields
+  } catch { return null; }
 }
 
 /** @param {string} text @returns {PeerVerdict} */
@@ -36,7 +41,7 @@ function verdictOf(text) {
 export async function runPeerReview({ config, dir, cwd, taskId, reportId, checkpointHash, objective, steps, summary, patch, patchTruncated, signal }) {
   const { provider, model, timeoutMs } = config.peerReview, file = peerReviewFile(dir, taskId, reportId), startedAt = Date.now();
   const previous = readPeerReview(dir, taskId, reportId);
-  if (previous && previous.checkpointHash === checkpointHash) return previous;
+  if (previous && previous.checkpointHash === checkpointHash && previous.status === 'completed') return previous; // a failed run (timeout, provider error) is retried
   await mkdir(path.dirname(file), { recursive: true });
   const packet = path.join(path.dirname(file), `${reportId}.packet.md`);
   const clipped = patch.length > MAX_PATCH ? `${patch.slice(0, MAX_PATCH)}\n[patch clipped for review; read the files directly]` : patch;
@@ -52,6 +57,7 @@ export async function runPeerReview({ config, dir, cwd, taskId, reportId, checkp
   } catch (error) {
     review = { version: 1, reportId, taskId, checkpointHash, provider, model, status: 'failed', verdict: 'unknown', text: '', error: briefError(error), startedAt, finishedAt: Date.now() };
   }
+  await unlink(packet).catch(() => {});
   if (!signal.aborted) await atomicJSON(file, review);
   return review;
 }

@@ -102,4 +102,4 @@ If Pair reports an uncertain exit, corrupt/missing history or an unknown effect,
 
 ## What is deliberately absent
 
-The tarball contains the 16-file public runtime and help/skill assets. ActorHost/ActorStore migration, the native macOS Store, the new actor model and archive rotation remain parked in the source checkout and are not runtime or installation prerequisites. No user-data migration is performed.
+The tarball contains the 16-file public runtime and help/skill assets. ActorHost/ActorStore migration, the native macOS Store, the new actor model and archive rotation are parked on the `archive/actor-redesign` branch and are not runtime or installation prerequisites. No user-data migration is performed.

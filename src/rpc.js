@@ -13,7 +13,9 @@ import { signalGroup } from './util.js';
 const NORMAL_REQUESTS = 32, CONTROL_REQUESTS = 8;
 const NORMAL_WRITES = 32, CONTROL_WRITES = 16; // 8 control requests + 8 dialog cancellations
 const NORMAL_BYTES = 16 * 1024 * 1024, CONTROL_BYTES = 64 * 1024;
-const MAX_FRAME = 16 * 1024 * 1024, MAX_TIMEOUT = 300_000, KILL_WAIT = 1500;
+/** A get_entries reply carries everything a run appended (base64 images included), so frames may reach the
+ * 64 MiB the session-file check accepts per line; agent_end/turn_end payloads, which Pair never reads, are still shed past 16 MiB. */
+const MAX_FRAME = 64 * 1024 * 1024, SHED_FRAME = 16 * 1024 * 1024, MAX_TIMEOUT = 300_000, KILL_WAIT = 1500;
 const CONTROL_COMMANDS = new Set(['clear_queue', 'abort', 'abort_retry', 'abort_bash', 'get_state']);
 const MAX_EXTENDED_WAIT = 30 * 60_000;
 const NOISE_LINES = 1000, NOISE_BYTES = 1024 * 1024;
@@ -54,7 +56,7 @@ export class PiRpc extends EventEmitter {
     this.normalBytes = 0; this.controlBytes = 0;
     this.stderr = '';
     /** @type {string[]} */ this.parts = []; this.partBytes = 0; this.discarding = false; this.noiseLines = 0; this.noiseBytes = 0;
-    /** @type {string | null} */ this.shedding = null;
+    /** @type {string | null} */ this.shedding = null; this.shedOversized = false;
     this.decoder = new TextDecoder('utf-8', { fatal: true });
     this.closed = false; this.started = false; this.stopping = false;
     /** @type {Error | null} */ this.fault = null;
@@ -130,8 +132,8 @@ export class PiRpc extends EventEmitter {
       const piece = text.slice(start, at); start = at + 1;
       if (this.discarding) {
         this.discarding = false;
-        const shed = this.shedding; this.shedding = null;
-        if (shed) this.shed(shed);
+        const shed = this.shedding, oversized = this.shedOversized; this.shedding = null; this.shedOversized = false;
+        if (shed) this.shed(shed, oversized);
         continue;
       }
       const line = this.parts.length ? this.parts.join('') + piece : piece;
@@ -141,11 +143,14 @@ export class PiRpc extends EventEmitter {
     if (start >= text.length || this.discarding) return;
     const rest = text.slice(start);
     this.parts.push(rest); this.partBytes += Buffer.byteLength(rest);
-    if (this.partBytes > this.maxLineBytes) {
+    // agent_end/turn_end repeat the run's messages and Pair reads only their type: drop the payload as
+    // soon as the frame's head names one, instead of assembling and parsing it.
+    const head = this.partBytes >= 64 || this.partBytes > Math.min(this.maxLineBytes, SHED_FRAME) ? this.frameHead() : '';
+    if (head && sheddableType(head)) { const type = /** @type {string} */ (sheddableType(head)); this.shedOversized = this.partBytes > Math.min(this.maxLineBytes, SHED_FRAME); this.dropPartial(); this.shedding = type; return; }
+    if (this.partBytes > Math.min(this.maxLineBytes, SHED_FRAME)) {
       const type = sheddableType(this.frameHead());
-      this.dropPartial();
-      if (type) this.shedding = type; // skip to the frame boundary, then deliver the event without its payload
-      else this.fail(new RpcUncertainError('Invalid worker protocol: Oversized incomplete RPC frame'));
+      if (type) { this.dropPartial(); this.shedding = type; } // skip to the frame boundary, then deliver the event without its payload
+      else if (this.partBytes > this.maxLineBytes) { this.dropPartial(); this.fail(new RpcUncertainError('Invalid worker protocol: Oversized incomplete RPC frame')); }
     }
   }
   dropPartial() { this.parts = []; this.partBytes = 0; this.discarding = true; }
@@ -158,10 +163,10 @@ export class PiRpc extends EventEmitter {
   /**
    * Deliver an oversized lifecycle frame by type only. The type is all PiRuntime
    * uses from these events; every other oversized frame still faults.
-   * @param {string} type
+   * @param {string} type @param {boolean} [oversized] only an oversized frame is worth a diagnostic
    */
-  shed(type) {
-    this.emit('diagnostic', { shed: type });
+  shed(type, oversized = true) {
+    if (oversized) this.emit('diagnostic', { shed: type });
     this.handle({ type, payloadOmitted: true });
   }
   /** @param {string} line */
@@ -173,8 +178,8 @@ export class PiRpc extends EventEmitter {
       this.emit('diagnostic', { stdout: line.slice(0, 2000) });
       return;
     }
-    const oversized = Buffer.byteLength(line) > this.maxLineBytes, shed = oversized ? sheddableType(line.slice(0, 64)) : null;
-    if (shed) { this.shed(shed); return; }
+    const bytes = Buffer.byteLength(line), oversized = bytes > this.maxLineBytes, shed = sheddableType(line.slice(0, 64));
+    if (shed) { this.shed(shed, oversized); return; }
     try {
       if (!line.length || oversized) throw new Error('Empty or oversized RPC frame');
       /** @type {unknown} */ const value = JSON.parse(line);

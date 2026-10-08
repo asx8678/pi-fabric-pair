@@ -3,7 +3,7 @@ import path from 'node:path';
 import { atomicJSON, assert, bounded, digest, inside, mkdirPrivate, plain, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
 import { assertReportSize, reportSchema, validateReport } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
-import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, pairToolRoute, isDirectMutation, nativeSettings, probeNative, providerFileWrite, refusedProgramReason, requestsDetachedEffect, reviewWarmingAction, toolName, toolPlacement } from './native.js';
+import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, pairToolRoute, isDirectMutation, nativeSettings, probeNative, providerFileWrite, refusedProgramReason, requestsDetachedEffect, reviewWarmingAction, signedIn, toolName, toolPlacement } from './native.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionAPI} ExtensionAPI */
@@ -185,10 +185,16 @@ export function registerWorker(pi, env = process.env) {
       }
     } finally { await fs.unlink(staged).catch(() => {}); }
   }
-  /** @param {ExtensionContext | undefined} [ctx] @returns {Promise<void>} */
-  async function telemetry(ctx = ctxRef) {
+  /** The newest telemetry not yet written; queued writes take it, so a burst of events writes once. @type {{packet: import('./contracts.js').StoredTelemetryV1, durable: boolean} | null} */
+  let telemetryNext = null;
+  /**
+   * Telemetry is display state for the controller and Pi awaits each hook, so writes skip fsync unless
+   * `durable` (a detached effect or a report, which the controller must still see after a crash).
+   * @param {ExtensionContext | undefined} [ctx] @param {boolean} [durable] @returns {Promise<void>}
+   */
+  async function telemetry(ctx = ctxRef, durable = false) {
     if (!ctx || stopped) return;
-    await telemetrySerial.run(async () => {
+    {
       /** @type {import('./contracts.js').StoredTelemetryV1} */
       const packet = {
         version: PROTOCOL, nonce, ownerSession, ownerEpoch, workerId, workerGeneration, pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
@@ -196,7 +202,11 @@ export function registerWorker(pi, env = process.env) {
         phase: report ? 'waiting' : authority?.phase || 'idle', model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
         at: Date.now()
       };
-      await atomicJSON(path.join(dir, 'telemetry.json'), packet);
+      telemetryNext = { packet, durable: durable || !!telemetryNext?.durable };
+    }
+    await telemetrySerial.run(async () => {
+      const next = telemetryNext; telemetryNext = null;
+      if (next) await atomicJSON(path.join(dir, 'telemetry.json'), next.packet, { durable: next.durable });
     });
   }
   /** @param {ExtensionContext} ctx @returns {Promise<void>} */
@@ -259,7 +269,7 @@ export function registerWorker(pi, env = process.env) {
       const retained = report;
       assert(retained.payloadHash === digest(params), 'A different report already closed this lease');
       await publishReport(retained);
-      await telemetry(ctx);
+      await telemetry(ctx, true);
       ctx.ui.notify(`fabric-pair:report:${retained.reportId}`, 'info');
       return { content: [{ type: 'text', text: `Report ${retained.reportId} already submitted. Stop and wait.` }], details: { pairReportId: retained.reportId }, terminate: true };
     }
@@ -271,7 +281,7 @@ export function registerWorker(pi, env = process.env) {
     report = result;
     await atomicJSON(latchFile, validateLatch({ ownerEpoch, workerGeneration, leaseId: authority.leaseId, attemptId: task.attemptId, report: result }));
     await publishReport(result);
-    await telemetry(ctx);
+    await telemetry(ctx, true);
     ctx.ui.notify(`fabric-pair:report:${result.reportId}`, 'info');
     // `terminate` ends the run after this result (Fabric carries it out of a program that returns it);
     // the controller aborts only a run that has not settled shortly after accepting the report.
@@ -307,7 +317,7 @@ export function registerWorker(pi, env = process.env) {
       assert(!waiting() && authority && authority.task, 'PAIR_WAIT: the worker is retained but has no active implementation lease');
       assert(expectedModel(ctx), 'Worker model changed outside Pair. Stop and reconcile its selected model.');
     } catch (error) { ctx.abort(); throw error; }
-    ensureCacheLifetime(ctx.model);
+    ensureCacheLifetime(ctx.model, signedIn(ctx.modelRegistry, ctx.model));
     workerGuide ??= workerGuideFor(WORKER_CALLS[pairToolRoute(toolPlacement(pi, ['pair_report']), 'pair_report', (pi.getAllTools?.() || []).some(t => t.name === 'fabric_exec'))]);
     return { systemPrompt: `${event.systemPrompt}\n\n${workerGuide}`, message: {
       customType: 'fabric-pair.task-state', content: statePacket(authority, report, workOrder), display: false,
@@ -368,7 +378,7 @@ export function registerWorker(pi, env = process.env) {
       text = 'PAIR_DETACHED_EFFECT: the shell call is still running. The worker is shutting down so Main can reconcile without publishing a moving checkpoint.';
     } else return undefined;
     detachedEffect = { toolCallId: event.toolCallId, toolName: event.toolName, pid, detectedAt: Date.now() };
-    await telemetry(ctx); ctx.abort();
+    await telemetry(ctx, true); ctx.abort();
     setTimeout(() => ctx.shutdown(), 0);
     return { isError: true, content: [{ type: 'text', text }], details: event.details };
   });
@@ -409,7 +419,7 @@ export function registerWorker(pi, env = process.env) {
     if (stopped) return undefined;
     try { await load(); } catch { return undefined; }
     const awaitingMain = authority?.phase === 'waiting' && !!authority.task && !!report && report.payload.kind !== 'final_review';
-    const action = awaitingMain ? reviewWarmingAction(event, ctx.model, lastUsage?.totalInput) : undefined;
+    const action = awaitingMain ? reviewWarmingAction(event, ctx.model, lastUsage?.totalInput, signedIn(ctx.modelRegistry, ctx.model)) : undefined;
     return action ? { action } : undefined;
   });
   pi.on('agent_settled', async (_event, ctx) => { currentTool = null; currentTarget = null; await telemetry(ctx); });
