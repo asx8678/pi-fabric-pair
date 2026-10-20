@@ -10,7 +10,7 @@ import { validateConfig } from './config.js';
 import { peerReviewSummary, readPeerReview, runPeerReview } from './peer-review.js';
 import { excludedExtension, liveResidentHosts, meshRootFor, preflightNativeProfile } from './native.js';
 import { assertReportSize, validateDecision, validateDispatch, validateReport } from './schema.js';
-import { incrementCounter, migrateStoredState, STATE_VERSION, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateStoredState } from './contracts.js';
+import { incrementCounter, migrateStoredState, STATE_VERSION, TASK_NOTE_LIMIT, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateStoredState } from './contracts.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
 import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, digest, inside, mkdirPrivate, processStartedAt, processState, PROTOCOL, signalGroup, signallablePid, readJSON, readJsonlTail, safeId, Serial, stableDigest, uid } from './util.js';
 
@@ -44,6 +44,14 @@ export class DeliveryDeferred extends Error {
 const COMPLETION_CHECK = 'Task complete. Before telling the user you are done, compare the user\'s original request and your plan with the repository now. If anything requested is still unfinished, missing, or only partly done, make a bounded plan for it and pair_dispatch it to the worker. Only when nothing remains, tell the user the outcome.';
 /** @param {unknown} reason */
 function cleanReason(reason) { return String(reason).replace(/\s+/g, ' ').slice(0, 1200); }
+/** @param {unknown} text @returns {string} caller text clipped to what the stored-state check accepts */
+function note(text) { return bounded(text, TASK_NOTE_LIMIT); }
+/**
+ * Whether the human paused this task, so only the human may resume it. `pausedBy` survives restarts; the
+ * text check covers state written before that field existed.
+ * @param {{pausedBy?: string, interruption?: string} | null | undefined} task
+ */
+export function humanPaused(task) { return !!task && (task.pausedBy === 'human' || String(task.interruption || '').startsWith('Paused by the user')); }
 const ENTRY = fileURLToPath(new URL('./extension.js', import.meta.url));
 /** @param {{pid: number, file: string}[]} hosts @returns {string} */
 function residentHostText(hosts) {
@@ -88,7 +96,6 @@ export class PairController extends EventEmitter {
   constructor({ config, cwd, ownerSession, sourcePaths = [], storageDir, scanIntervalMs = 2000, callbacks = {}, rpcFactory = opts => new PiRpc(opts) }) {
     super();
     /** @type {PairConfig} */ this.config = validateConfig(config);
-    /** @type {Map<string, number>} Main-initiated recoveries per task (resets with the controller) */ this.mainRecoveries = new Map();
     /** @type {PairConfig | null} */
     this.pendingConfig = null; this.cwd = cwd; this.ownerSession = String(ownerSession);
     /** @type {import('./contracts.js').StoredStateV1} */ this.state = { version: STATE_VERSION, ownerSession: this.ownerSession, ownerEpoch: 0, cwd, workers: {}, requests: {}, notices: {} };
@@ -96,6 +103,7 @@ export class PairController extends EventEmitter {
     this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory;
     /** @type {Map<string, boolean>} */
     this.workspaceGit = new Map();
+    /** @type {Set<string>} reports already announced as held by the automatic-delivery cap */ this.capWarned = new Set();
     this.storageDir = storageDir; this.dir = storageDir || '';
     this.scanIntervalMs = Number.isFinite(scanIntervalMs) && scanIntervalMs > 0 ? scanIntervalMs : 2000;
     /** @type {Map<string, PiRuntime>} */ this.handles = new Map();
@@ -138,7 +146,8 @@ export class PairController extends EventEmitter {
       }
       const waitingHold = record.task?.status === 'paused' && ['question', 'review', 'blocked'].includes(String(record.task.previousStatus));
       if (!waitingHold && activeTask(record) && ['running', 'awaiting_settle', 'paused'].includes(record.task.status)) {
-        record.task.status = 'interrupted'; record.task.interruption = 'Controller restarted. Inspect retained reports and changes; no automatic replay is authorized.';
+        record.task.status = 'interrupted';
+        record.task.interruption = humanPaused(record.task) ? 'Paused by the user before the controller restarted. Inspect retained reports and changes; only the human resumes it.' : 'Controller restarted. Inspect retained reports and changes; no automatic replay is authorized.';
       }
     }
     for (const id of Object.keys(this.state.workers)) { await mkdirPrivate(this.workerDir(id)); await this.writeAuthority(id, 'stopped'); }
@@ -449,6 +458,7 @@ export class PairController extends EventEmitter {
       await this.ensureRepoLock(this.state.workers[input.workerId]?.repoRoot ?? await repositoryRoot(await canonical(this.workspaceFor(spec))));
       const launch = await this.reserveStart(input.workerId), r = launch.record;
       assert(this.launchCurrent(launch), 'Dispatch was revoked before reservation');
+      const before = { task: r.task, history: r.history, requests: { ...this.state.requests }, mainPhase: this.state.mainPhase };
       if (r.task) {
         const file = path.join(this.dir, 'tasks', r.task.id, 'task.json'); await atomicJSON(file, r.task);
         assert(this.launchCurrent(launch), 'Dispatch was revoked while archiving');
@@ -463,13 +473,22 @@ export class PairController extends EventEmitter {
         stepIndex: 0, planRevision: 1, attemptId: uid('attempt'), attemptNumber: 1, status: 'activating', leaseId: uid('lease'), policy: clone(this.config.supervision), limits: clone(this.config.limits), verification: clone(this.config.verification),
         startedAt: Date.now(), updatedAt: Date.now(), revisions: 0, stepRevisions: 0, turns: 0, usage: null, baseSnapshotRef: path.join(this.dir, 'tasks', taskId, 'base-pending.json'), pendingReport: null, report: null, decisions: {}, lastDecision: null };
       r.task = task;
-      this.state.requests[input.requestId] = { hash, taskId, workerId: r.id, acceptedAt: Date.now(), status: task.status };
-      await mkdirPrivate(this.workerDir(input.workerId));
-      await atomicJSON(path.join(this.workerDir(input.workerId), 'work-order.json'),
-        { version: 1, taskId, planRevision: task.planRevision, objective: task.objective, context: bounded(task.context, 24000), constraints: task.constraints, writtenAt: Date.now() });
-      this.setPhase('open');
-      const work = this.reserveWork(launch, task); // synchronous, before first await after publishing task identity
-      await this.persist();
+      /** @type {Work | null} */ let work = null;
+      try {
+        this.state.requests[input.requestId] = { hash, taskId, workerId: r.id, acceptedAt: Date.now(), status: task.status };
+        await mkdirPrivate(this.workerDir(input.workerId));
+        await atomicJSON(path.join(this.workerDir(input.workerId), 'work-order.json'),
+          { version: 1, taskId, planRevision: task.planRevision, objective: task.objective, context: bounded(task.context, 24000), constraints: task.constraints, writtenAt: Date.now() });
+        this.setPhase('open');
+        work = this.reserveWork(launch, task); // synchronous, before first await after publishing task identity
+        await this.persist();
+      } catch (error) {
+        // The assignment was never saved: put the previous one back, so a retry is a new dispatch rather than a duplicate of a task that never starts.
+        r.task = before.task; r.history = before.history; this.state.requests = before.requests;
+        if (before.mainPhase) this.state.mainPhase = before.mainPhase; else delete this.state.mainPhase;
+        if (work) work.runtime.releaseActivation(work.activation);
+        throw error;
+      }
       return { work };
     }).catch(async error => { await this.releaseRepoLocks(); throw error; });
     if (reserved.previous) return { ...reserved.previous, duplicate: true };
@@ -1006,7 +1025,7 @@ export class PairController extends EventEmitter {
       if (!r || r.task?.report?.reportId !== n.reportId) return false;
       const cap = this.autoCap(n.taskId);
       if (this.autoDelivered(n.taskId) < cap) return true;
-      this.notifyUser(`Pair: task ${n.taskId} reached ${cap} automatic report deliveries; report ${n.reportId} waits in the inbox. Use /pair inbox or ask Main to pair_yield.`, 'warning');
+      if (!this.capWarned.has(n.reportId)) { this.capWarned.add(n.reportId); this.notifyUser(`Pair: task ${n.taskId} reached ${cap} automatic report deliveries; report ${n.reportId} waits in the inbox. Use /pair inbox or ask Main to pair_yield.`, 'warning'); }
       return false;
     });
   }
@@ -1462,21 +1481,22 @@ export class PairController extends EventEmitter {
   /** @param {string} id @param {string} [reason] */
   pause(id, reason = 'Paused by the user') {
     this.revokeAndAbort(id, reason); const intent = this.intent(id);
-    return this.transaction(() => this.intent(id) === intent ? this.pauseUnlocked(id, reason) : null).then(async control => { if (control) await this.contain(control, reason, false); });
+    return this.transaction(() => this.intent(id) === intent ? this.pauseUnlocked(id, reason, true) : null).then(async control => { if (control) await this.contain(control, reason, false); });
   }
-  /** @param {string} id @param {string} reason @returns {Promise<Control>} */
-  async pauseUnlocked(id, reason) {
+  /** @param {string} id @param {string} reason @param {boolean} [human] the human paused it, so only the human resumes it @returns {Promise<Control>} */
+  async pauseUnlocked(id, reason, human = false) {
     const r = this.record(id); assert(activeTask(r), 'No active task to pause');
     if (r.task.status !== 'paused') r.task.previousStatus = r.task.status;
-    r.task.status = 'paused'; r.task.interruption = reason;
+    r.task.status = 'paused'; r.task.interruption = note(reason);
+    if (human) r.task.pausedBy = 'human';
     if (r.status !== 'error' && r.status !== 'stopped') r.status = 'paused';
     const control = this.reserveControl(id); return this.publishControl(control, 'paused');
   }
   /** @param {string} id @param {string} reason @returns {Promise<Control>} */
   async interrupt(id, reason) {
     this.revoke(id, reason);
-    const r = this.record(id); r.error = reason;
-    if (activeTask(r) && !['paused', 'question', 'review', 'blocked'].includes(r.task.status)) { r.task.status = 'interrupted'; r.task.interruption = reason; }
+    const r = this.record(id); r.error = note(reason);
+    if (activeTask(r) && !['paused', 'question', 'review', 'blocked'].includes(r.task.status)) { r.task.status = 'interrupted'; r.task.interruption = note(reason); }
     if (r.status !== 'stopped') r.status = 'error';
     const control = this.reserveControl(id); return this.publishControl(control, 'paused');
   }
@@ -1488,7 +1508,7 @@ export class PairController extends EventEmitter {
       if (t.report && !t.pendingReport && ['question', 'review', 'blocked'].includes(String(t.previousStatus))) {
         const restored = t.previousStatus;
         assert(restored === 'question' || restored === 'review' || restored === 'blocked', 'Resume restoration requires a waiting predecessor status');
-        delete t.previousStatus; delete t.interruption;
+        delete t.previousStatus; delete t.interruption; delete t.pausedBy;
         t.status = restored;
         if (r.status !== 'error' && r.status !== 'stopped') r.status = restored;
         r.error = null;
@@ -1510,7 +1530,7 @@ export class PairController extends EventEmitter {
         r.history = [...r.history, { id: t.id, status: t.status, file }].slice(-40);
         t.pendingReport = null;
       }
-      this.rotateAttempt(t); t.leaseId = uid('lease'); t.turns = 0; t.startedAt = Date.now(); t.status = 'activating'; delete t.interruption; r.error = null;
+      this.rotateAttempt(t); t.leaseId = uid('lease'); t.turns = 0; t.startedAt = Date.now(); t.status = 'activating'; delete t.interruption; delete t.pausedBy; r.error = null;
       const work = this.reserveWork(launch, t);
       await this.persist(); return { waitingRestored: null, work };
     });
@@ -1530,11 +1550,11 @@ export class PairController extends EventEmitter {
     const r = this.record(id), t = r.task;
     assert(t && t.id === taskId, 'No matching task for this worker');
     assert(['paused', 'interrupted'].includes(t.status), `Task is ${t.status}; only paused or interrupted tasks can be recovered`);
-    assert(!String(t.interruption || '').startsWith('Paused by the user'), 'The human paused this task; only the human resumes it');
+    assert(!humanPaused(t), 'The human paused this task; only the human resumes it');
     assert(!String(r.error || '').startsWith('EXIT_UNCONFIRMED'), 'The worker exit is unconfirmed; ask the human to run /pair reconcile');
-    const used = this.mainRecoveries.get(t.id) || 0;
+    const used = t.mainRecoveries ?? 0;
     assert(used < this.config.maxMainRecoveries, `Main already recovered this task ${used} times (maxMainRecoveries). Stop and ask the human.`);
-    this.mainRecoveries.set(t.id, used + 1);
+    t.mainRecoveries = used + 1; // saved with the resume, so a restart does not refill the budget
     if (r.status === 'error') await this.stop(id);
     const outcome = await this.resume(id, { by: 'main', instruction });
     return { ...outcome, recoveriesUsed: used + 1, recoveriesAllowed: this.config.maxMainRecoveries };
@@ -1545,9 +1565,9 @@ export class PairController extends EventEmitter {
    */
   superviseMain(kind, id, t, reason) {
     if (this.closing || !this.config.mainSupervision) return;
-    const used = this.mainRecoveries.get(t.id) || 0, left = Math.max(0, this.config.maxMainRecoveries - used);
+    const used = t.mainRecoveries ?? 0, left = Math.max(0, this.config.maxMainRecoveries - used);
     const guidance = kind === 'cancelled' ? 'The task will not continue. Do not re-dispatch it unless the user asks; tell the user.'
-      : String(reason).startsWith('Paused by the user') ? 'The human paused it; do not resume it yourself. Tell the user.'
+      : humanPaused(t) || String(reason).startsWith('Paused by the user') ? 'The human paused it; do not resume it yourself. Tell the user.'
       : left === 0 ? `Main recovery budget for this task is spent (${used}). Do not recover again; summarize the problem and ask the human.`
       : `Troubleshoot it: call pair_status, and pair_inspect if a report exists; read the worker's changes. If the cause is recoverable, call pair_recover({workerId: "${id}", taskId: "${t.id}", instruction}) with a concrete instruction for what to check and finish (${left} recoveries left). If the budget is spent, the exit is unconfirmed or the problem needs a human decision, tell the user instead. Do not fix the worker's code yourself.`;
     const message = `FABRIC PAIR SUPERVISION — worker ${id}, task ${t.id} (${String(t.objective).slice(0, 200)}) is ${kind}, step ${t.stepIndex + 1}/${t.steps.length}.
@@ -1589,7 +1609,7 @@ ${guidance}`;
   /** @param {string} id @param {string} reason @returns {Promise<Control>} */
   async cancelUnlocked(id, reason) {
     const r = this.record(id); assert(activeTask(r), 'No active task to cancel');
-    r.task.status = 'cancelled'; r.task.cancelReason = reason; r.task.completedAt = Date.now();
+    r.task.status = 'cancelled'; r.task.cancelReason = note(reason); r.task.completedAt = Date.now();
     if (r.status !== 'error' && r.status !== 'stopped') r.status = 'ready';
     for (const notice of Object.values(this.state.notices)) if (notice.taskId === r.task.id) notice.status = 'resolved';
     this.scheduleCollection();

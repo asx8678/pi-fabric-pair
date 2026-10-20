@@ -1,8 +1,8 @@
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { unlink, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { runCommand } from './evidence.js';
-import { atomicJSON, briefError, cleanText } from './util.js';
+import { atomicJSON, briefError, cleanText, mkdirPrivate } from './util.js';
 
 /** @typedef {'pass' | 'concerns' | 'fail' | 'unknown'} PeerVerdict */
 /** @typedef {{version: 1, reportId: string, taskId: string, checkpointHash: string, provider: string, model: string, status: 'completed' | 'failed', verdict: PeerVerdict, text: string, error: string | null, startedAt: number, finishedAt: number}} PeerReview */
@@ -42,11 +42,11 @@ export async function runPeerReview({ config, dir, cwd, taskId, reportId, checkp
   const { provider, model, timeoutMs } = config.peerReview, file = peerReviewFile(dir, taskId, reportId), startedAt = Date.now();
   const previous = readPeerReview(dir, taskId, reportId);
   if (previous && previous.checkpointHash === checkpointHash && previous.status === 'completed') return previous; // a failed run (timeout, provider error) is retried
-  await mkdir(path.dirname(file), { recursive: true });
+  await mkdirPrivate(path.dirname(file));
   const packet = path.join(path.dirname(file), `${reportId}.packet.md`);
   const clipped = patch.length > MAX_PATCH ? `${patch.slice(0, MAX_PATCH)}\n[patch clipped for review; read the files directly]` : patch;
   await writeFile(packet, [`# Review packet`, `## Objective\n${objective}`, `## Plan\n${steps.map((s, i) => `${i + 1}. ${s.id}: ${s.title}`).join('\n')}`,
-    `## Worker's own summary (an untrusted claim)\n${summary}`, `## Change${patchTruncated ? ' (evidence truncated)' : ''}\n${clipped}`].join('\n\n'));
+    `## Worker's own summary (an untrusted claim)\n${summary}`, `## Change${patchTruncated ? ' (evidence truncated)' : ''}\n${clipped}`].join('\n\n'), { mode: 0o600 });
   const args = [...config.runtime.commandArgs, '-p', '--no-session', '--no-extensions', '--no-skills', '--provider', provider, '--model', model, '--tools', 'read,grep,find,ls', `@${packet}`, INSTRUCTIONS];
   /** @type {PeerReview} */ let review;
   try {

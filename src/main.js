@@ -1,4 +1,4 @@
-import { DeliveryDeferred, PairController } from './controller.js';
+import { DeliveryDeferred, PairController, humanPaused } from './controller.js';
 import { configPaths, configForScope, INDICATORS, isIndicator, loadConfig, previewBackupImport, saveBackupImport, saveConfig, saveIndicator, updateConfigLayer } from './config.js';
 import { VERSION as PI_VERSION } from '@earendil-works/pi-coding-agent';
 import { decisionSchema, dispatchSchema, inspectSchema, statusSchema, yieldSchema, validate, validateDecision, validateDispatch } from './schema.js';
@@ -189,7 +189,7 @@ export function registerMain(pi) {
     if (bound.config.autoCheckIdle === false || bound.autoOfferNotices().length) return;
     const tasks = Object.values(bound.state.workers).filter(r => r.task && !['completed', 'cancelled'].includes(r.task.status));
     if (!tasks.length || tasks.some(r => WORKING_STATUSES.includes(r.task?.status ?? ''))) return;
-    const fresh = tasks.filter(r => !String(r.task?.interruption || '').startsWith('Paused by the user') && !checkedStates.has(`${r.task?.id}:${r.task?.status}:${r.task?.updatedAt}`));
+    const fresh = tasks.filter(r => !humanPaused(r.task) && !checkedStates.has(`${r.task?.id}:${r.task?.status}:${r.task?.updatedAt}`));
     if (!fresh.length || !current()) return;
     for (const r of fresh) checkedStates.add(`${r.task?.id}:${r.task?.status}:${r.task?.updatedAt}`);
     const lines = fresh.map(r => { const t = /** @type {NonNullable<typeof r.task>} */ (r.task); return `- worker ${r.id}, task ${t.id} (${cleanText(String(t.objective), 200)}) is ${t.status}, step ${t.stepIndex + 1}/${t.steps.length}${t.interruption ? `: ${cleanText(String(t.interruption), 300)}` : ''}`; });

@@ -21,10 +21,14 @@ const MAX_EXTENDED_WAIT = 30 * 60_000;
 const NOISE_LINES = 1000, NOISE_BYTES = 1024 * 1024;
 /** Pi repeats the run's messages in `agent_end` and the turn's tool results in `turn_end`; PiRuntime reads neither payload. */
 const SHEDDABLE = ['agent_end', 'turn_end'];
+/** How much of a frame's start is read for its type. */
+const HEAD_CHARS = 256;
+/** A frame's `"type"` among its leading scalar members, whatever order Pi writes them in. */
+const LEADING_TYPE = /^\{\s*(?:"(?:[^"\\]|\\.)*"\s*:\s*(?:"(?:[^"\\]|\\.)*"|[-\w.+]+)\s*,\s*)*"type"\s*:\s*"(\w+)"/;
 /** @param {string} head the first characters of a frame @returns {string | null} */
 function sheddableType(head) {
-  const start = head.trimStart();
-  return SHEDDABLE.find(type => start.startsWith(`{"type":"${type}"`)) ?? null;
+  const type = LEADING_TYPE.exec(head.trimStart())?.[1];
+  return type && SHEDDABLE.includes(type) ? type : null;
 }
 
 export class RpcUncertainError extends Error {
@@ -42,7 +46,7 @@ function errorOf(value) { return value instanceof Error ? value : new Error(Stri
 /** @param {number | undefined} value @param {number} fallback */
 function timeout(value, fallback) { return Number.isFinite(value) && Number(value) > 0 ? Math.min(MAX_TIMEOUT, Math.max(1, Number(value))) : fallback; }
 
-/** @extends {EventEmitter<{event: [RpcRecord], fault: [Error], exit: [RpcExit], diagnostic: [RpcRecord], late_response: [RpcRecord], spawn: [number]}>} */
+/** @extends {EventEmitter<{event: [RpcRecord], fault: [Error], exit: [RpcExit], diagnostic: [RpcRecord], spawn: [number]}>} */
 export class PiRpc extends EventEmitter {
   /** @param {RpcOptions} [options] */
   constructor(options = {}) {
@@ -145,7 +149,7 @@ export class PiRpc extends EventEmitter {
     this.parts.push(rest); this.partBytes += Buffer.byteLength(rest);
     // agent_end/turn_end repeat the run's messages and Pair reads only their type: drop the payload as
     // soon as the frame's head names one, instead of assembling and parsing it.
-    const head = this.partBytes >= 64 || this.partBytes > Math.min(this.maxLineBytes, SHED_FRAME) ? this.frameHead() : '';
+    const head = this.partBytes >= HEAD_CHARS || this.partBytes > Math.min(this.maxLineBytes, SHED_FRAME) ? this.frameHead() : '';
     if (head && sheddableType(head)) { const type = /** @type {string} */ (sheddableType(head)); this.shedOversized = this.partBytes > Math.min(this.maxLineBytes, SHED_FRAME); this.dropPartial(); this.shedding = type; return; }
     if (this.partBytes > Math.min(this.maxLineBytes, SHED_FRAME)) {
       const type = sheddableType(this.frameHead());
@@ -157,7 +161,7 @@ export class PiRpc extends EventEmitter {
   /** @returns {string} the start of the frame being assembled */
   frameHead() {
     let head = '';
-    for (const part of this.parts) { head += part.slice(0, 64); if (head.length >= 64) break; }
+    for (const part of this.parts) { head += part.slice(0, HEAD_CHARS); if (head.length >= HEAD_CHARS) break; }
     return head;
   }
   /**
@@ -178,7 +182,7 @@ export class PiRpc extends EventEmitter {
       this.emit('diagnostic', { stdout: line.slice(0, 2000) });
       return;
     }
-    const bytes = Buffer.byteLength(line), oversized = bytes > this.maxLineBytes, shed = sheddableType(line.slice(0, 64));
+    const bytes = Buffer.byteLength(line), oversized = bytes > this.maxLineBytes, shed = sheddableType(line.slice(0, HEAD_CHARS));
     if (shed) { this.shed(shed, oversized); return; }
     try {
       if (!line.length || oversized) throw new Error('Empty or oversized RPC frame');

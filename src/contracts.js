@@ -8,6 +8,8 @@ import { validateUsageObservation, validateUsageTotals, UsageValidationError } f
 
 export const STATE_VERSION = 1;
 export const WIRE_VERSION = 1;
+/** Longest stored task note (interruption, cancel reason) or worker error; writers clip to it. */
+export const TASK_NOTE_LIMIT = 10000;
 
 const RESERVED_IDS = new Set(['prototype', ...Object.getOwnPropertyNames(Object.prototype)]);
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
@@ -86,7 +88,7 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, summaryDetail: SummaryDetail}} PreDeferredPolicyV1 */
 /** @typedef {Omit<PreDeferredPolicyV1, 'mode'> & {mode: 'final' | 'milestones' | 'strict'}} HistoricalTaskPolicyV1 */
 /** @typedef {PreDeferredPolicyV1 & {maxRevisionsPerStep: number}} StoredPolicyV1 */
-/** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number}} StoredTaskFieldsV1 */
+/** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number, pausedBy?: 'human', mainRecoveries?: number}} StoredTaskFieldsV1 */
 /** @typedef {StoredTaskFieldsV1 & {workerId: string, attemptId: string, attemptNumber: number, pendingReport: ReportEnvelope | null, report: FinalizedReport | null, decisions: Record<string, StoredDecision>} & ({policy: StoredPolicyV1, limits: TaskLimits} | {policy: PreDeferredPolicyV1, limits: BaseTaskLimits})} StoredTaskV1 */
 /** @typedef {StoredTaskFieldsV1 & {policy: HistoricalTaskPolicyV1, limits: BaseTaskLimits, pendingReport: HistoricalReportEnvelopeV1 | null, report: HistoricalFinalizedReportV1 | null, decisions: Record<string, HistoricalDecisionV1>}} HistoricalTaskV1 */
 /** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null, pid?: number, spawnedAt?: number}} StoredWorkerFieldsV1 */
@@ -187,7 +189,7 @@ function keys(value, allowed, label) {
   for (const key of allowed) invariant(!(key in value) || Object.hasOwn(value, key), `${label}.${key} must be an own field`, `${label}.${key}`);
 }
 /** @param {unknown} value @param {string} label @returns {string | null} */
-function nullableText(value, label) { return value === null ? null : text(value, label, 10000); }
+function nullableText(value, label) { return value === null ? null : text(value, label, TASK_NOTE_LIMIT); }
 /** @param {unknown} value @param {string} label @returns {string} */
 function hash(value, label) { const result = text(value, label, 64); invariant(HASH_PATTERN.test(result), `${label} must be a SHA-256 hash`, label); return result; }
 /** @param {unknown} value @param {string} label @param {number} supported */
@@ -528,7 +530,7 @@ function validateTaskReportIdentity(report, label, task, workerId, stepIds, curr
 /** @param {unknown} value @param {string} label @param {string} workerId @param {boolean} historical @param {ProfileFacts} facts */
 function checkStoredTask(value, label, workerId, historical, facts) {
   const task = object(value, label);
-  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', ...(historical ? [] : ['workerId', 'attemptId', 'attemptNumber'])], label);
+  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', 'pausedBy', 'mainRecoveries', ...(historical ? [] : ['workerId', 'attemptId', 'attemptNumber'])], label);
   for (const key of ['id', 'requestId', 'leaseId']) id(required(task, key, label), `${label}.${key}`);
   if (!historical) {
     reference(id(required(task, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Task targets a different worker');
@@ -580,9 +582,10 @@ function checkStoredTask(value, label, workerId, historical, facts) {
     const decision = object(decisions[last.reportId], `${label}.decisions.${last.reportId}`);
     reference(decision.action === last.action && decision.feedback === last.feedback, `${label}.lastDecision`, 'Last decision contradicts its retained decision');
   }
-  for (const key of ['dispatchSettleSequence', 'pendingSince', 'completedAt', 'stepRevisions']) if (Object.hasOwn(task, key)) integer(task[key], `${label}.${key}`);
+  for (const key of ['dispatchSettleSequence', 'pendingSince', 'completedAt', 'stepRevisions', 'mainRecoveries']) if (Object.hasOwn(task, key)) integer(task[key], `${label}.${key}`);
   if (Object.hasOwn(task, 'abortRequested')) bool(task.abortRequested, `${label}.abortRequested`);
-  for (const key of ['interruption', 'previousStatus', 'cancelReason']) if (Object.hasOwn(task, key)) text(task[key], `${label}.${key}`, 10000);
+  if (Object.hasOwn(task, 'pausedBy')) choice(task.pausedBy, ['human'], `${label}.pausedBy`);
+  for (const key of ['interruption', 'previousStatus', 'cancelReason']) if (Object.hasOwn(task, key)) text(task[key], `${label}.${key}`, TASK_NOTE_LIMIT);
 }
 /** @param {unknown} value @param {string} label @param {string} workerId @returns {asserts value is StoredTaskV1} */
 function assertStoredTask(value, label, workerId) { const facts = profileFacts(); checkStoredTask(value, label, workerId, false, facts); rejectUnsupported(facts); }

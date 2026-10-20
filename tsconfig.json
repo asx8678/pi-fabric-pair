@@ -29,6 +29,7 @@
     "src/util.js",
     "src/metrics.js",
     "src/observations.js",
+    "src/peer-review.js",
     "src/ui.js"
   ]
 }

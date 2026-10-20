@@ -176,9 +176,6 @@ function parseJSONC(text) {
     if (c === '"') { quoted = true; out += c; continue; }
     if (c === '/' && text[i + 1] === '/') { while (i < text.length && text[i] !== '\n') i++; out += '\n'; continue; }
     if (c === '/' && text[i + 1] === '*') { i += 2; while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++; assert(i < text.length, 'Unterminated JSON comment'); i++; out += ' '; continue; }
-    if (c === ',') {
-      out += c; continue;
-    }
     out += c;
   }
   let result = ''; quoted = false; escaped = false;

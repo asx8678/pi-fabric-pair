@@ -579,6 +579,16 @@ export class PiRuntime {
     this.#activation = { token, controller: new AbortController(), prepared: false, attempted: false, accepted: false, settled: false };
     this.#wake(); return token;
   }
+  /**
+   * Drop a reservation no work has used yet, as when the assignment holding it could not be saved. A
+   * prepared or attempted activation is left alone; revoke it instead.
+   * @param {Activation} activation
+   */
+  releaseActivation(activation) {
+    const active = this.#activation;
+    if (!active || active.token !== activation || active.prepared || active.attempted) return;
+    active.controller.abort('Activation released'); this.#activation = null; this.#wake();
+  }
   /** @param {Activation} activation */
   activationCurrent(activation) { return this.#current(activation); }
   /** @param {Activation} activation @returns {Promise<Readiness>} */

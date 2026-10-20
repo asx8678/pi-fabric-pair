@@ -171,9 +171,11 @@ actual results vary.
 Both roles can use Pi's native cache warmer. With `"cacheWarming": "idle"` in
 Pi's global settings, Pair keeps Main's cache warm while the worker works and the
 worker's cache warm while its report waits for Main, using Pi's own savings rule.
-This works for every model: Pi warms only models it knows a cache lifetime for
-(built in: Anthropic only), so Pair gives any other model a 4-minute lifetime
-before it runs, and never changes one Pi already knows. Pi stops 30 minutes after a
+This works for every model with a priced prompt cache: Pi warms only models it
+knows a cache lifetime for (built in: Anthropic only), so Pair gives any other
+model whose cache reads cost less than its input a 4-minute lifetime before it
+runs, and never changes one Pi already knows. A model with no cache-read price is
+never warmed, because each refresh would bill the whole prompt and save nothing. Pi stops 30 minutes after a
 session's last request. Pair never warms a Codex model, because Pi cannot cap that
 refresh; `/pair doctor` says when Main or the worker uses one. Fabric's `cache.hold` (Fabric 0.97.0 or newer, on a Pi with scoped
 warming) is a separate paid opt-in for Main. Pair holds no leases and never changes

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { agentDir, assert, canonical, merge, ownerAlive, plain, readJSON, readJSONC, VERSION } from './util.js';
 
 /**
@@ -259,7 +260,7 @@ export async function applyNativeProfileRepairs(repairs) {
     const stat = await fs.stat(file).catch(() => null), mode = stat ? stat.mode & 0o777 : 0o644;
     if (stat) { const backup = `${file}.before-pair-repair-${stamp}`; await fs.copyFile(file, backup); backups.push(backup); }
     await fs.mkdir(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
     await fs.writeFile(tmp, JSON.stringify(value, null, 2) + '\n', { mode });
     await fs.rename(tmp, file);
   }
@@ -387,43 +388,101 @@ export const FABRIC_FILE_WRITERS = ['schema.commit'];
 export function providerFileWrite(name, details) {
   return fabricResultProxy(name, details) && FABRIC_FILE_WRITERS.includes(String(name));
 }
+/** Keywords after which a `/` starts a JavaScript regex literal rather than a division. */
+const REGEX_KEYWORDS = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'yield', 'await']);
+/** @param {string} read the executable text so far @returns {boolean} whether a `/` here opens a regex literal */
+function regexCanStart(read) {
+  let j = read.length - 1;
+  while (j >= 0 && /\s/.test(read[j])) j--;
+  if (j < 0 || '(,=:[!&|?{};+-*%<>~^'.includes(read[j])) return true;
+  const word = /[\w$]+$/.exec(read.slice(Math.max(0, j - 10), j + 1))?.[0];
+  return !!word && REGEX_KEYWORDS.has(word);
+}
+/** @param {string} code @param {number} start a `/` @returns {number} the index after the regex literal and its flags, or -1 if none closes on this line */
+function regexEnd(code, start) {
+  let inClass = false;
+  for (let j = start + 1; j < code.length; j++) {
+    const c = code[j];
+    if (c === '\n') return -1;
+    if (c === '\\') { j++; continue; }
+    if (c === '[') inClass = true;
+    else if (c === ']') inClass = false;
+    else if (c === '/' && !inClass) { j++; while (j < code.length && /[a-z]/i.test(code[j])) j++; return j; }
+  }
+  return -1;
+}
 /**
- * `code` with string literals and comments blanked, so a `fabric_exec` program (TypeScript or
- * Python) is matched on what it calls, not on text it only carries, such as an edit payload or
- * a grep pattern. Heuristic: template expressions count as text, and a JavaScript regex literal
- * holding a quote can shift the pairing. The `tool_result` checks remain the backstop.
- * @param {string} code
+ * `code` with comments removed and string literals blanked, so a `fabric_exec` program (TypeScript
+ * or Python) is matched on what it calls, not on text it only carries, such as an edit payload or a
+ * grep pattern. Template `${…}` expressions and code after a regex literal stay code. With `strings`,
+ * string literals keep their text, for checks that read a literal name (`agents["spawn"]`).
+ * Heuristic: the `tool_result` checks remain the backstop.
+ * @param {string} code @param {{strings?: boolean}} [options]
  */
-export function executableText(code) {
+export function executableText(code, { strings = false } = {}) {
   let out = '', i = 0;
+  /** @type {number[]} unclosed `{` inside each template expression being read */ const templates = [];
+  // Template text runs to the closing backtick or to `${`, whose expression is read as code.
+  const template = () => {
+    const start = i;
+    while (i < code.length && code[i] !== '`' && !code.startsWith('${', i)) i += code[i] === '\\' ? 2 : 1;
+    if (strings) out += code.slice(start, i);
+    if (code.startsWith('${', i)) { i += 2; templates.push(0); out += '"; '; } else { i++; out += '"'; } // `;` lets the expression open with a regex
+  };
   while (i < code.length) {
     const c = code[i], next = code[i + 1] ?? '';
     if ((c === '/' && next === '/') || (c === '#' && !/[\w$]/.test(next))) { while (i < code.length && code[i] !== '\n') i++; continue; }
     if (c === '/' && next === '*') { const end = code.indexOf('*/', i + 2); i = end < 0 ? code.length : end + 2; out += ' '; continue; }
-    if (c === '"' || c === "'" || c === '`') {
-      const close = c !== '`' && code.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+    if (c === '`') { i++; out += '"'; template(); continue; }
+    if (templates.length && c === '}' && templates[templates.length - 1] === 0) { templates.pop(); i++; out += ' "'; template(); continue; }
+    if (templates.length && (c === '{' || c === '}')) templates[templates.length - 1] += c === '{' ? 1 : -1;
+    if (c === '"' || c === "'") {
+      const start = i, close = code.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
       i += close.length;
       while (i < code.length && !code.startsWith(close, i)) {
-        if (close.length === 1 && c !== '`' && code[i] === '\n') break;
+        if (close.length === 1 && code[i] === '\n') break;
         i += code[i] === '\\' ? 2 : 1;
       }
-      i += close.length; out += '""'; continue;
+      if (code.startsWith(close, i)) i += close.length;
+      out += strings ? code.slice(start, i) : '""'; continue;
+    }
+    if (c === '/' && regexCanStart(out)) {
+      const end = regexEnd(code, i);
+      if (end > 0) { out += '""'; i = end; continue; }
     }
     out += c; i++;
   }
   return out;
 }
 /**
- * Fabric refs a `fabric_exec` program calls directly: `schema.commit(...)` outside strings and
- * comments, or a literal `tools.call({ref: "schema.commit"})`. A computed ref is not found.
+ * Whether the provider object itself escapes into a value (`const a = agents`, `use(agents)`) while the
+ * program names the action somewhere it could reach it through that value: `.spawn`, `["spawn"]` or
+ * `"spawn"`. A bare word such as Python's `import` does not count.
+ * @param {string} text @param {string} literal @param {string} provider @param {string} action
+ */
+function reachedThroughAlias(text, literal, provider, action) {
+  if (!new RegExp(`(?<![\\w$])${provider}(?![\\w$])(?!\\s*(?:\\?\\s*\\.|\\.|\\[|\\(|=(?!=)|:))`).test(text)) return false;
+  return new RegExp(`\\.\\s*${action}(?![\\w$])`).test(text) || new RegExp(`(["'\`])${action}\\1`).test(literal);
+}
+/**
+ * Fabric refs a `fabric_exec` program reaches by name: `schema.commit(...)`, `schema?.commit`, a
+ * reference without a call, `schema["commit"]`, Python's `getattr(schema, "commit")`, destructuring
+ * (`const { commit } = schema`), the provider passed on as a value with the action named, or a literal
+ * `tools.call({ref: "schema.commit"})`. Strings and comments do not count. A computed ref is not found.
  * @param {unknown} code @param {Iterable<string>} refs @returns {string[]}
  */
 export function programCalls(code, refs) {
   if (typeof code !== 'string') return [];
-  const text = executableText(code);
+  const text = executableText(code), literal = executableText(code, { strings: true });
   return [...refs].filter(ref => {
     const [provider, action] = ref.split('.'); // Fabric refs are word characters only
-    return new RegExp(`(?<![\\w$.])${provider}\\s*\\.\\s*${action}\\s*\\(`).test(text)
+    const name = `(?<![\\w$])${provider}(?![\\w$])`, member = `(?<![\\w$])${action}(?![\\w$])`, quoted = `(["'\`])${action}\\1`;
+    return new RegExp(`${name}\\s*(?:\\?\\s*)?\\.\\s*${member}`).test(text)
+      || new RegExp(`${name}\\s*(?:\\?\\s*\\.\\s*)?\\[\\s*${quoted}\\s*\\]`).test(literal)
+      || new RegExp(`\\bgetattr\\s*\\(\\s*${name}\\s*,\\s*${quoted}`).test(literal)
+      || new RegExp(`\\{[^{}]*${member}[^{}]*\\}\\s*=\\s*(?:await\\s+)?${name}`).test(text)
+      || new RegExp(`${name}\\s*:\\s*\\{[^{}]*${member}`).test(text)
+      || reachedThroughAlias(text, literal, provider, action)
       || new RegExp(`\\bref["']?\\s*[:=]\\s*(["'\`])${provider}\\.${action}\\1`).test(code);
   });
 }
@@ -474,6 +533,16 @@ export function shortWarmReplay(model, signedIn = false) {
 export function signedIn(registry, model) {
   try { return !!model && registry?.isUsingOAuth?.(model) === true; } catch { return false; }
 }
+/**
+ * Whether a cache hit costs less than a miss on this model's price list. A model with no cache-read
+ * price either has no prompt cache or Pi cannot price one, so a refresh would bill the full prompt and
+ * save nothing; Pi's own warmer does not check this, it relies on only cached models having a lifetime.
+ * @param {WarmedModel | null | undefined} model
+ */
+export function cacheReadSaves(model) {
+  const cost = model?.cost;
+  return plain(cost) && typeof cost.cacheRead === 'number' && typeof cost.input === 'number' && cost.cacheRead > 0 && cost.cacheRead < cost.input;
+}
 /** Whether Pi knows a prompt-cache lifetime for this model; without one Pi never warms it. @param {WarmedModel | null | undefined} model */
 function hasCacheLifetime(model) {
   const cache = model?.promptCache;
@@ -483,12 +552,13 @@ function hasCacheLifetime(model) {
 export const DEFAULT_CACHE_LIFETIME_S = 240;
 /**
  * Pi's warmer runs only for models with a `promptCache` lifetime, and Pi 0.87.1 ships one only for
- * Anthropic models. Give the model about to run a default so warming works for every model. A
- * lifetime Pi already knows is never changed, and Codex models are left without one.
+ * Anthropic models. Give the model about to run a default so warming works for every model with a
+ * priced prompt cache. A lifetime Pi already knows is never changed, and Codex models and models
+ * without a cache-read price are left without one.
  * @param {WarmedModel | null | undefined} model @param {boolean} [oauth] see shortWarmReplay @returns {boolean} whether the default was applied
  */
 export function ensureCacheLifetime(model, oauth = false) {
-  if (!model || hasCacheLifetime(model) || !shortWarmReplay(model, oauth)) return false;
+  if (!model || hasCacheLifetime(model) || !shortWarmReplay(model, oauth) || !cacheReadSaves(model)) return false;
   try { model.promptCache = { ...(plain(model.promptCache) ? model.promptCache : {}), short: DEFAULT_CACHE_LIFETIME_S }; return true; }
   catch { return false; } // a frozen model keeps Pi's own behaviour
 }
@@ -503,7 +573,7 @@ export function ensureCacheLifetime(model, oauth = false) {
  * @returns {'warm' | undefined}
  */
 export function reviewWarmingAction(event, model, measuredPrompt = 0, oauth = false) {
-  if (!plain(event) || !shortWarmReplay(model, oauth)) return undefined;
+  if (!plain(event) || !shortWarmReplay(model, oauth) || !cacheReadSaves(model)) return undefined;
   const { continuationProbability: p, action } = event;
   // Pi still prices the refresh's one output token, so a zero-token prompt shows as missCost 0 alone.
   const { missCost, warmCost } = event.missCost === 0 ? refreshCosts(model, measuredPrompt) ?? event : event;
