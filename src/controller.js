@@ -13,6 +13,7 @@ import { assertReportSize, validateDecision, validateDispatch } from './schema.j
 import { incrementCounter, migrateStoredState, STATE_VERSION, TASK_NOTE_LIMIT, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateReportPayload, validateStoredState } from './contracts.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
 import { decisionEntry, normalizeActivity, normalizeTimeline, reportEntry } from './timeline.js';
+import { transcriptText } from './transcript.js';
 import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, digest, inside, mkdirPrivate, processStartedAt, processState, PROTOCOL, signalGroup, signallablePid, readJSON, readJsonlTail, safeId, Serial, stableDigest, uid } from './util.js';
 
 /**
@@ -1778,23 +1779,17 @@ ${guidance}`;
     });
   }
   /**
-   * Recent worker text, read from the tail of the worker's retained session file.
-   * No RPC request is made, so a large context cannot fault a running worker and
-   * a stopped worker's conversation stays readable.
+   * The worker's recent conversation, read from the tail of its retained session file: its text, one line per
+   * tool call and result, and Pair's prompts folded, or with `full` every output whole. No RPC request is made,
+   * so a large context cannot fault a running worker and a stopped worker's conversation stays readable.
    * @param {string} id
+   * @param {{full?: boolean}} [options]
    */
-  async transcript(id) {
+  async transcript(id, options = {}) {
     const file = this.record(id).sessionFile;
     assert(file, `Worker ${id} has no retained session yet`);
     const entries = await readJsonlTail(file, TRANSCRIPT_TAIL_BYTES);
-    const messages = entries.filter(entry => entry.type === 'message' && isRpcRecord(entry.message)).map(entry => entry.message);
-    return bounded(messages.slice(-30).map(message => {
-      if (!isRpcRecord(message)) return '[invalid message]';
-      const text = [];
-      if (typeof message.content === 'string') text.push(message.content);
-      else if (Array.isArray(message.content)) for (const block of message.content) if (isRpcRecord(block) && block.type === 'text' && typeof block.text === 'string') text.push(block.text);
-      return `${typeof message.role === 'string' ? message.role : 'unknown'}: ${text.join('\n')}`;
-    }).join('\n\n'), 60000);
+    return transcriptText(entries.filter(entry => entry.type === 'message' && isRpcRecord(entry.message)).map(entry => entry.message), { full: options.full === true });
   }
   /** @returns {Promise<void>} */
   close() {

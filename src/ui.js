@@ -1,5 +1,5 @@
-import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
-import { keyHint, rawKeyHint } from '@earendil-works/pi-coding-agent';
+import { Box, Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
+import { keyHint, keyText, rawKeyHint } from '@earendil-works/pi-coding-agent';
 import { assert, briefError, cleanText, clone } from './util.js';
 import { INDICATORS, validateConfig } from './config.js';
 import { EFFORT_LEVELS } from './contracts.js';
@@ -324,6 +324,24 @@ export function planWorker(summary) {
   return planned.find(w => ['working', 'settling', 'starting', 'question', 'review', 'blocked'].includes(w.status)) || planned[0];
 }
 /**
+ * Whether a plan still belongs on the live line and the board: a cancelled task leaves at once, a completed
+ * one when its ✔ badge settles, so a finished plan never lingers with a running clock.
+ * @param {PairSummary['workers'][number]['task'] | undefined} task
+ * @param {number} now
+ * @returns {boolean}
+ */
+function taskShown(task, now) {
+  if (!task?.stepList?.length || task.status === 'cancelled') return false;
+  return task.status !== 'completed' || now - (task.updatedAt ?? 0) < DONE_BADGE_MS;
+}
+/** @param {PairSummary} summary @param {number} now @returns {PairSummary['workers'][number] | undefined} */
+function glanceWorker(summary, now) {
+  const first = planWorker(summary);
+  return taskShown(first?.task, now) ? first : summary.workers.find(w => taskShown(w.task, now));
+}
+/** A task's running time; a completed task's clock stops when it finished. @param {{startedAt: number, status: string, updatedAt?: number | null}} task @param {number} now @returns {number} */
+function taskElapsed(task, now) { return (task.status === 'completed' && task.updatedAt ? task.updatedAt : now) - task.startedAt; }
+/**
  * @param {number} done
  * @param {number} total
  * @param {number} [maxCells]
@@ -357,21 +375,28 @@ function stepColor(state) {
 function stepPrefix(state) { return state === 'done' ? `complete ${stepSymbol(state)}` : stepSymbol(state); }
 /** @typedef {{rank: number, key: string, color: IndicatorColor, text: string, plain: string, flex?: boolean, min?: number, paint?: (plain: string) => string}} LiveSegment */
 const SEGMENT_SEPARATOR = ' · ';
-/** @param {number} done @param {number} total @param {number} cells @returns {string} */
-function barCells(done, total, cells) {
-  if (cells < 1) return '';
-  const filled = total > 0 ? Math.min(cells, Math.round((cells * done) / total)) : 0;
-  return '■'.repeat(filled) + '□'.repeat(cells - filled);
+/**
+ * Approved steps fill the bar; the step under way gets its own cells, so `2/4` and the bar tell the same story.
+ * @param {number} done @param {number} total @param {number} cells @param {boolean} current whether the next step is under way
+ * @returns {{filled: number, current: number, empty: number}}
+ */
+function barCells(done, total, cells, current) {
+  if (cells < 1 || !(total > 0)) return { filled: 0, current: 0, empty: Math.max(0, cells) };
+  const filled = Math.min(cells, Math.round((cells * done) / total));
+  const through = current ? Math.min(cells, Math.round((cells * (done + 1)) / total)) : filled;
+  return { filled, current: through - filled, empty: cells - through };
 }
 /**
  * @param {number} done @param {number} total @param {number} cells @param {string} owner @param {string} count
  * @param {(color: IndicatorColor, text: string) => string} paint
+ * @param {IndicatorColor | null} currentColor the current step's color, or null when no step is under way
  * @returns {LiveSegment}
  */
-function progressSegment(done, total, cells, owner, count, paint) {
-  const bar = barCells(done, total, cells), filled = bar.split('□')[0].length, empty = bar.length - filled;
+function progressSegment(done, total, cells, owner, count, paint, currentColor) {
+  const { filled, current, empty } = barCells(done, total, cells, currentColor !== null);
+  const bar = '■'.repeat(filled) + '▣'.repeat(current) + '□'.repeat(empty);
   return { rank: 1, key: 'progress', color: 'muted',
-    text: (owner ? paint('muted', owner) + ' ' : '') + paint('success', '■'.repeat(filled)) + paint('dim', '□'.repeat(empty)) + (bar ? ' ' : '') + paint('muted', count),
+    text: (owner ? paint('muted', owner) + ' ' : '') + paint('success', '■'.repeat(filled)) + (current && currentColor ? paint(currentColor, '▣'.repeat(current)) : '') + paint('dim', '□'.repeat(empty)) + (bar ? ' ' : '') + paint('muted', count),
     plain: (owner ? owner + ' ' : '') + (bar ? bar + ' ' : '') + count };
 }
 /**
@@ -418,7 +443,7 @@ export function fitSegments(segments, width) {
  */
 export function liveLine(summary, width, theme, now = Date.now()) {
   if (!(width > 0)) return [];
-  const worker = planWorker(summary);
+  const worker = glanceWorker(summary, now);
   const list = worker?.task?.stepList;
   if (!worker || !list?.length) return [];
   const paint = painter(theme);
@@ -432,7 +457,7 @@ export function liveLine(summary, width, theme, now = Date.now()) {
   /** @param {number} cells @returns {LiveSegment[]} */
   const build = cells => {
     /** @type {LiveSegment[]} */
-    const segments = [progressSegment(done, list.length, cells, owner, count, paint)];
+    const segments = [progressSegment(done, list.length, cells, owner, count, paint, step ? stepColor(step.state) : null)];
     const alert = alertText(worker, state, now);
     if (alert) segments.push({ rank: 2, key: 'alert', color: alert.color, text: paint(alert.color, '⚠ ' + alert.text), plain: '⚠ ' + alert.text, paint: plain => paint(alert.color, plain) });
     const title = step ? inline(step.title, 400) : done === list.length ? 'all steps approved' : inline(task.objective, 200);
@@ -440,7 +465,7 @@ export function liveLine(summary, width, theme, now = Date.now()) {
     segments.push({ rank: 3, key: 'title', color: titleColor, text: paint(titleColor, symbol + ' ' + title), plain: symbol + ' ' + title, flex: true, min: 16, paint: plain => paint(titleColor, plain) });
     const activity = activityText(worker);
     if (activity) segments.push({ rank: 4, key: 'activity', color: 'accent', text: paint('accent', activity), plain: activity, paint: plain => paint('accent', plain) });
-    if (task.startedAt) { const elapsed = elapsedLabel(now - task.startedAt); segments.push({ rank: 5, key: 'elapsed', color: 'muted', text: paint('muted', elapsed), plain: elapsed, paint: plain => paint('muted', plain) }); }
+    if (task.startedAt) { const elapsed = elapsedLabel(taskElapsed(task, now)); segments.push({ rank: 5, key: 'elapsed', color: 'muted', text: paint('muted', elapsed), plain: elapsed, paint: plain => paint('muted', plain) }); }
     const perStep = task.limits?.maxRevisionsPerStep;
     if ((task.stepRevisions ?? 0) > 0 && typeof perStep === 'number') {
       const revisions = 'rev ' + task.stepRevisions + '/' + perStep;
@@ -514,7 +539,7 @@ function activityText(worker, full = false) {
  */
 export function boardLines(summary, width, theme, now = Date.now()) {
   if (!(width > 0)) return [];
-  const worker = planWorker(summary);
+  const worker = glanceWorker(summary, now);
   const list = worker?.task?.stepList;
   if (!worker || !list?.length) return [];
   const paint = painter(theme);
@@ -522,7 +547,7 @@ export function boardLines(summary, width, theme, now = Date.now()) {
   const state = workerState(summary, worker, !!summary.main?.busy, now);
   const spend = typeof task.reportedCost === 'number' && task.reportedCost > 0
     ? (typeof task.limits?.maxReportedCostUsd === 'number' ? costLabel(task.reportedCost) + '/' + costLabel(task.limits.maxReportedCostUsd) : costLabel(task.reportedCost)) : '';
-  const meta = [task.startedAt ? elapsedLabel(now - task.startedAt) : '', spend].filter(Boolean).join(' · ');
+  const meta = [task.startedAt ? elapsedLabel(taskElapsed(task, now)) : '', spend].filter(Boolean).join(' · ');
   const head = 'Pair · ' + inline(task.objective, 200);
   /** @typedef {{prefix: string, title: string, right: string, color: IndicatorColor}} BoardRow */
   const revisions = (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? 'rev ' + task.stepRevisions + '/' + task.limits.maxRevisionsPerStep : '';
@@ -616,7 +641,9 @@ export function widgetSignature(summary, mode, now = Date.now()) {
   const plan = summary.workers.map(w => [w.id, w.status, w.pid, w.task ? [w.task.id, w.task.status, w.task.step, w.task.revisions, w.task.stepRevisions, w.task.reportId, w.task.lastDecision, w.task.stepList.map(step => [step.id, step.state]), w.task.reportedCost, w.task.limitNotice, w.task.lastVerification, w.task.updatedAt] : null, w.observation?.currentTool ?? null, w.observation && 'currentTarget' in w.observation ? w.observation.currentTarget ?? null : null, w.observation?.compacting ?? null, w.observation?.lastUsage ?? null, w.error ?? null]);
   const ticks = summary.workers.map(w => {
     const last = Math.max(w.observation?.at || 0, w.lastExchange?.at || 0);
-    return [w.task?.startedAt ? Math.floor((now - w.task.startedAt) / 1000) : 0, last > 0 ? Math.floor((now - last) / 60000) : 0];
+    // A finished task's clock is frozen, so only a running one ticks; the shown flag flips when a done plan leaves.
+    const t = w.task, running = !!t?.startedAt && !['completed', 'cancelled'].includes(t.status);
+    return [t && running ? Math.floor((now - t.startedAt) / 1000) : 0, last > 0 ? Math.floor((now - last) / 60000) : 0, taskShown(t, now)];
   });
   return JSON.stringify([mode, plan, ticks, summary.waitingReports, summary.autoDeliverReports, summary.enabled, summary.main?.busy ?? null]);
 }
@@ -679,11 +706,38 @@ export function createIndicatorSurface(ui) {
     clear() { latest = null; removeWidget(); showStatus(undefined); },
   };
 }
-/** @typedef {'report' | 'diff' | 'transcript' | 'yield' | 'pause' | 'resume' | 'cancel' | 'settings' | 'restart' | 'reload' | 'doctor' | 'start' | 'model' | 'enable' | 'reconcile' | 'stop' | 'repl' | 'more' | 'help' | 'close'} DashboardAction */
+/** @typedef {'report' | 'diff' | 'transcript' | 'yield' | 'pause' | 'resume' | 'cancel' | 'settings' | 'restart' | 'reload' | 'doctor' | 'start' | 'reconcile' | 'stop' | 'status' | 'inbox' | 'worker' | 'more' | 'help' | 'close'} DashboardAction */
 /** @typedef {{key: string, action: DashboardAction, label: string}} DashboardKeyHint */
+/** What the dashboard resolves with: the chosen action and the worker it was shown for. @typedef {{action: DashboardAction, workerId?: string}} DashboardChoice */
 
 /** The widest the overlay may be; wider terminals keep a readable column. */
 const DASHBOARD_MAX_WIDTH = 100;
+/** One line of explanation per action, for the help list. @type {Readonly<Record<DashboardAction, string>>} */
+const ACTION_HELP = {
+  report: "read the worker's report card", diff: "scroll the checkpoint's changes", transcript: "follow the worker's conversation",
+  yield: 'send the waiting reports to Main', pause: 'stop the current step and hold the task', resume: 'continue the held task',
+  cancel: 'end the task for good; file changes stay', reconcile: 'prove the previous worker process exited',
+  start: 'launch the worker process', settings: 'worker model, review policy, indicator', worker: 'show the next worker',
+  more: 'maintenance keys', help: 'this list', restart: 'restart the process; the conversation is kept',
+  stop: 'stop the process; the conversation is kept', status: 'worker, task, Main and cache details',
+  inbox: 'reports Main has not read yet', reload: 'reread the saved Pair settings', doctor: 'check Fabric, Fovea and Pair setup',
+  close: 'close the dashboard',
+};
+/**
+ * The rows an overlay may use: Pi clamps it to its maxHeight (80% here) and to the terminal less the margins.
+ * @param {number} rows @returns {number}
+ */
+function overlayRows(rows) { return Math.max(1, Math.min(Math.floor(rows * 0.8), rows - 2)); }
+/**
+ * Pair's overlays: centered, and no wider than a readable column plus the frame on a wide terminal. Pi reads
+ * these options once, when the overlay opens.
+ * @param {number | undefined} columns
+ * @returns {import('@earendil-works/pi-tui').OverlayOptions}
+ */
+function overlayOptions(columns) {
+  const width = columns ? Math.min(DASHBOARD_MAX_WIDTH + 2, Math.floor(columns * 0.9)) : '90%';
+  return { width, minWidth: 40, maxHeight: '80%', anchor: 'center', margin: 1 };
+}
 
 /**
  * The dashboard's keys for the current state. A key only exists when its action applies, so the hint line
@@ -709,6 +763,7 @@ export function dashboardKeys(summary, workerId) {
   if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) keys.push({ key: '!', action: 'reconcile', label: 'reconcile' });
   // Start needs a chosen model: without one it could only fail with a notice, and s settings covers that state.
   if (!worker.pid && task === null && hasModel(worker)) keys.push({ key: 'n', action: 'start', label: 'start' });
+  if (summary.workers.length > 1) keys.push({ key: 'w', action: 'worker', label: 'next worker' });
   keys.push({ key: 's', action: 'settings', label: 'settings' }, { key: 'm', action: 'more', label: 'more' }, { key: '?', action: 'help', label: 'help' });
   return keys;
 }
@@ -717,19 +772,31 @@ export function dashboardKeys(summary, workerId) {
  * @param {string} data
  * @param {PairSummary} summary
  * @param {string} [workerId]
+ * @param {KeyMatcher | null} [keys] Pi's keybindings, so a rebound cancel key closes too
  * @returns {DashboardAction | null}
  */
-export function dashboardAction(data, summary, workerId) {
-  if (data === '\u001b' || data === 'q') return 'close';
+export function dashboardAction(data, summary, workerId, keys = null) {
+  if (data === 'q' || isCancel(keys, data)) return 'close';
   const hint = dashboardKeys(summary, workerId).find(item => item.key === data);
   return hint ? hint.action : null;
 }
 /**
- * The row under the "More" key: maintenance actions that never need a second screen.
+ * The row under the "More" key: maintenance actions and the views that are not needed every day.
+ * Stop is offered only while the worker process runs.
+ * @param {PairSummary} [summary]
+ * @param {string} [workerId]
  * @returns {DashboardKeyHint[]}
  */
-export function dashboardMoreKeys() {
-  return [{ key: 'r', action: 'restart', label: 'restart worker' }, { key: 'l', action: 'reload', label: 'reload settings' }, { key: 'd', action: 'doctor', label: 'doctor' }, { key: '?', action: 'help', label: 'help' }];
+export function dashboardMoreKeys(summary, workerId) {
+  const worker = summary ? dashboardWorker(summary, workerId) : undefined;
+  return [{ key: 'r', action: 'restart', label: 'restart worker' }, ...(worker?.pid ? [/** @type {DashboardKeyHint} */ ({ key: 'x', action: 'stop', label: 'stop worker' })] : []),
+    { key: 'i', action: 'status', label: 'status' }, { key: 'b', action: 'inbox', label: 'inbox' },
+    { key: 'l', action: 'reload', label: 'reload settings' }, { key: 'd', action: 'doctor', label: 'doctor' }, { key: '?', action: 'help', label: 'help' }];
+}
+/** @param {PairSummary} summary @param {string | undefined} workerId @returns {string | undefined} */
+function nextWorker(summary, workerId) {
+  const ids = summary.workers.map(w => w.id), at = ids.indexOf(dashboardWorker(summary, workerId)?.id ?? '');
+  return ids.length ? ids[(at + 1) % ids.length] : workerId;
 }
 /**
  * The short history line under a step: what happened to this step's reports and decisions.
@@ -767,13 +834,17 @@ function dashboardWorker(summary, workerId) {
 /** @param {string} notice @param {number} width @returns {string} */
 const clampNotice = (notice, width) => truncateToWidth(notice, Math.max(1, width), '…');
 
+/** How the dashboard sheds detail to fit its rows. @typedef {{history: 'all' | 'current' | 'none', collapse: boolean, limit?: number}} DashboardShape */
 /**
  * What the dashboard shows. A pure function of the summary, the width and the clock, so it can be tested
  * without Pi: header, the state line, the plan with its current step, the last checkpoint, and the keys.
+ * Given `maxRows` it sheds detail until it fits, in a fixed order: recent activity, the history of the other
+ * steps, all history, then finished steps fold into one row, then the plan is cut after the current step.
+ * The keys always stay.
  * @param {PairSummary} summary
  * @param {number} width
  * @param {number} [now]
- * @param {{workerId?: string, notice?: string | null, more?: boolean, help?: boolean, theme?: {fg(color: IndicatorColor | 'mdHeading', text: string): string, bold?(text: string): string} | null}} [options]
+ * @param {{workerId?: string, notice?: string | null, more?: boolean, help?: boolean, maxRows?: number, theme?: {fg(color: IndicatorColor | 'mdHeading', text: string): string, bold?(text: string): string} | null}} [options]
  * @returns {string[]}
  */
 export function dashboardLines(summary, width, now = Date.now(), options = {}) {
@@ -781,96 +852,154 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
   const theme = options.theme ?? null, fg = painter(theme), bold = (/** @type {string} */ text) => (theme?.bold ? theme.bold(text) : text);
   const worker = dashboardWorker(summary, options.workerId);
   const room = Math.max(20, Math.min(width, DASHBOARD_MAX_WIDTH));
-  /** @type {string[]} */
-  const lines = [];
-  const keys = options.help ? [...dashboardKeys(summary, worker?.id), ...dashboardMoreKeys().filter(item => item.key !== '?')]
-    : options.more ? dashboardMoreKeys() : dashboardKeys(summary, worker?.id);
-  // The hint row wraps rather than truncating, so help can always list every key.
-  const hints = keys.map(item => `${fg('accent', item.key)} ${item.label}`);
+  /** @param {string} text */
+  const fit = text => truncateToWidth(text, room, '…');
+  /** @param {DashboardKeyHint} item */
+  const keyText = item => `${fg('accent', item.key)} ${item.label}`;
+  const back = `${fg('accent', 'esc')} back`;
+  const row = options.help ? [back]
+    : options.more ? [fg('muted', 'More ›'), ...dashboardMoreKeys(summary, worker?.id).map(keyText), back]
+    : dashboardKeys(summary, worker?.id).map(keyText);
+  // The hint row wraps rather than truncating and keeps its indent, so every key stays visible.
+  const bottom = [...(options.notice ? [fg('warning', clampNotice(options.notice, room))] : []), '', ...wrapTextWithAnsi(row.join('  '), room - 2).map(line => `  ${line}`)];
   const waiting = summary.waitingReports || 0;
-  const head = waiting ? `◐ ${waiting} report${waiting === 1 ? '' : 's'} waiting for Main` : 'live';
   const title = `Pair${worker && summary.workers.length > 1 ? ` · ${worker.id}` : ''}`;
-  lines.push(truncateToWidth(`${fg('mdHeading', bold(title))}  ${fg(waiting ? 'warning' : 'dim', head)}`, room, '…'));
-  if (!summary.enabled) lines.push(truncateToWidth(fg('warning', 'Pair is off. It accepts no new work until you turn it on.'), room, '…'));
-  if (!worker) {
-    lines.push(truncateToWidth(fg('dim', 'No worker is configured. Open settings to add one.'), room, '…'));
-    if (options.notice) lines.push(fg('warning', clampNotice(options.notice, room)));
-    lines.push(...wrapTextWithAnsi('  ' + hints.join('  '), room).map(line => fg('muted', line)));
-    return lines;
-  }
-  const state = workerState(summary, worker, !!summary.main?.busy, now);
-  const task = worker.task && !['completed', 'cancelled'].includes(worker.task.status) ? worker.task : null;
-  const model = worker.model.split('/').pop() || worker.model;
-  // One identity line: which model, what state, and the live numbers. The state word comes from the
-  // shared classifier, so the dashboard can never disagree with the badge or the live line.
-  const meta = [model, worker.effort].filter(Boolean).join(' · ');
-  const measure = [
-    task?.startedAt ? elapsedLabel(now - task.startedAt) : '',
-    typeof task?.reportedCost === 'number' && task.reportedCost > 0 ? costLabel(task.reportedCost) : '',
-    worker.observation?.context?.percent != null ? `ctx ${Math.round(worker.observation.context.percent)}%` : '',
-    state.step ? `step ${state.step}/${state.steps}` : ''
-  ].filter(Boolean).join(' · ');
-  // A working state's label is a verb ('working on'); the dashboard names the state plainly instead.
-  const stateWord = state.kind === 'working' ? 'working' : state.label;
-  lines.push(truncateToWidth(`${fg('muted', meta)}   ${fg(state.color, `${state.icon} ${stateWord}`)}${measure ? '  ' + fg('muted', measure) : ''}`, room, '…'));
-  // The state sentence is the header's job; here only what the human or Main must resolve is repeated.
-  const pending = state.details.filter(detail => (detail.color === 'warning' || detail.color === 'error') && !detail.text.startsWith('/pair'));
-  for (const detail of pending.slice(0, 2)) lines.push(truncateToWidth(fg(detail.color, detail.text), room, '…'));
-  lines.push('');
-  if (!task) {
-    // Without a task the dashboard is a readiness screen: what is true now and what to do next.
-    const readiness = !summary.enabled ? 'Pair is off: it accepts no new work until you turn it on.'
-      : !hasModel(worker) ? 'No worker model is chosen yet.'
-      : worker.pid ? `${model} is ready for the next task.`
-      : 'The worker is not running.';
-    lines.push(truncateToWidth(fg('muted', readiness), room, '…'));
-    const next = nextAction(worker);
-    if (next) lines.push(truncateToWidth(fg('accent', next === '/pair to set up' ? 'Press s to choose the worker model.' : next === '/pair start' ? 'Press n to start the worker.' : next), room, '…'));
-    if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) lines.push(truncateToWidth(fg('warning', 'The previous worker process may still be running: press ! to reconcile.'), room, '…'));
-    if (!summary.enabled) lines.push(truncateToWidth(fg('accent', 'Open settings (s) to turn Pair on.'), room, '…'));
-  } else {
-    lines.push(truncateToWidth(fg('text', bold(inline(task.objective, 300))), room, '…'));
-    // Align the right-hand column to the widest left cell that still leaves room.
-    /** @type {{left: string, right: string, color: IndicatorColor}[]} */
-    const rows = task.stepList.map((step, index) => ({
-      left: `${stepSymbol(step.state)} ${index + 1} ${inline(step.title, 200)}`,
-      right: step.state === 'active' ? [activityText(worker, true), (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? `rev ${task.stepRevisions}/${task.limits.maxRevisionsPerStep}` : ''].filter(Boolean).join(' · ')
-        : step.state === 'review' ? 'for Main' : step.state === 'held' ? 'held' : step.state === 'done' ? 'approved' : '',
-      color: stepColor(step.state) }));
-    const widest = Math.max(...rows.map(row => visibleWidth(row.left)));
-    // Two clear columns of space between the step and its detail, shrinking only when the width demands it.
-    const column = Math.min(widest + 2, Math.max(18, room - 24));
-    for (const [index, row] of rows.entries()) {
-      const right = row.right ? '  ' + row.right : '';
-      if (!right) lines.push(truncateToWidth(fg(row.color, row.left), room, '…'));
-      else if (room - visibleWidth(right) < 18) lines.push(truncateToWidth(fg(row.color, row.left), room, '…'));
-      else {
-        const pad = ' '.repeat(Math.max(1, column - visibleWidth(row.left)));
-        lines.push(truncateToWidth(fg(row.color, row.left) + pad + fg('muted', row.right), room, '…'));
-      }
-      // What happened to this step's reports: a revise with its feedback excerpt, an approval, a failed check.
-      for (const history of stepHistory(task.timeline, index + 1)) lines.push(truncateToWidth(`    ${fg(history.color, history.text)}`, room, '…'));
+  const top = [fit(`${fg('mdHeading', bold(title))}${waiting ? `  ${fg('warning', `◐ ${waiting} report${waiting === 1 ? '' : 's'} waiting for Main`)}` : ''}`)];
+  if (!summary.enabled) top.push(fit(fg('warning', 'Pair is off. It accepts no new work until you turn it on.')));
+  /** @type {(shape: DashboardShape) => string[]} */
+  let content = () => [fit(fg('dim', 'No worker is configured. Open settings to add one.'))];
+  /** @type {string[]} */
+  let activityLines = [];
+  if (worker) {
+    const state = workerState(summary, worker, !!summary.main?.busy, now);
+    const task = worker.task && !['completed', 'cancelled'].includes(worker.task.status) ? worker.task : null;
+    const model = worker.model.split('/').pop() || worker.model;
+    // One identity line: which model, what state, and the live numbers. The state word comes from the
+    // shared classifier, so the dashboard can never disagree with the badge or the live line.
+    const meta = [model, worker.effort].filter(Boolean).join(' · ');
+    const measure = [
+      task?.startedAt ? elapsedLabel(now - task.startedAt) : '',
+      typeof task?.reportedCost === 'number' && task.reportedCost > 0 ? costLabel(task.reportedCost) : '',
+      worker.observation?.context?.percent != null ? `ctx ${Math.round(worker.observation.context.percent)}%` : '',
+      state.step ? `step ${state.step}/${state.steps}` : ''
+    ].filter(Boolean).join(' · ');
+    // A working state's label is a verb ('working on'); the dashboard names the state plainly instead.
+    const stateWord = state.kind === 'working' ? 'working' : state.label;
+    top.push(fit(`${fg('muted', meta)}   ${fg(state.color, `${state.icon} ${stateWord}`)}${measure ? '  ' + fg('muted', measure) : ''}`));
+    // The state sentence is the header's job; here only what the human or Main must resolve is repeated.
+    const pending = state.details.filter(detail => (detail.color === 'warning' || detail.color === 'error') && !detail.text.startsWith('/pair'));
+    for (const detail of pending.slice(0, 2)) top.push(fit(fg(detail.color, detail.text)));
+    top.push('');
+    if (!task) {
+      // Without a task the dashboard is a readiness screen: what is true now and what to do next.
+      const readiness = !summary.enabled ? 'Pair is off: it accepts no new work until you turn it on.'
+        : !hasModel(worker) ? 'No worker model is chosen yet.'
+        : worker.pid ? `${model} is ready for the next task.`
+        : 'The worker is not running.';
+      const lines = [fit(fg('muted', readiness))];
+      const next = nextAction(worker);
+      if (next) lines.push(fit(fg('accent', next === '/pair to set up' ? 'Press s to choose the worker model.' : next === '/pair start' ? 'Press n to start the worker.' : next)));
+      if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) lines.push(fit(fg('warning', 'The previous worker process may still be running: press ! to reconcile.')));
+      if (!summary.enabled) lines.push(fit(fg('accent', 'Open settings (s) to turn Pair on.')));
+      content = () => lines;
+    } else {
+      const objective = fit(fg('text', bold(inline(task.objective, 300))));
+      const rows = task.stepList.map((step, index) => ({
+        left: `${stepSymbol(step.state)} ${index + 1} ${inline(step.title, 200)}`,
+        right: step.state === 'active' ? [activityText(worker, true), (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? `rev ${task.stepRevisions}/${task.limits.maxRevisionsPerStep}` : ''].filter(Boolean).join(' · ')
+          : step.state === 'review' ? 'for Main' : step.state === 'held' ? 'held' : step.state === 'done' ? 'approved' : '',
+        color: stepColor(step.state),
+        // What happened to this step's reports: a revise with its feedback excerpt, an approval, a failed check.
+        history: stepHistory(task.timeline, index + 1).map(item => fit(`    ${fg(item.color, item.text)}`)) }));
+      // Align the right-hand column to the widest left cell, with two clear columns of space, shrinking
+      // only when the width demands it.
+      const widest = Math.max(...rows.map(item => visibleWidth(item.left)));
+      const column = Math.min(widest + 2, Math.max(18, room - 24));
+      /** @param {typeof rows[number]} item */
+      const stepLine = item => (!item.right || room - visibleWidth(item.right) - 2 < 18 ? fit(fg(item.color, item.left))
+        : fit(fg(item.color, item.left) + ' '.repeat(Math.max(1, column - visibleWidth(item.left))) + fg('muted', item.right)));
+      const current = task.stepList.findIndex(step => ['active', 'review', 'held'].includes(step.state));
+      const open = task.stepList.findIndex(step => step.state !== 'done');
+      const finished = open < 0 ? rows.length : open;
+      /** @param {number} count */
+      const folded = count => fit(fg('success', count === 1 ? '✔ 1 approved' : `✔ 1–${count} approved`));
+      const checks = Array.isArray(task.lastVerification) ? task.lastVerification : [];
+      const verification = checks.length
+        ? [fit(`  ${fg('muted', 'Last checkpoint')}  ${fg('muted', 'Pair verified')}  ${checks.map(check => `${check.passed ? fg('success', '✔') : fg('warning', '✖')} ${inline(check.name, 40)}`).join('  ')}`)]
+        : task.checkpointHash ? [fit(`  ${fg('muted', 'Last checkpoint')}  ${fg('muted', 'no Pair checks configured')}`)] : [];
+      content = ({ history, collapse, limit = Infinity }) => {
+        // Finished steps fold into one row only when that saves a line.
+        const skip = collapse && finished > 1 ? finished : 0;
+        const steps = rows.slice(skip).flatMap((item, offset) => [stepLine(item),
+          ...(history === 'all' || (history === 'current' && skip + offset === current) ? item.history : [])]);
+        const body = [objective, ...(skip ? [folded(skip)] : []), ...steps, ...verification];
+        if (body.length <= limit) return body;
+        // Still too tall: the plan starts at its first open step and says how many steps it leaves out.
+        const tail = rows.slice(finished).map(stepLine);
+        const free = Math.max(1, limit - 2 - (finished ? 1 : 0) - verification.length);
+        const hidden = tail.length - free;
+        return [objective, ...(finished ? [folded(finished)] : []), ...tail.slice(0, free), ...(hidden > 0 ? [fit(fg('dim', `  … ${hidden} more step${hidden === 1 ? '' : 's'}`))] : []), ...verification];
+      };
     }
-    const verification = Array.isArray(task.lastVerification) ? task.lastVerification : [];
-    if (verification.length) {
-      const rendered = verification.map(check => `${check.passed ? fg('success', '✔') : fg('warning', '✖')} ${inline(check.name, 40)}`).join('  ');
-      lines.push(truncateToWidth(`  ${fg('muted', 'Last checkpoint')}  ${fg('muted', 'Pair verified')}  ${rendered}`, room, '…'));
-    } else if (task.checkpointHash) lines.push(truncateToWidth(`  ${fg('muted', 'Last checkpoint')}  ${fg('muted', 'no Pair checks configured')}`, room, '…'));
-  }
-  // Recent activity: the worker's own last tool events, oldest first, bounded by the ring buffer.
-  const activity = Array.isArray(worker.recentActivity) ? worker.recentActivity : [];
-  if (activity.length) {
-    lines.push('');
-    lines.push(truncateToWidth(fg('muted', 'Recent activity'), room, '…'));
-    for (const event of activity.slice(-4)) {
+    // Recent activity: the worker's own last tool events, oldest first, bounded by the ring buffer.
+    const activity = Array.isArray(worker.recentActivity) ? worker.recentActivity : [];
+    if (activity.length) activityLines = ['', fit(fg('muted', 'Recent activity')), ...activity.slice(-4).map(event => {
       const when = event.at > 0 ? elapsedLabel(Math.max(0, now - event.at)) : '';
-      lines.push(truncateToWidth(`  ${fg('dim', when.padStart(5))}  ${fg('muted', inline(event.tool.replace(/^extensions\./, ''), 40))}${event.target ? ' ' + fg('dim', inline(event.target, 160)) : ''}`, room, '…'));
-    }
+      return fit(`  ${fg('dim', when.padStart(5))}  ${fg('muted', inline(event.tool.replace(/^extensions\./, ''), 40))}${event.target ? ' ' + fg('dim', inline(event.target, 160)) : ''}`);
+    })];
   }
-  if (options.notice) lines.push(truncateToWidth(fg('warning', clampNotice(options.notice, room)), room, '…'));
-  lines.push('');
-  lines.push(...wrapTextWithAnsi('  ' + hints.join('  '), room));
-  return lines;
+  if (options.help) {
+    const help = helpLines(dashboardKeys(summary, worker?.id), dashboardMoreKeys(summary, worker?.id).filter(item => item.action !== 'help'), room, fg);
+    content = () => help;
+    activityLines = [];
+  }
+  return fitRows(top, content, activityLines, bottom, options.maxRows ?? Infinity);
+}
+/**
+ * The help list: one key per line with what it does, the keys of this screen first, then the More row.
+ * @param {DashboardKeyHint[]} now
+ * @param {DashboardKeyHint[]} more
+ * @param {number} room
+ * @param {(color: IndicatorColor, text: string) => string} fg
+ * @returns {string[]}
+ */
+function helpLines(now, more, room, fg) {
+  const close = /** @type {DashboardKeyHint} */ ({ key: 'esc', action: 'close', label: 'close' });
+  const all = [...now, close, ...more];
+  const widest = Math.max(...all.map(item => visibleWidth(`${item.key} ${item.label}`)));
+  // Descriptions start in one column and wrap under it, so a narrow overlay never cuts one off.
+  const column = 4 + widest + 2;
+  /** @param {DashboardKeyHint} item */
+  const line = item => {
+    const [first = '', ...rest] = wrapTextWithAnsi(item === close ? 'q too; in More and this list, both go back' : ACTION_HELP[item.action], Math.max(12, room - column));
+    const head = `    ${fg('accent', item.key)} ${item.label}${' '.repeat(widest + 2 - visibleWidth(`${item.key} ${item.label}`))}`;
+    return [head + fg('dim', first), ...rest.map(part => ' '.repeat(column) + fg('dim', part))].map(text => truncateToWidth(text, room, '…'));
+  };
+  return [fg('muted', '  Keys'), ...now.flatMap(line), ...line(close), '', fg('muted', '  More (press m, then the key)'), ...more.flatMap(line)];
+}
+/**
+ * Fits the dashboard into `max` rows: the header and the keys stay, and the middle sheds detail in order.
+ * @param {string[]} top
+ * @param {(shape: DashboardShape) => string[]} content
+ * @param {string[]} activity
+ * @param {string[]} bottom
+ * @param {number} max
+ * @returns {string[]}
+ */
+function fitRows(top, content, activity, bottom, max) {
+  const space = max - top.length - bottom.length;
+  /** @type {DashboardShape[]} */
+  const shapes = [{ history: 'all', collapse: false }, { history: 'current', collapse: false }, { history: 'none', collapse: false }, { history: 'none', collapse: true }];
+  const full = content(shapes[0]);
+  if (full.length + activity.length <= space) return [...top, ...full, ...activity, ...bottom];
+  for (const shape of shapes) {
+    const middle = content(shape);
+    if (middle.length <= space) return [...top, ...middle, ...bottom];
+  }
+  const lines = [...top, ...content({ history: 'none', collapse: true, limit: Math.max(0, space) }), ...bottom];
+  if (lines.length <= max) return lines;
+  // A terminal too short for even that keeps the keys and cuts the middle.
+  return [...lines.slice(0, Math.max(0, max - bottom.length)), ...bottom].slice(0, Math.max(1, max));
 }
 const DASHBOARD_TICK_MS = 2000;
 /**
@@ -878,24 +1007,26 @@ const DASHBOARD_TICK_MS = 2000;
  * stop listening. Narrow on purpose, so the component can be tested with a fake controller.
  * @typedef {{summary(): PairSummary, on(event: 'change', listener: (summary: PairSummary) => void): unknown, off(event: 'change', listener: (summary: PairSummary) => void): unknown}} LiveSource */
 /**
- * The thin overlay around dashboardLines: it subscribes to the controller while open and on a timer, so the
- * screen updates in place; both are released on dispose and on close.
+ * The thin overlay around dashboardLines. It subscribes to the controller while open and refreshes on a
+ * timer, and asks Pi for a frame each time, because Pi repaints only on input or on request. Both are
+ * released on dispose and on close.
  * @param {LiveSource} source
- * @param {{workerId?: string, initial?: string | null, theme?: {fg(color: IndicatorColor | 'mdHeading', text: string): string, bold?(text: string): string} | null, now?: () => number, tickMs?: number}} [options]
- * @returns {{render(width: number): string[], handleInput(data: string): DashboardAction[], invalidate(): void, dispose(): void, attach(finish: (value?: unknown) => void): void, readonly closed: boolean, readonly subscribed: boolean, readonly notice: string | null, readonly more: boolean, readonly help: boolean}}
+ * @param {{workerId?: string, initial?: string | null, theme?: PanelTheme | null, keys?: KeyMatcher | null, rows?: () => number | undefined, onChange?: () => void, now?: () => number, tickMs?: number}} [options]
+ * @returns {{render(width: number): string[], handleInput(data: string): DashboardAction[], invalidate(): void, dispose(): void, attach(finish: (value?: unknown) => void): void, readonly closed: boolean, readonly subscribed: boolean, readonly notice: string | null, readonly more: boolean, readonly help: boolean, readonly workerId: string | undefined}}
  */
 export function createDashboard(source, options = {}) {
-  const clock = options.now ?? Date.now;
-  let notice = options.initial ?? null;
+  const clock = options.now ?? Date.now, keys = options.keys ?? null, fg = painter(options.theme ?? null);
+  const notice = options.initial ?? null;
+  let workerId = options.workerId;
   let more = false, help = false, closed = false, disposed = false;
-  let width = 80;
   let summary = source.summary();
   /** @type {(() => void) | null} */
   let done = null;
+  const changed = () => { try { options.onChange?.(); } catch { /* a repaint request must never break the listener */ } };
   /** @param {PairSummary} next */
-  const listener = next => { summary = next; };
+  const listener = next => { summary = next; changed(); };
   source.on('change', listener);
-  const timer = setInterval(() => { if (!closed) summary = source.summary(); }, options.tickMs ?? DASHBOARD_TICK_MS);
+  const timer = setInterval(() => { if (!closed) { summary = source.summary(); changed(); } }, options.tickMs ?? DASHBOARD_TICK_MS);
   timer.unref?.();
   const release = () => {
     if (disposed) return;
@@ -909,11 +1040,15 @@ export function createDashboard(source, options = {}) {
     get notice() { return notice; },
     get more() { return more; },
     get help() { return help; },
+    get workerId() { return dashboardWorker(summary, workerId)?.id; },
     /** @param {(value?: unknown) => void} finish */
     attach(finish) { done = finish; },
     render(w) {
-      width = w;
-      return dashboardLines(summary, w, clock(), { theme: options.theme ?? null, workerId: options.workerId, notice, more, help });
+      // A rule above and below marks the overlay over the chat; the rows it may use exclude them.
+      const rows = options.rows?.();
+      const lines = dashboardLines(summary, Math.max(1, w - 2), clock(), { theme: options.theme ?? null, workerId, notice, more, help, ...(rows ? { maxRows: Math.max(6, overlayRows(rows) - 2) } : {}) });
+      const rule = fg('border', '─'.repeat(Math.max(1, w)));
+      return [rule, ...lines.map(line => ` ${line}`), rule];
     },
     /**
      * One keypress. Navigation keys are handled here; everything else is returned for main.js to run. Keys
@@ -924,18 +1059,19 @@ export function createDashboard(source, options = {}) {
     handleInput(data) {
       if (closed) return [];
       if (more || help) {
-        if (data === '\u001b' || data === 'q' || data === '?' || data === 'm') { more = false; help = false; return []; }
-        if (more) {
-          const action = dashboardMoreKeys().find(item => item.key === data)?.action;
-          if (action) { more = false; return [action]; }
-          return [];
-        }
+        // q and esc step back to the dashboard; m leaves More, ? leaves help, and ? in More opens help.
+        if (data === 'q' || isCancel(keys, data) || data === (more ? 'm' : '?') || (help && data === 'm')) { more = false; help = false; return []; }
+        if (!more) return [];
+        const action = dashboardMoreKeys(summary, workerId).find(item => item.key === data)?.action;
+        if (action === 'help') { more = false; help = true; return []; }
+        if (action) { more = false; return [action]; }
         return [];
       }
-      const action = dashboardAction(data, summary, options.workerId);
+      const action = dashboardAction(data, summary, workerId, keys);
       if (!action) return [];
       if (action === 'more') { more = true; return []; }
       if (action === 'help') { help = true; return []; }
+      if (action === 'worker') { workerId = nextWorker(summary, workerId); return []; }
       if (action === 'close') { closed = true; release(); done?.(); return []; }
       // A read-only view reopens the dashboard when it closes, so two custom views never stack.
       return [action];
@@ -945,18 +1081,22 @@ export function createDashboard(source, options = {}) {
   };
 }
 /**
- * The dashboard overlay for a TUI context. Resolves with the action the human chose, or undefined on close.
+ * The dashboard overlay for a TUI context. Resolves with the chosen action and the worker it was shown for,
+ * or undefined on close.
  * @param {UIContext} ctx
  * @param {LiveSource} source
  * @param {{workerId?: string, notice?: string | null, overlay?: boolean}} [options]
- * @returns {Promise<DashboardAction | undefined>}
+ * @returns {Promise<DashboardChoice | undefined>}
  */
 export async function dashboardView(ctx, source, options = {}) {
   if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') return undefined;
-  return ctx.ui.custom((tui, theme, _keys, done) => {
-    const view = createDashboard(source, { workerId: options.workerId, initial: options.notice ?? null, theme });
-    /** @type {DashboardAction | null} */
-    let pending = null;
+  /** @type {number | undefined} */
+  let columns;
+  return ctx.ui.custom((tui, theme, keys, done) => {
+    columns = tui.terminal?.columns;
+    const view = createDashboard(source, { workerId: options.workerId, initial: options.notice ?? null, theme, keys, rows: () => tui.terminal?.rows, onChange: () => tui.requestRender() });
+    // q and esc end here: Pi's done() resolves the view and disposes the component.
+    view.attach(() => done(undefined));
     const component = {
       /** @param {number} w */
       render(w) { return view.render(w); },
@@ -966,50 +1106,109 @@ export async function dashboardView(ctx, source, options = {}) {
       handleInput(/** @type {string} */ data) {
         const actions = view.handleInput(data);
         if (!actions.length) { tui.requestRender(); return; }
-        pending = actions[0];
+        const choice = { action: actions[0], workerId: view.workerId };
         view.dispose();
-        done(pending);
+        done(choice);
       },
     };
     return component;
-  }, { overlay: options.overlay !== false, overlayOptions: () => ({ width: '90%', minWidth: 40, maxHeight: '80%', anchor: 'center', margin: 1 }) });
+  }, { overlay: options.overlay !== false, overlayOptions: () => overlayOptions(columns) });
 }
+/** What a transcript view reads: the text, compact by default or with every output in full. @typedef {{read(options?: {full?: boolean}): Promise<string>}} FollowSource */
+/** Rows a chrome() frame adds around its body with one subtitle line and a hint row. */
+const CHROME_ROWS = 9;
 /**
- * Follow mode for the transcript: refresh while open, stay pinned to the bottom unless the human scrolls up.
- * @typedef {{read(): Promise<string>}} FollowSource
+ * Follow mode for the transcript: refresh while open, stay pinned to the bottom until the human scrolls up,
+ * and follow again once they scroll back to the end. `o` switches between one line per tool call and result
+ * and the full output.
  * @param {FollowSource} source
- * @param {{now?: () => number, tickMs?: number}} [options]
- * @returns {{render(width: number): string[], handleInput(data: string): void, invalidate(): void, dispose(): void, pinned: boolean}}
+ * @param {{title?: string, theme?: PanelTheme | null, keys?: KeyMatcher | null, rows?: () => number | undefined, onUpdate?: () => void, onClose?: () => void, tickMs?: number}} [options]
+ * @returns {{render(width: number): string[], handleInput(data: string): void, invalidate(): void, dispose(): void, readonly pinned: boolean, readonly full: boolean}}
  */
 export function createFollowView(source, options = {}) {
-  const clock = options.now ?? Date.now;
-  let text = 'loading…', pinned = true, disposed = false, pageRows = 20;
-  let offset = 0;
-  /** @param {string} next */
-  const load = next => { text = next; if (pinned) offset = Number.MAX_SAFE_INTEGER; };
-  void clock;
-  const refresh = () => { source.read().then(load, error => load(`Could not read the transcript: ${briefError(error)}`)); };
+  const theme = options.theme ?? null, fg = painter(theme), keys = options.keys ?? null;
+  const bold = (/** @type {string} */ text) => (theme?.bold ? theme.bold(text) : text);
+  let text = 'loading…', pinned = true, full = false, disposed = false, reading = false;
+  let offset = 0, page = 10, total = 0;
+  /** @type {{width: number, text: string, lines: string[]}} */
+  let cache = { width: -1, text: '', lines: [] };
+  const refresh = () => {
+    if (disposed || reading) return;
+    reading = true;
+    const asked = full;
+    source.read({ full: asked }).then(next => next, error => `Could not read the transcript: ${briefError(error)}`).then(next => {
+      reading = false;
+      if (disposed) return;
+      // o was pressed while this read ran: read again in the mode now shown.
+      if (asked !== full) { refresh(); return; }
+      text = next;
+      try { options.onUpdate?.(); } catch { /* a repaint request must not stop the refresh */ }
+    });
+  };
   refresh();
   const timer = setInterval(refresh, options.tickMs ?? 2000);
   timer.unref?.();
+  /** @param {number} width */
+  const layout = width => {
+    if (cache.width !== width || cache.text !== text) {
+      const span = Math.max(10, width - 3);
+      cache = { width, text, lines: cleanText(text, 200000).replace(/\t/g, '    ').split('\n').flatMap(line => transcriptLines(line, span, fg, bold)) };
+    }
+    return cache.lines;
+  };
+  /** @param {number} to */
+  const scrollTo = to => { offset = Math.max(0, Math.min(to, total - page)); pinned = offset >= total - page; };
+  const dispose = () => { if (disposed) return; disposed = true; clearInterval(timer); };
   return {
     get pinned() { return pinned; },
+    get full() { return full; },
+    /** @param {number} width */
     render(width) {
-      const lines = cleanText(text, 100000).replace(/\t/g, '    ').split('\n');
-      pageRows = Math.max(6, 18);
-      offset = Math.min(offset, Math.max(0, lines.length - pageRows));
-      return lines.slice(offset, offset + pageRows).map(line => truncateToWidth(line, Math.max(1, width), '…'));
+      const lines = layout(width), rows = options.rows?.();
+      page = Math.max(3, (rows ? overlayRows(rows) : 24) - CHROME_ROWS);
+      total = lines.length;
+      offset = pinned ? Math.max(0, total - page) : Math.min(offset, Math.max(0, total - page));
+      const position = total > page ? `${offset + 1}–${Math.min(offset + page, total)} of ${total}` : `${total} line${total === 1 ? '' : 's'}`;
+      const subtitle = [pinned ? 'following' : 'paused, G follows', full ? 'full output' : 'one line per tool call', position].join(' · ');
+      return chrome(lines.slice(offset, offset + page), width, { title: options.title ?? 'Transcript', subtitle: [subtitle], theme,
+        hints: hints(['↑↓', 'scroll'], ['pgup/pgdn', 'page'], ['g/G', 'top/end'], ['o', full ? 'fold output' : 'full output'], ['tui.select.cancel', 'close']) });
     },
+    /** @param {string} data */
     handleInput(data) {
-      if (data === '\u001b' || data === 'q') { this.dispose(); return; }
-      if (data === '\u001b[A' || data === 'k') { offset = Math.max(0, offset - 1); pinned = false; }
-      else if (data === '\u001b[B' || data === 'j') { offset += 1; pinned = false; }
-      else if (data === 'g' || data === '\u001b[H') { offset = 0; pinned = false; }
-      else if (data === 'G' || data === '\u001b[F') { offset = Number.MAX_SAFE_INTEGER; pinned = true; }
+      if (data === 'q' || isCancel(keys, data)) { dispose(); options.onClose?.(); return; }
+      // Up never re-pins; reaching the end again, by any key, follows new lines.
+      if (keyIs(keys, data, 'tui.select.up', ['k']) || matchesKey(data, 'up')) { if (total > page) { offset = Math.max(0, offset - 1); pinned = false; } }
+      else if (keyIs(keys, data, 'tui.select.down', ['j']) || matchesKey(data, 'down')) scrollTo(offset + 1);
+      else if (keyIs(keys, data, 'tui.select.pageUp', ['b']) || matchesKey(data, 'pageUp')) { if (total > page) { offset = Math.max(0, offset - page); pinned = false; } }
+      else if (keyIs(keys, data, 'tui.select.pageDown', [' ']) || matchesKey(data, 'pageDown')) scrollTo(offset + page);
+      else if (data === 'g' || matchesKey(data, 'home')) { if (total > page) { offset = 0; pinned = false; } }
+      else if (data === 'G' || matchesKey(data, 'end')) pinned = true;
+      else if (data === 'o') { full = !full; pinned = true; refresh(); }
     },
     invalidate() {},
-    dispose() { if (disposed) return; disposed = true; clearInterval(timer); },
+    dispose,
   };
+}
+/**
+ * One transcript line, styled by its marker and wrapped with a hanging indent so a long tool line stays
+ * readable: ◆ who speaks, → a tool call, ← its result, ✖ a failed one, … what was folded away.
+ * @param {string} line
+ * @param {number} span
+ * @param {(color: PanelColor, text: string) => string} fg
+ * @param {(text: string) => string} bold
+ * @returns {string[]}
+ */
+function transcriptLines(line, span, fg, bold) {
+  if (!line.trim()) return [''];
+  const indent = /^ */.exec(line)?.[0].length ?? 0, body = line.slice(indent);
+  const header = body.startsWith('◆ '), marked = header || /^[→←✖…] /.test(body);
+  /** @type {PanelColor | null} */
+  const color = header ? 'accent' : body.startsWith('→ ') ? 'muted' : body.startsWith('✖ ') ? 'warning' : body.startsWith('← ') || body.startsWith('… ') || indent >= 4 ? 'dim' : null;
+  const paint = (/** @type {string} */ part) => (color ? fg(color, header ? bold(part) : part) : part);
+  const hang = Math.min(Math.floor(span / 2), indent + (marked ? 2 : 0));
+  const [first = '', ...rest] = wrapTextWithAnsi(body, Math.max(8, span - indent));
+  const more = rest.length ? wrapTextWithAnsi(rest.join(' '), Math.max(8, span - hang)) : [];
+  return [' '.repeat(indent) + paint(first), ...more.map(part => ' '.repeat(hang) + paint(part))];
 }
 /**
  * The follow-mode transcript overlay. `onClose` runs however the view is left, so the caller can reopen the
@@ -1022,19 +1221,14 @@ export function createFollowView(source, options = {}) {
 export async function followView(ctx, source, options = {}) {
   if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') return undefined;
   try {
-    await ctx.ui.custom((tui, theme, _keys, done) => {
-      const view = createFollowView(source);
-      let tick = 0;
-      const timer = setInterval(() => { if (tick++ % 2 === 0) tui.requestRender(); }, 1000);
-      timer.unref?.();
+    await ctx.ui.custom((tui, theme, keys, done) => {
+      const view = createFollowView(source, { title: options.title, theme, keys, rows: () => tui.terminal?.rows, onUpdate: () => tui.requestRender(), onClose: () => done(undefined) });
       return {
+        /** @param {number} w */
         render(w) { return view.render(w); },
         invalidate() {},
-        handleInput(/** @type {string} */ data) {
-          if (data === '\u001b' || data === 'q') { view.dispose(); clearInterval(timer); done(undefined); return; }
-          view.handleInput(data);
-          tui.requestRender();
-        },
+        dispose() { view.dispose(); },
+        handleInput(/** @type {string} */ data) { view.handleInput(data); tui.requestRender(); },
       };
     }, { overlay: true, overlayOptions: () => ({ width: '90%', minWidth: 40, maxHeight: '80%', anchor: 'center', margin: 1 }) });
   } finally { if (options.onClose) await options.onClose(); }
@@ -1133,9 +1327,14 @@ function chrome(body, width, { title, subtitle = [], hints = '', theme }) {
   const pad = (/** @type {string} */ line) => ` ${truncateToWidth(line, Math.max(1, width - 2), '')}`;
   return [rule, '', pad(fg('accent', bold(title))), ...subtitle.map(line => pad(fg('muted', line))), '', ...body.map(pad), '', ...(hints ? [pad(hints), ''] : []), rule];
 }
+/** The default keys of the bindings Pair names in hints, for when Pi's own hint helpers are unavailable. */
+const DEFAULT_KEYS = /** @type {Readonly<Record<string, string>>} */ ({ 'tui.select.cancel': 'esc', 'tui.select.confirm': 'enter', 'app.tools.expand': 'ctrl+o' });
 /** @param {...[string, string]} pairs @returns {string} */
 function hints(...pairs) {
-  return pairs.map(([key, action]) => (key.includes('.') ? keyHint(/** @type {import('@earendil-works/pi-tui').Keybinding} */ (key), action) : rawKeyHint(key, action))).join('  ');
+  return pairs.map(([key, action]) => {
+    // Pi's hint helpers read its theme; without one (a test, a host that never set it) the plain words still read.
+    try { return key.includes('.') ? keyHint(/** @type {import('@earendil-works/pi-tui').Keybinding} */ (key), action) : rawKeyHint(key, action); } catch { return `${DEFAULT_KEYS[key] ?? key} ${action}`; }
+  }).join('  ');
 }
 /** @param {string} raw @param {string} styled @param {number} span @returns {string[]} */
 function wrapHanging(raw, styled, span) {
@@ -1235,8 +1434,8 @@ function createTextView(raw, { title, theme, keys, rows = () => undefined, close
       else if (is(data, 'tui.select.down', '\x1b[B', 'j')) offset = Math.min(maxOffset(), offset + 1);
       else if (is(data, 'tui.select.pageUp', '\x1b[5~', 'b')) offset = Math.max(0, offset - page());
       else if (is(data, 'tui.select.pageDown', '\x1b[6~', ' ')) offset = Math.min(maxOffset(), offset + page());
-      else if (data === 'g' || data === '\x1b[H') offset = 0;
-      else if (data === 'G' || data === '\x1b[F') offset = maxOffset();
+      else if (data === 'g' || matchesKey(data, 'home')) offset = 0;
+      else if (data === 'G' || matchesKey(data, 'end')) offset = maxOffset();
       else if (data === '/') query = '';
       else if (data === 'n') search(1, false);
       else if (data === 'N') search(-1, false);
@@ -1759,6 +1958,12 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
 
 /** Whether input `data` is keybinding `id` (or one of the literal fallbacks). @param {{matches(data: string, id: string): boolean} | null | undefined} keys @param {string} data @param {string} id @param {string[]} fallbacks */
 function keyIs(keys, data, id, fallbacks) { return (keys?.matches(data, id) ?? false) || fallbacks.includes(data); }
+/**
+ * Whether input `data` cancels: Pi's cancel binding, or Esc in any terminal encoding. Terminals with the Kitty
+ * keyboard protocol send Esc as `\x1b[27u`, so comparing with `\x1b` alone misses it.
+ * @param {KeyMatcher | null | undefined} keys @param {string} data @returns {boolean}
+ */
+function isCancel(keys, data) { return keyIs(keys, data, 'tui.select.cancel', ['\x1b']) || matchesKey(data, 'escape'); }
 /** @param {unknown} content @returns {string} */
 function messageText(content) {
   if (typeof content === 'string') return content;
@@ -1898,23 +2103,44 @@ export function pairMessageLines(text, expanded) {
   const card = [{ color: tone, text: `${icon} ${label}` }, ...shown.map(line => ({ color: /** @type {CardColor} */ (supervision ? 'warning' : 'muted'), text: `  ${inline(line, expanded ? 2000 : 400)}` }))];
   return card;
 }
+/** The key that expands collapsed chat output, as Pi shows it ("ctrl+o" unless rebound). @returns {string} */
+function expandKey() {
+  try { return keyText('app.tools.expand') || DEFAULT_KEYS['app.tools.expand']; } catch { return DEFAULT_KEYS['app.tools.expand']; }
+}
 /**
+ * The chat card for a Pair message, on the same background Pi gives its own custom messages. A collapsed
+ * card that hides something ends its first line with the expand key, as Pi's collapsed tool output does.
  * @param {{content: unknown}} message @param {{expanded: boolean, outputPad?: number}} options
- * @param {{fg(color: any, text: string): string} | undefined} theme
+ * @param {{fg(color: any, text: string): string, bg?(color: any, text: string): string} | undefined} theme
  * @returns {import('@earendil-works/pi-tui').Component | undefined}
  */
 export function pairMessageComponent(message, options, theme) {
-  const lines = pairMessageLines(messageText(message.content), options.expanded);
+  const text = messageText(message.content);
+  const lines = pairMessageLines(text, options.expanded);
   if (!lines) return undefined;
-  const pad = ' '.repeat(Math.max(0, options.outputPad ?? 1));
+  const padding = Math.max(0, options.outputPad ?? 1);
+  /** @param {CardLine[] | null} card */
+  const words = card => (card ?? []).map(line => line.text).join('\n');
+  const hint = !options.expanded && words(pairMessageLines(text, true)) !== words(lines) ? ` (${expandKey()} to expand)` : '';
   /** @type {{color: CardColor, text: string}[]} */
   const card = lines;
-  return {
+  // With Pi's theme the Box pads the card; a theme without backgrounds gets plain side padding.
+  const pad = theme?.bg ? '' : ' '.repeat(padding);
+  const body = {
     invalidate() {},
     /** @param {number} width */
     render(width) {
       const inner = Math.max(10, width - pad.length * 2);
-      return card.flatMap(({ color, text }) => wrapTextWithAnsi(color && theme ? theme.fg(color, text) : text, inner).map(part => pad + part));
+      return card.flatMap(({ color, text: line }, index) => {
+        const painted = color && theme ? theme.fg(color, line) : line;
+        const suffix = index === 0 && hint ? (theme ? theme.fg('dim', hint) : hint) : '';
+        return wrapTextWithAnsi(painted + suffix, inner).map(part => pad + part);
+      });
     },
   };
+  if (!theme?.bg) return body;
+  const bg = theme.bg.bind(theme);
+  const box = new Box(padding, 1, line => bg('customMessageBg', line));
+  box.addChild(body);
+  return box;
 }

@@ -21,24 +21,32 @@ export function piTitle(cwd, sessionName) {
 
 /**
  * Whether this summary needs the human: the ! states, a still worker, or reports that cannot reach Main.
- * Everything that is Main's job (review, question, blocked) stays quiet.
+ * Everything that is Main's job (review, question, blocked) stays quiet. Each event gets a stable id: a
+ * stalled worker whose idle time grows, or a third report joining two that wait, is still the same event,
+ * while a permission dialog or a second worker in trouble is a new one.
  * @param {any} summary
  * @param {number} [now]
- * @returns {{needed: boolean, reason: string, key: string}}
+ * @returns {{needed: boolean, reason: string, events: string[]}}
  */
 export function attentionOf(summary, now = Date.now()) {
-  if (!summary || !summary.enabled || !Array.isArray(summary.workers) || !summary.workers.length) return { needed: false, reason: '', key: '' };
+  if (!summary || !summary.enabled || !Array.isArray(summary.workers) || !summary.workers.length) return { needed: false, reason: '', events: [] };
   /** @type {string[]} */
   const reasons = [];
+  /** @type {string[]} */
+  const events = [];
   for (const worker of summary.workers) {
     const state = workerState(summary, worker, !!summary.main?.busy, now);
-    if (['attention', 'permission', 'paused'].includes(state.kind)) reasons.push(state.reason || state.text);
+    if (!['attention', 'permission', 'paused'].includes(state.kind)) continue;
+    reasons.push(state.reason || state.text);
+    events.push(`${worker.id}:${state.kind}:${state.next ?? ''}`);
   }
-  if ((summary.waitingReports || 0) > 0 && summary.autoDeliverReports === false) reasons.push(`${summary.waitingReports} report${summary.waitingReports === 1 ? '' : 's'} waiting · delivery off`);
-  if (!reasons.length) return { needed: false, reason: '', key: '' };
+  if ((summary.waitingReports || 0) > 0 && summary.autoDeliverReports === false) {
+    reasons.push(`${summary.waitingReports} report${summary.waitingReports === 1 ? '' : 's'} waiting · delivery off`);
+    events.push('reports');
+  }
+  if (!reasons.length) return { needed: false, reason: '', events: [] };
   const reason = reasons[0].length > 60 ? `${reasons[0].slice(0, 57)}…` : reasons[0];
-  // The key is what distinguishes one attention event from the next.
-  return { needed: true, reason, key: `${reasons.join('|')}|${summary.waitingReports || 0}` };
+  return { needed: true, reason, events };
 }
 
 /**
@@ -52,15 +60,23 @@ export function ringBell() {
   } catch { /* a terminal that refuses the bell is not a problem */ }
 }
 /**
- * The cue. It is called on every render and on every summary change; it only touches the terminal when the
- * attention state actually changes, so the bell rings once per new event and the title is set once.
+ * The cue. It is called on every render and on every summary change. The bell rings once per new event; the
+ * title follows the reason text (a stalled worker's idle time) and is only written when that text changes.
  * @param {{setTitle(title: string): void}} ui
  * @param {{cwd: string, sessionName?: string | null, enabled: boolean, bell?: () => void}} options
- * @returns {{update(summary: any, now?: number): void, restore(): void, readonly attention: boolean, readonly cwd: string, readonly attentionEnabled: boolean}}
+ * @returns {{update(summary: any, now?: number): void, restore(): void, retitle(name: string | null | undefined): void, readonly attention: boolean, readonly cwd: string, readonly attentionEnabled: boolean}}
  */
 export function createAttentionCue(ui, { cwd, sessionName = null, enabled, bell = ringBell }) {
-  let last = '';
+  /** @type {string[]} */
+  let last = [];
   let active = false;
+  let shown = '';
+  /** @param {string} title */
+  const setTitle = title => {
+    if (title === shown) return;
+    shown = title;
+    try { ui.setTitle(title); } catch { /* the title is a nicety, never a failure */ }
+  };
   return {
     get attention() { return active; },
     cwd,
@@ -68,19 +84,24 @@ export function createAttentionCue(ui, { cwd, sessionName = null, enabled, bell 
     update(summary, now = Date.now()) {
       if (!enabled) return;
       const attention = attentionOf(summary, now);
-      if (attention.needed === active && attention.key === last) return;
-      last = attention.needed ? attention.key : '';
+      // An event is new when the previous update did not have it; one that clears and comes back is new again.
+      const fresh = attention.events.some(event => !last.includes(event));
+      last = attention.events;
+      if (!attention.needed && !active) return;
       active = attention.needed;
-      try {
-        if (attention.needed) { ui.setTitle(`! pair · ${attention.reason} — ${piTitle(cwd, sessionName)}`); try { bell(); } catch { /* the title already landed */ } }
-        else ui.setTitle(piTitle(cwd, sessionName));
-      } catch { /* the title is a nicety, never a failure */ }
+      setTitle(attention.needed ? `! pair · ${attention.reason} — ${piTitle(cwd, sessionName)}` : piTitle(cwd, sessionName));
+      if (fresh) try { bell(); } catch { /* the title already landed */ }
     },
-    /** Restore Pi's own title, e.g. on shutdown. */
+    /** Restore Pi's own title, on shutdown or when the cue is turned off. A title the cue never changed is left alone. */
     restore() {
-      if (!enabled) return;
-      active = false; last = '';
+      if (!enabled || !active) return;
+      active = false; last = []; shown = '';
       try { ui.setTitle(piTitle(cwd, sessionName)); } catch { /* ignore */ }
     },
+    /**
+     * Pi rewrote its own title for a renamed session. The next update writes the cue's title again, with the
+     * new name; the events are unchanged, so the bell stays quiet.
+     */
+    retitle(name) { sessionName = name ?? null; shown = ''; },
   };
 }

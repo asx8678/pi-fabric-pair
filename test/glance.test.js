@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { boardLines, boardWidget, createIndicatorSurface, dashboardHeader, fitSegments, footerBadge, indicator, liveLine, liveWidget, statusText, workerState } from '../src/ui.js';
+import { boardLines, boardWidget, createIndicatorSurface, dashboardHeader, fitSegments, footerBadge, indicator, liveLine, liveWidget, statusText, widgetSignature, workerState } from '../src/ui.js';
 import { INDICATORS, isIndicator, validateConfig } from '../src/config.js';
 
 const NOW = 1_700_000_000_000;
@@ -160,9 +160,9 @@ test('the live line keeps the n/m count and the title, and adds detail as width 
     const line = strip(liveLine(s, width, undefined, NOW)[0]);
     assert.ok(line.includes('Wire retries'), `width ${width}: "${line}" lost the title`);
   }
-  assert.equal(strip(liveLine(s, 20, undefined, NOW)[0]), '■■■□□□□□□□ 2/4');
+  assert.equal(strip(liveLine(s, 20, undefined, NOW)[0]), '■■■▣▣□□□□□ 2/4');
   const wide = strip(liveLine(s, 200, undefined, NOW)[0]);
-  for (const part of ['■■■□□□□□□□ 2/4', '▶ Wire retries into fetch client', 'editing client.js', '3m12s', 'rev 1/3', '$0.14/$2.00']) {
+  for (const part of ['■■■▣▣□□□□□ 2/4', '▶ Wire retries into fetch client', 'editing client.js', '3m12s', 'rev 1/3', '$0.14/$2.00']) {
     assert.ok(wide.includes(part), `200 columns should include ${part}: ${wide}`);
   }
   // Only the basename, so the live line keeps room for the title.
@@ -173,6 +173,55 @@ test('the live line keeps the n/m count and the title, and adds detail as width 
   // A command target is not a path, so it stays as given.
   const command = summary({ workers: [worker({ observation: { at: NOW - 5000, currentTool: 'bash', currentTarget: 'npm test -- --watch' } })] });
   assert.ok(strip(liveLine(command, 200, undefined, NOW)[0]).includes('running npm test -- --watch'));
+});
+
+test('the bar gives the step under way its own cells, in its color', () => {
+  /** @type {Array<[string, string]>} */
+  const painted = [];
+  const theme = { fg: (/** @type {string} */ color, /** @type {string} */ text) => { painted.push([color, text]); return text; } };
+  // One of four approved and step 2 under way: approved cells, then the current step's, then the rest.
+  liveLine(STATES.working, 20, theme, NOW);
+  const cells = (/** @type {string} */ color, /** @type {string} */ text) => painted.some(([c, t]) => c === color && t === text);
+  assert.ok(cells('success', '■■■') && cells('accent', '▣▣') && cells('dim', '□□□□□'), JSON.stringify(painted));
+  // A held step's cells carry its warning.
+  painted.length = 0;
+  const held = summary({ workers: [worker({ status: 'paused', task: task({ status: 'paused', stepList: [step('Add retry policy type', 'done'), step('Wire retries into fetch client', 'held'), step('Tests for backoff', 'todo'), step('Document retries', 'todo')] }) })] });
+  liveLine(held, 20, theme, NOW);
+  assert.ok(cells('warning', '▣▣'), JSON.stringify(painted));
+  // With every step approved nothing is under way.
+  assert.equal(strip(liveLine(STATES.done, 20, undefined, NOW)[0]), '■■■■■■■■■■ 4/4');
+});
+
+test('a cancelled task leaves the live line and the board at once', () => {
+  const cancelled = summary({ workers: [worker({ status: 'ready', task: task({ status: 'cancelled' }) })] });
+  assert.deepEqual(liveLine(cancelled, 80, undefined, NOW), []);
+  assert.deepEqual(boardLines(cancelled, 80, undefined, NOW), []);
+});
+
+test('a finished plan stops its clock and leaves when its badge settles', () => {
+  // Finished a second ago after 3m11s of work.
+  const at = (/** @type {number} */ now) => strip(liveLine(STATES.done, 200, undefined, now)[0] ?? '');
+  assert.ok(at(NOW).includes('3m11s'), at(NOW));
+  assert.ok(at(NOW + 5 * 60000).includes('3m11s'), 'the clock stopped when the task ended: ' + at(NOW + 5 * 60000));
+  assert.ok(strip(boardLines(STATES.done, 80, undefined, NOW + 5 * 60000)[0]).includes('3m11s'));
+  // Ten minutes after it finished the plan leaves, as the ✔ badge does.
+  assert.deepEqual(liveLine(STATES.done, 200, undefined, NOW + 10 * 60000), []);
+  assert.deepEqual(boardLines(STATES.done, 80, undefined, NOW + 10 * 60000), []);
+  // Another worker's plan then takes the line.
+  const s = summary({ workers: [worker({ status: 'ready', task: allDone() }), worker({ id: 'w2', status: 'paused', task: task({ status: 'paused', objective: 'Second objective' }) })] });
+  assert.ok(strip(liveLine(s, 200, undefined, NOW)[0]).includes('4/4'), 'the fresh ✔ shows first');
+  const later = strip(liveLine(s, 200, undefined, NOW + 10 * 60000)[0] ?? '');
+  assert.ok(later.startsWith('W2 ') && later.includes('2/4'), later);
+  assert.ok(strip(boardLines(s, 80, undefined, NOW + 10 * 60000)[0]).includes('Second objective'));
+});
+
+test('the widget signature ticks only while a task runs', () => {
+  assert.notEqual(widgetSignature(STATES.working, 'minimal', NOW), widgetSignature(STATES.working, 'minimal', NOW + 1000), 'a running clock redraws each second');
+  const done = summary({ workers: [worker({ status: 'ready', task: allDone(), observation: null })] });
+  assert.equal(widgetSignature(done, 'minimal', NOW), widgetSignature(done, 'minimal', NOW + 9 * 60000), 'a finished task has nothing to redraw');
+  assert.notEqual(widgetSignature(done, 'minimal', NOW), widgetSignature(done, 'minimal', NOW + 10 * 60000), 'the plan leaving is a change');
+  const cancelled = summary({ workers: [worker({ status: 'ready', task: task({ status: 'cancelled' }), observation: null })] });
+  assert.equal(widgetSignature(cancelled, 'minimal', NOW), widgetSignature(cancelled, 'minimal', NOW + 5000));
 });
 
 test('the live line without a task is empty', () => {

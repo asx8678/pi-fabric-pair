@@ -216,6 +216,40 @@ test('the component renders within the width it is given', () => {
   }
 });
 
+test('with Pi\'s theme a card sits on the custom message background, as Pi\'s own messages do', () => {
+  const text = reportText({ kind: 'checkpoint', summary: 'Added backoff with jitter.', checks: WORKER_CLAIMS, independentlyRunChecks: VERIFIED_MIXED, actualChangedFiles: FILES, changedFileCount: 4 });
+  /** @type {string[]} */
+  const backgrounds = [];
+  const theme = { fg: (/** @type {string} */ _color, /** @type {string} */ value) => value, bg: (/** @type {string} */ color, /** @type {string} */ value) => { backgrounds.push(color); return value; } };
+  const component = /** @type {any} */ (pairMessageComponent({ content: text }, { expanded: false }, theme));
+  const lines = component.render(60);
+  assert.equal(lines[0].trim(), '', 'a padding row above the card');
+  assert.equal(lines.at(-1).trim(), '', 'and one below');
+  assert.ok(lines.every((/** @type {string} */ line) => visibleWidth(line) === 60), 'every row is filled to the width, so the background is one block');
+  assert.ok(lines[1].startsWith(' ') && !lines[1].startsWith('  '), 'one column of side padding: ' + JSON.stringify(lines[1]));
+  assert.ok(backgrounds.length > 0 && backgrounds.every(color => color === 'customMessageBg'), backgrounds.join(','));
+});
+
+test('a collapsed card that hides something says how to expand it', () => {
+  const theme = { fg: (/** @type {string} */ _color, /** @type {string} */ value) => value };
+  const render = (/** @type {string} */ text, /** @type {boolean} */ expanded) => /** @type {any} */ (pairMessageComponent({ content: text }, { expanded }, theme)).render(200);
+  const report = reportText({ kind: 'checkpoint', reportId: 'report-1', summary: 'Added backoff with jitter.', checks: WORKER_CLAIMS, independentlyRunChecks: VERIFIED_MIXED, actualChangedFiles: FILES, changedFileCount: 4, checkpointHash: 'abcdef0123456789' });
+  const collapsed = render(report, false);
+  assert.ok(collapsed[0].endsWith(' (ctrl+o to expand)'), collapsed[0]);
+  assert.equal(collapsed.filter((/** @type {string} */ line) => line.includes('to expand')).length, 1, 'once, on the first line');
+  assert.ok(collapsed.length <= 7, 'the hint adds no line');
+  assert.equal(render(report, true).some((/** @type {string} */ line) => line.includes('to expand')), false);
+  // A card with nothing more to show has no hint; one whose single line is clipped does.
+  assert.equal(render('FABRIC PAIR NOTICE — the human paused worker w1. Do not resume it yourself.', false)[0].includes('to expand'), false);
+  assert.ok(render('FABRIC PAIR NOTICE — ' + 'detail '.repeat(100), false)[0].includes('(ctrl+o to expand)'));
+  // The painted hint is dim, after the painted title.
+  /** @type {Array<[string, string]>} */
+  const painted = [];
+  const recording = { fg: (/** @type {string} */ color, /** @type {string} */ value) => { painted.push([color, value]); return value; } };
+  /** @type {any} */ (pairMessageComponent({ content: report }, { expanded: false }, recording)).render(200);
+  assert.ok(painted.some(([color, value]) => color === 'dim' && value === ' (ctrl+o to expand)'), JSON.stringify(painted));
+});
+
 test('every /pair completion carries a description', () => {
   const all = pairCompletions('', ['w1']);
   assert.equal(all.length, PAIR_COMMANDS.length);

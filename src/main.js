@@ -279,7 +279,11 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     indicatorSurface(ui).update(snapshot, mode, busy);
     // The opt-in attention cue: a title prefix and one bell per new attention event, then Pi's title back.
     // Rebuild when the setting changes, so toggling it in settings takes effect without a restart.
-    if (cue?.cwd !== ctxRef.cwd || cue.attentionEnabled !== (config?.attentionCue === true)) cue = null;
+    // Turning it off puts Pi's title back first; a new project gets Pi's own title from Pi.
+    if (cue && (cue.cwd !== ctxRef.cwd || cue.attentionEnabled !== (config?.attentionCue === true))) {
+      if (cue.cwd === ctxRef.cwd) cue.restore();
+      cue = null;
+    }
     // The bell is only rung when Pi's UI can set a title at all (it has no raw terminal writer), and
     // createAttentionCue's default writer confines it to a real TTY.
     if (!cue) cue = createAttentionCue({ setTitle: title => ctxRef?.ui.setTitle?.(title) }, { cwd: ctxRef.cwd, sessionName: sessionName(ctxRef), enabled: config?.attentionCue === true });
@@ -578,25 +582,28 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   async function followTranscript(uiCtx, workerId) {
     assert(controller, 'Pair is not bound');
     const bound = controller;
-    await followView(uiCtx, { read: () => bound.transcript(workerId) }, { title: `Worker ${workerId}: recent text` });
+    await followView(uiCtx, { read: options => bound.transcript(workerId, options) }, { title: `Worker ${workerId} · transcript` });
   }
   /**
    * The live dashboard loop: open the overlay, run the chosen action, then reopen it. Shared by bare /pair
    * and alt+w, so both always show the same screen.
    * @param {import('@earendil-works/pi-coding-agent').ExtensionContext} ctx
    * @param {PairController} bound
-   * @param {(action: string) => Promise<{reopen: boolean, notice?: string}>} runAction
+   * @param {(action: string, workerId: string | undefined) => Promise<{reopen: boolean, notice?: string}>} runAction
    */
   async function runDashboardLoop(ctx, bound, runAction) {
     /** @type {string | null} */
     let notice = null;
+    /** @type {string | undefined} the worker the human chose with w, kept across reopenings */
+    let workerId;
     for (;;) {
       if (stopped || controller !== bound) return;
-      const action = await dashboardView(ctx, bound, { notice });
-      if (!action) return;
+      const choice = await dashboardView(ctx, bound, { notice, workerId });
+      if (!choice) return;
+      workerId = choice.workerId;
       notice = null;
       try {
-        const outcome = await runAction(action);
+        const outcome = await runAction(choice.action, choice.workerId);
         notice = outcome.notice ?? null;
         if (!outcome.reopen) return;
       } catch (error) { notice = `Pair: ${briefError(error)}`; }
@@ -725,7 +732,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           const inbox = await c.inbox();
           const entries = inbox.map(n => ({ workerId: n.workerId, reportId: n.reportId, status: n.status, observedAt: n.observedAt, view: c.reportView(n.workerId) }));
           await textView(ctx, 'Pair · Inbox', inboxText(entries, c.summary().autoDeliverReports !== false), { panel: true });
-          if (inbox.length && await ctx.ui.confirm('Redeliver saved reports', 'Deliver unresolved reports to this Main session again? Decisions remain idempotent.')) await c.inbox(true);
+          if (inbox.length && await ctx.ui.confirm('Redeliver saved reports', 'Deliver unresolved reports to this Main session again? Decisions remain idempotent.')) { await c.inbox(true); deliveredToMain = true; }
         };
         /** @param {typeof config.requirements} requirements */
         const showDoctor = async requirements => {
@@ -768,27 +775,39 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
          * One press of a dashboard key. Read-only views resolve and then the dashboard reopens, so two custom
          * views are never stacked; actions that need Main's attention end the dashboard first.
          * @param {string} action
+         * @param {string | undefined} workerId the worker the dashboard showed
          * @returns {Promise<{reopen: boolean, notice?: string}>}
          */
-        const dashboardActionRun = async action => {
+        const dashboardActionRun = async (action, workerId) => {
           const summary = c.summary();
-          const target = (planWorker(summary) || summary.workers[0])?.id || id;
+          const target = (workerId && summary.workers.some(w => w.id === workerId) ? workerId : (planWorker(summary) || summary.workers[0])?.id) || id;
           if (action === 'report') { await showReport(target); return { reopen: true }; }
           if (action === 'diff') { await showDiff(target); return { reopen: true }; }
           if (action === 'transcript') { await followTranscript(ctx, target); return { reopen: true }; }
           if (action === 'yield') { await showYield(); return { reopen: !deliveredToMain }; }
-          if (action === 'pause') { await c.pause(target); informMain(`the human paused worker ${target}. Do not resume it yourself.`); return { reopen: true, notice: `Paused worker ${target}.` }; }
+          // One key on the dashboard is easy to hit by mistake, so pause and cancel ask first, as resume does.
+          if (action === 'pause') {
+            if (!await ctx.ui.confirm('Pause worker', `Stop the current step on ${target} and hold the task? File changes are kept; resume continues it.`)) return { reopen: true };
+            await c.pause(target); informMain(`the human paused worker ${target}. Do not resume it yourself.`); return { reopen: true, notice: `Paused worker ${target}.` };
+          }
           if (action === 'resume') {
             if (!await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) return { reopen: true };
             await offerProfileRepair(c, target); await c.resume(target); return { reopen: true, notice: `Resumed worker ${target}.` };
           }
           if (action === 'cancel') {
+            if (!await ctx.ui.confirm('Cancel task', `End the task on ${target}? A cancelled task cannot be resumed. The worker conversation is kept and file changes are not undone.`)) return { reopen: true };
             const reason = await ctx.ui.input('Cancel reason (the worker conversation is kept; file changes are not undone)', 'Cancelled by the user');
             if (reason === undefined) return { reopen: true };
             await c.cancel(target, reason.trim() || 'Cancelled by the user');
             informMain(`the human cancelled the task on worker ${target}. Do not re-dispatch it unless the user asks.`);
             return { reopen: true, notice: `Cancelled the task on worker ${target}.` };
           }
+          if (action === 'stop') {
+            if (!await confirmStop(ctx, c, [target])) return { reopen: true };
+            await c.stop(target); return { reopen: true, notice: `Stopped worker ${target}; its conversation is kept.` };
+          }
+          if (action === 'status') { await showStatus(); return { reopen: true }; }
+          if (action === 'inbox') { await showInbox(); return { reopen: !deliveredToMain }; }
           if (action === 'reconcile') { await reconcileWorker(target); return { reopen: !deliveredToMain, ...(deliveredToMain ? { notice: `Worker ${target} reconciled.` } : {}) }; }
           if (action === 'start') { await startWorker(target); return { reopen: true }; }
           if (action === 'settings') { await openSettings(ctx); return { reopen: true }; }
@@ -971,6 +990,8 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   });
   pi.on('message_end', (event, ctx) => { observeReceipt(event.message); if (event.message?.role === 'assistant') controller?.setMainObservation(modelObservation(ctx, selectLastMeasuredUsage(controller?.mainObservation?.lastUsage, event.message.usage))); });
   pi.on('model_select', (_event, ctx) => { ctxRef = ctx; controller?.setMainObservation(modelObservation(ctx, null)); });
+  // Pi has already rewritten its title for the new name; the attention cue puts its prefix back.
+  pi.on('session_info_changed', event => { cue?.retitle(event.name); render(); });
   pi.on('session_tree', (_event, ctx) => {
     ctxRef = ctx;
     const c = controller;

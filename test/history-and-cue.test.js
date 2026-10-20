@@ -279,6 +279,93 @@ test('a terminal without a bell or a failing setTitle never breaks a render', ()
   assert.doesNotThrow(() => createAttentionCue(noTerminal, { cwd: '/p', enabled: true }).update(cueSummary({ worker: { status: 'permission' } }), NOW));
 });
 
+test('a stall that grows rings once, and the title follows its age', () => {
+  const ui = fakeUi();
+  const cue = createAttentionCue(ui, { cwd: '/home/me/project', enabled: true, bell: ui.bell });
+  const stalled = cueSummary({ worker: { observation: { at: NOW - 400000 } } });
+  cue.update(stalled, NOW);
+  assert.equal(ui.writes.length, 1);
+  assert.deepEqual(ui.titles, ['! pair · no activity 6m — π - project']);
+  // Minutes later the same worker is still silent: the title says so, and the bell stays quiet.
+  for (const minutes of [1, 2, 3]) cue.update(stalled, NOW + minutes * 60000);
+  assert.equal(ui.writes.length, 1, 'one bell per event, not one per minute');
+  assert.equal(ui.titles.length, 4);
+  assert.equal(ui.titles.at(-1), '! pair · no activity 9m — π - project');
+  // Renders within the same minute write nothing.
+  cue.update(stalled, NOW + 3 * 60000 + 1000);
+  assert.equal(ui.titles.length, 4, 'an unchanged title is not written again');
+  // A second worker in trouble is a new event, and so is the first one changing what it needs.
+  const second = { ...stalled, workers: [...stalled.workers, { ...stalled.workers[0], id: 'w2', status: 'permission', observation: { at: NOW } }] };
+  cue.update(second, NOW + 4 * 60000);
+  assert.equal(ui.writes.length, 2);
+  cue.update(cueSummary({ worker: { status: 'permission' } }), NOW + 5 * 60000);
+  assert.equal(ui.writes.length, 3);
+});
+
+test('waiting reports are one event however many wait', () => {
+  const ui = fakeUi();
+  const cue = createAttentionCue(ui, { cwd: '/p', enabled: true, bell: ui.bell });
+  const waiting = (/** @type {number} */ count) => ({ ...cueSummary(), autoDeliverReports: false, waitingReports: count });
+  assert.ok(attentionOf(waiting(2), NOW).events.includes('reports'));
+  assert.deepEqual(attentionOf(waiting(3), NOW).events, attentionOf(waiting(2), NOW).events, 'the count is not part of the event');
+  cue.update(waiting(2), NOW);
+  cue.update(waiting(3), NOW + 1000);
+  assert.equal(ui.writes.length, 1, 'a third report joining is the same event');
+  assert.ok(ui.titles.at(-1)?.includes('3 reports waiting'), ui.titles.at(-1));
+  // Delivered, then waiting again: a new event.
+  cue.update(waiting(0), NOW + 2000);
+  assert.equal(ui.titles.at(-1), 'π - p');
+  cue.update(waiting(1), NOW + 3000);
+  assert.equal(ui.writes.length, 2);
+});
+
+test('restore leaves a title the cue never changed alone', () => {
+  const ui = fakeUi();
+  const cue = createAttentionCue(ui, { cwd: '/home/me/project', enabled: true, bell: ui.bell });
+  cue.update(cueSummary(), NOW);
+  cue.restore();
+  assert.deepEqual(ui.titles, [], 'nothing needed the human, so Pi keeps its own title');
+  // Attention that already resolved restored the title itself; restore adds nothing.
+  cue.update(cueSummary({ worker: { status: 'permission' } }), NOW);
+  cue.update(cueSummary(), NOW + 1000);
+  const written = ui.titles.length;
+  cue.restore();
+  assert.equal(ui.titles.length, written);
+  // After a restore the same attention is new again.
+  cue.update(cueSummary({ worker: { status: 'permission' } }), NOW + 2000);
+  cue.restore();
+  cue.update(cueSummary({ worker: { status: 'permission' } }), NOW + 3000);
+  assert.equal(ui.writes.length, 3);
+  assert.ok(ui.titles.at(-1)?.startsWith('! pair · '), 'the title is written again after a restore');
+});
+
+test('a renamed session gets the cue title back, with the new name and no second bell', () => {
+  const ui = fakeUi();
+  const cue = createAttentionCue(ui, { cwd: '/home/me/project', sessionName: 'old', enabled: true, bell: ui.bell });
+  const permission = cueSummary({ worker: { status: 'permission' } });
+  cue.update(permission, NOW);
+  assert.ok(ui.titles.at(-1)?.endsWith(' — π - old - project'), ui.titles.at(-1));
+  // Pi rewrote its own title for the new name, so the same text must be written again.
+  cue.retitle('new');
+  cue.update(permission, NOW + 1000);
+  assert.ok(ui.titles.at(-1)?.startsWith('! pair · ') && ui.titles.at(-1)?.endsWith(' — π - new - project'), ui.titles.at(-1));
+  assert.equal(ui.writes.length, 1, 'the same event, so no second bell');
+  // The same name set again still made Pi rewrite its title, so the unchanged text is written again.
+  const written = ui.titles.length;
+  cue.retitle('new');
+  cue.update(permission, NOW + 2000);
+  assert.equal(ui.titles.length, written + 1);
+  cue.restore();
+  assert.equal(ui.titles.at(-1), 'π - new - project');
+  // Without attention Pi's own title is already right, so a rename writes nothing.
+  const quiet = fakeUi();
+  const idle = createAttentionCue(quiet, { cwd: '/p', enabled: true, bell: quiet.bell });
+  idle.update(cueSummary(), NOW);
+  idle.retitle('renamed');
+  idle.update(cueSummary(), NOW + 1000);
+  assert.deepEqual(quiet.titles, []);
+});
+
 test('the dashboard hides the start key until a model is chosen', () => {
   const stopped = cueSummary({ worker: { task: null, status: 'stopped', pid: null, model: '' } });
   assert.equal(dashboardKeys(stopped).some((/** @type {any} */ item) => item.action === 'start'), false, 'no model means start cannot work');

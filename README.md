@@ -149,35 +149,42 @@ you mean /pair stop?`, or up to three when several are equally close.
 ## The dashboard
 
 Press **alt+w**, or type `/pair` with no arguments, to open the dashboard. It is
-one live screen: the worker's model and state, the plan with the current step
-marked, the last checkpoint's Pair checks, and the keys that apply right now.
-It updates in place — elapsed time, activity and state — while it stays open, so
-you never reopen it to see change.
+one live screen over the chat: the worker's model and state, the plan with the
+current step marked, the last checkpoint's Pair checks, and the keys that apply
+right now. It updates in place — elapsed time, activity and state — while it
+stays open, so you never reopen it to see change. On a wide terminal it stays a
+readable column of at most 100 characters, and on a short one it sheds detail
+before it would hide the keys: first recent activity, then step history, then
+finished steps fold into one `✔ 1–3 approved` row, and last the plan is cut after
+the current step.
 
 ```
-Pair  live
-claude-opus · high   ◉ working  3m12s · $0.14 · ctx 41% · step 2/3
+────────────────────────────────────────────────────────────────────────────────
+ Pair
+ claude-opus · high   ◉ working  3m12s · $0.14 · ctx 41% · step 2/3
 
-Add retry and backoff to the fetch client
-✔ 1 Add retry policy type           approved
-▶ 2 Wire retries into fetch client  editing src/http/client.js · rev 1/3
-○ 3 Tests for backoff
+ Add retry and backoff to the fetch client
+ ✔ 1 Add retry policy type           approved
+ ▶ 2 Wire retries into fetch client  editing src/http/client.js · rev 1/3
+ ○ 3 Tests for backoff
 
-  t transcript  p pause  c cancel  s settings  m more  ? help
+   t transcript  p pause  c cancel  s settings  m more  ? help
+────────────────────────────────────────────────────────────────────────────────
 ```
 
 | Key | Action (offered only when it applies) |
 | --- | --- |
 | `r` | Read the current report card. |
 | `d` | Scroll the checkpoint diff. |
-| `t` | Follow the transcript: refreshes about every two seconds, pinned to the bottom until you scroll up. |
+| `t` | Follow the worker's transcript (see below). |
 | `y` | Send retained reports to Main now. |
-| `p` | Pause a running task, or resume a paused or interrupted one. |
-| `c` | Cancel the task (asks for a reason; the conversation is kept). |
+| `p` | Pause a running task, or resume a paused or interrupted one; both ask first. |
+| `c` | Cancel the task; asks first, then for a reason. The conversation and file changes are kept. |
+| `w` | Show the next worker, when several are configured. The other keys act on the worker shown. |
 | `s` | Settings, including the indicator mode. |
-| `m` | More: restart the worker, reload settings, run doctor. |
-| `?` | List every key. |
-| `esc` / `q` | Close. |
+| `m` | More: `r` restart the worker, `x` stop it (while it runs), `i` status, `b` inbox, `l` reload settings, `d` doctor. |
+| `?` | List every key with what it does. |
+| `esc` / `q` | Close. In More and in the key list they step back to the dashboard. |
 
 The plan also carries its short history: under each step you see what happened to
 its reports and decisions (`↻ revise: honour Retry-After on 429`, `✔ approved`,
@@ -185,9 +192,18 @@ its reports and decisions (`↻ revise: honour Retry-After on 429`, `✔ approve
 step, within a bounded per-task timeline of the last 60 entries. A **Recent
 activity** section lists the worker's last few tool calls, newest last.
 
-Read-only screens (report, diff, transcript, doctor) return you to the dashboard
-when they close, so two screens never stack. Confirmation prompts are unchanged:
-cancel asks for a reason, resume and stop ask before they run. Without a task the
+The transcript follows the worker's conversation as it happens: who speaks
+(`◆ Pair`, `◆ worker`), the worker's own words, one `→` line per tool call naming
+the tools it used, and one `←` line per result, or `✖` when it failed. Pair's long
+task prompts are folded to their first lines. Press `o` to see every output in
+full, over the last 40 messages, and `o` again to fold it. The view refreshes about every two seconds and
+stays at the bottom; scrolling up pauses it, and scrolling back to the end (or
+`G`) follows again.
+
+Read-only screens (report, diff, transcript, status, inbox, doctor) return you to
+the dashboard when they close, so two screens never stack. A single key is easy to
+hit by mistake, so pause, resume and cancel ask before they run (cancel then asks
+for a reason), and stop asks while a task is running. Without a task the
 dashboard is a readiness screen: it says what the worker is doing and offers the
 next step (choose a model, start the worker, turn Pair on).
 
@@ -203,21 +219,26 @@ because automatic delivery is off — prefixes Pi's title with a short reason:
 ! pair · permission dialog — π - my-project
 ```
 
-The bell rings once for each new event, not on every render; in a real terminal it
-is a BEL written to stdout only when stdout is a TTY, so pipes and rpc output stay
-clean. As soon as nothing
-needs you the title returns to Pi's own format (`π - <project>` or
-`π - <session> - <project>`), and Pair restores it on shutdown. It is off by
+The bell rings once for each new event: a second worker in trouble, or a
+worker that needs something different, rings again, but a stalled worker does not
+ring every minute it stays silent; its title keeps the idle time current
+instead. In a real terminal the bell is a BEL written to stdout only when stdout
+is a TTY, so pipes and rpc output stay clean. As soon as nothing needs you the
+title returns to Pi's own format (`π - <project>` or `π - <session> - <project>`),
+and Pair restores it on shutdown and when you turn the cue off. Renaming the
+session keeps the prefix, with the new name. It is off by
 default and only ever touches the title and the bell: review, question and
 blocked stay quiet, because those wait for Main.
 
 ## How a report reads in the chat
 
 A report arrives as a card that keeps what Pair verified apart from what the
-worker says. Collapsed it is at most six lines:
+worker says. It sits on the same background as Pi's own custom messages.
+Collapsed it is at most six lines, and when expanding would show more, its first
+line ends with Pi's expand key, as Pi's collapsed tool output does:
 
 ```
-◐ Checkpoint · step 2 · peer review: concerns
+◐ Checkpoint · step 2 · peer review: concerns (ctrl+o to expand)
   Added backoff with jitter; 429 honours Retry-After.
 Pair verified  ✔ typecheck  ✖ test (exit 1)
 Worker claims  3 reported pass, not verified
@@ -237,7 +258,7 @@ peer review's findings, and the report ID with the checkpoint hash.
 A question or blocked card leads with its question:
 
 ```
-◐ Question · step 2
+◐ Question · step 2 (ctrl+o to expand)
   Should retries apply to POST requests, or only to idempotent GET and PUT?
 Pair verified  ✔ typecheck
 Worker claims  1 reported pass, not verified
@@ -280,12 +301,19 @@ stay calm because Main handles them. Choose what sits above the editor with
 
 | Mode | Shows |
 | --- | --- |
-| `minimal` (default) | The badge plus one live line with the step, activity, elapsed time, step revisions and cost. |
+| `minimal` (default) | The badge plus one live line with a progress bar, the step, activity, elapsed time, step revisions and cost. |
 | `compact` | The badge only. |
 | `board` | The badge plus a plan board: one row per step, with finished steps collapsed when the plan is long. |
 | `off` | Nothing. Commands still work. |
 
-The step title flexes down to 16 columns first; only then does the line drop
+```
+■■■▣▣□□□□□ 2/4 · ▶ Wire retries into fetch client · editing client.js · 3m12s · rev 1/3 · $0.14/$2.00
+```
+
+The bar fills `■` for approved steps and `▣`, in the step's color, for the step
+under way. A finished plan's clock stops when the last step is approved, and the
+line clears with the `✔` badge about ten minutes later; a cancelled task clears at
+once. The step title flexes down to 16 columns first; only then does the line drop
 detail, lowest priority first: speed, cache, cost, step revisions, elapsed time,
 then activity. The `n/m` count stays last. An alert (stalled worker, permission
 dialog, near-full context, a reached limit, or failed Pair verification) keeps
@@ -354,8 +382,11 @@ are outside this MVP.
 `npm test` runs the repository's own suites (plain `node --test` over
 `test/**/*.test.js`; nothing outside `test/` is collected). They cover the parts
 that are pure functions of data: the task projection the UI reads (including
-tasks saved before newer fields existed) and a harness smoke test that loads
-`src/ui.js` with Pi's TUI packages. They do not drive a live session, so still
+tasks saved before newer fields existed), the badge, live line, board, dashboard,
+transcript and chat cards rendered from fixed summaries, the dashboard and
+transcript views driven by keypresses against fake controllers, the attention
+cue, and a harness smoke test that loads `src/ui.js` with Pi's TUI packages.
+They do not drive a live session, so still
 verify behaviour with the static checks (`npm run typecheck`, `npm run pack:check`)
 and manual review.
 
