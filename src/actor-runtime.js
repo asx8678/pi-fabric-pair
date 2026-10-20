@@ -29,8 +29,8 @@ const HISTORY_BYTES = 4 * 1024 * 1024 * 1024, HISTORY_ENTRIES = 2_000_000, PROBE
 const TAIL_ENTRIES = 64;
 const FULL_COMPARE_BYTES = 8 * 1024 * 1024;
 const MAX_TIMEOUT = 300_000, UI_TIMEOUT = 120_000;
-/** Pi 0.99+ reports how it took a prompt (`handled`, `queued` or `started`); older Pi reports nothing. @param {unknown} data @param {string} expected */
-function promptTaken(data, expected) { return !isRpcRecord(data) || data.disposition === undefined || data.disposition === expected; }
+/** Pi reports how it took a prompt: `handled`, `queued` or `started`. @param {unknown} data @param {string} expected */
+function promptTaken(data, expected) { return isRpcRecord(data) && data.disposition === expected; }
 /** @param {unknown} data */
 function disposition(data) { return isRpcRecord(data) && typeof data.disposition === 'string' ? data.disposition : 'unknown'; }
 const THINKING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
