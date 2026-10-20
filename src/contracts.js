@@ -596,25 +596,15 @@ function checkWorkerRecord(value, label, workerId, ownerSession, facts) {
   }
 }
 
-/** @param {unknown} value @param {() => string} createAttemptId */
-export function migrateStoredState(value, createAttemptId) {
+/** @param {unknown} value */
+export function migrateStoredState(value) {
   const state = structuredClone(object(value, 'state')); let migrated = false;
   invariant(state.version === STATE_VERSION, `Unsupported Pair state version ${String(state.version)}`);
-  const workers = object(required(state, 'workers', 'state'), 'state.workers'), identityPresence = [Object.hasOwn(state, 'ownerEpoch')];
+  const workers = object(required(state, 'workers', 'state'), 'state.workers');
   for (const [workerId, workerValue] of Object.entries(workers)) {
-    id(workerId, 'state.workers key'); const record = object(workerValue, `state.workers.${workerId}`); identityPresence.push(Object.hasOwn(record, 'workerGeneration'));
-    if (record.task !== null && record.task !== undefined) { const task = object(record.task, `state.workers.${workerId}.task`); for (const key of ['workerId', 'attemptNumber', 'attemptId']) identityPresence.push(Object.hasOwn(task, key)); }
-  }
-  const presentIdentities = identityPresence.filter(Boolean).length;
-  invariant(presentIdentities === 0 || presentIdentities === identityPresence.length, 'Stored Pair state has mixed present/missing identity fields and requires explicit reconciliation');
-  const legacyIdentity = presentIdentities === 0;
-  if (legacyIdentity) { state.ownerEpoch = 0; migrated = true; }
-  for (const [workerId, workerValue] of Object.entries(workers)) {
-    const record = object(workerValue, `state.workers.${workerId}`);
-    if (legacyIdentity) { record.workerGeneration = 0; migrated = true; }
+    id(workerId, 'state.workers key'); const record = object(workerValue, `state.workers.${workerId}`);
     if (record.task !== null && record.task !== undefined) {
       const task = object(record.task, `state.workers.${workerId}.task`);
-      if (legacyIdentity) { task.workerId = workerId; task.attemptNumber = 1; task.attemptId = id(createAttemptId(), 'generated attemptId'); migrated = true; }
       const policy = object(required(task, 'policy', `state.workers.${workerId}.task`), `state.workers.${workerId}.task.policy`);
       if (policy.mode === 'final') { policy.mode = 'final-only'; migrated = true; }
       else if (policy.mode === 'strict') { policy.mode = 'every-step'; migrated = true; }

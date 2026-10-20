@@ -128,7 +128,7 @@ export class PairController extends EventEmitter {
     this.releaseLock = await acquireLock(this.dir, { ownerSession: this.ownerSession, cwd: this.cwd });
     try {
     const loaded = await readJSON(path.join(this.dir, 'state.json'), { version: STATE_VERSION, ownerSession: this.ownerSession, ownerEpoch: 0, cwd: this.cwd, workers: {}, requests: {}, notices: {} });
-    const migrated = migrateStoredState(loaded, () => uid('attempt'));
+    const migrated = migrateStoredState(loaded);
     this.state = validateStoredState(migrated.state, { ownerSession: this.ownerSession, cwd: this.cwd });
     this.state.ownerEpoch = incrementCounter(this.state.ownerEpoch, 'state.ownerEpoch');
     for (const notice of Object.values(this.state.notices)) if (notice.status === 'delivery_pending') notice.status = 'pending';
