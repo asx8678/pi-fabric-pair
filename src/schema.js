@@ -29,7 +29,7 @@ const array = (items, maxItems = 64) => ({ type: 'array', items, maxItems });
 const object = (properties, required) => ({ type: 'object', properties, required, additionalProperties: false });
 /** @template {string} Value @param {Value[]} values @returns {{type: 'string', enum: Value[]}} */
 const enumOf = values => ({ type: 'string', enum: values });
-export const stepSchema = object({ id: string('Stable step ID', 80), title: string('Step title', 200), instructions: string('Bounded implementation instructions'), acceptance: array(string('Acceptance criterion', 2000)) }, ['id', 'title', 'instructions']);
+const stepSchema = object({ id: string('Stable step ID', 80), title: string('Step title', 200), instructions: string('Bounded implementation instructions'), acceptance: array(string('Acceptance criterion', 2000)) }, ['id', 'title', 'instructions']);
 export const dispatchSchema = object({
   workerId: string('Configured worker ID', 80), requestId: string('Idempotency key; reuse only to retry the identical assignment', 80),
   objective: string('Task goal', 6000), constraints: array(string('Mandatory constraint', 2000)),
@@ -108,7 +108,7 @@ export function validateDispatch(input) {
   return input;
 }
 /** @param {string | undefined} summaryDetail */
-export function reportByteLimit(summaryDetail) { return { minimal: 4000, normal: 12000, detailed: 32000 }[summaryDetail || 'normal'] || 12000; }
+function reportByteLimit(summaryDetail) { return { minimal: 4000, normal: 12000, detailed: 32000 }[summaryDetail || 'normal'] || 12000; }
 /** @param {unknown} payload @param {string | undefined} summaryDetail @param {object | null} [limits] */
 export function assertReportSize(payload, summaryDetail, limits = null) {
   const bytes = limits && 'maxReportBytes' in limits ? limits.maxReportBytes : undefined;

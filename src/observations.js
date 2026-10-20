@@ -15,7 +15,7 @@ import { types as nodeTypes } from 'node:util';
 
 /** @typedef {UsageNumbers & {reportedCost: number, unknownCostRequests: number, requests: number}} UsageTotals */
 
-export class UsageValidationError extends TypeError {
+class UsageValidationError extends TypeError {
   /** @param {'invalid-field' | 'missing-required-field'} code @param {string} path @param {string} message */
   constructor(code, path, message) {
     super(message);

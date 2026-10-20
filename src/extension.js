@@ -12,7 +12,7 @@ import { assert } from './util.js';
  * @param {Record<string, string | undefined>} env
  * @returns {'main' | 'worker' | 'inert'}
  */
-export function roleFromEnvironment(env = process.env) {
+function roleFromEnvironment(env = process.env) {
   if (env.PI_FABRIC_PARENT_RUN || env.PI_FABRIC_LINEAGE || Number(env.PI_FABRIC_DEPTH) > 0) return 'inert';
   const raw = env.PI_FABRIC_PAIR_ROLE;
   const hasWorkerBinding = ['PI_FABRIC_PAIR_WORKER_ID', 'PI_FABRIC_PAIR_WORKER_DIR', 'PI_FABRIC_PAIR_OWNER', 'PI_FABRIC_PAIR_OWNER_EPOCH', 'PI_FABRIC_PAIR_WORKER_GENERATION', 'PI_FABRIC_PAIR_NONCE'].some(key => env[key]);

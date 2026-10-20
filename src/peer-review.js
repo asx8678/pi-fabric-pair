@@ -14,7 +14,7 @@ Look for correctness bugs, missed requirements from the objective and plan, brok
 Begin your answer with exactly one line: "VERDICT: PASS", "VERDICT: CONCERNS" or "VERDICT: FAIL". Then list each finding as "- file:line — problem — why it matters — suggested fix". If there are no findings, say so.`;
 
 /** @param {string} dir Pair state directory @param {string} taskId @param {string} reportId */
-export function peerReviewFile(dir, taskId, reportId) { return path.join(dir, 'reviews', taskId, `${reportId}.json`); }
+function peerReviewFile(dir, taskId, reportId) { return path.join(dir, 'reviews', taskId, `${reportId}.json`); }
 
 /** @param {string} dir @param {string} taskId @param {string} reportId @returns {PeerReview | null} */
 export function readPeerReview(dir, taskId, reportId) {

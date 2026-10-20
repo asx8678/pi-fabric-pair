@@ -129,7 +129,7 @@ export function fabricVersion(pi) {
   return packageVersion(source, 'pi-fabric');
 }
 /** @param {string | undefined | null} source @param {string} expectedName @returns {Promise<unknown>} */
-export async function packageVersion(source, expectedName) {
+async function packageVersion(source, expectedName) {
   if (!source) return null;
   let dir = path.dirname(source);
   for (let i = 0; i < 10; i++) {
@@ -419,7 +419,7 @@ function regexEnd(code, start) {
  * Heuristic: the `tool_result` checks remain the backstop.
  * @param {string} code @param {{strings?: boolean}} [options]
  */
-export function executableText(code, { strings = false } = {}) {
+function executableText(code, { strings = false } = {}) {
   let out = '', i = 0;
   /** @type {number[]} unclosed `{` inside each template expression being read */ const templates = [];
   // Template text runs to the closing backtick or to `${`, whose expression is read as code.
@@ -539,7 +539,7 @@ export function signedIn(registry, model) {
  * save nothing; Pi's own warmer does not check this, it relies on only cached models having a lifetime.
  * @param {WarmedModel | null | undefined} model
  */
-export function cacheReadSaves(model) {
+function cacheReadSaves(model) {
   const cost = model?.cost;
   return plain(cost) && typeof cost.cacheRead === 'number' && typeof cost.input === 'number' && cost.cacheRead > 0 && cost.cacheRead < cost.input;
 }

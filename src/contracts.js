@@ -232,7 +232,7 @@ function assertTaskPolicy(value, label = 'task.policy', { legacy = false } = {})
 /** @overload @param {unknown} value @param {string} [label] @param {{legacy?: false}} [options] @returns {TaskPolicy} */
 /** @overload @param {unknown} value @param {string} [label] @param {{legacy?: boolean}} [options] @returns {LegacyTaskPolicy} */
 /** @param {unknown} value @param {string} [label] @param {{legacy?: boolean}} [options] @returns {LegacyTaskPolicy} */
-export function validateTaskPolicy(value, label = 'task.policy', options = {}) { assertTaskPolicy(value, label, options); return value; }
+function validateTaskPolicy(value, label = 'task.policy', options = {}) { assertTaskPolicy(value, label, options); return value; }
 
 /** @param {unknown} value @param {string} [label] @param {{legacy?: boolean}} [options] @returns {asserts value is LegacyTaskLimits} */
 function assertTaskLimits(value, label = 'task.limits', { legacy = false } = {}) {
@@ -254,7 +254,7 @@ function assertTaskLimits(value, label = 'task.limits', { legacy = false } = {})
 /** @overload @param {unknown} value @param {string} [label] @param {{legacy?: false}} [options] @returns {TaskLimits} */
 /** @overload @param {unknown} value @param {string} [label] @param {{legacy?: boolean}} [options] @returns {LegacyTaskLimits} */
 /** @param {unknown} value @param {string} [label] @param {{legacy?: boolean}} [options] @returns {LegacyTaskLimits} */
-export function validateTaskLimits(value, label = 'task.limits', options = {}) { assertTaskLimits(value, label, options); return value; }
+function validateTaskLimits(value, label = 'task.limits', options = {}) { assertTaskLimits(value, label, options); return value; }
 
 /** @param {unknown} value @param {string} label @returns {asserts value is VerificationPolicy} */
 function assertVerification(value, label) {

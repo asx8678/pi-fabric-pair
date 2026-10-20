@@ -44,10 +44,10 @@ export function symbol(status) {
 }
 /** @typedef {'accent' | 'success' | 'warning' | 'error' | 'muted' | 'dim' | 'text'} IndicatorColor */
 
-export const PULSE_MAX_AGE_MS = 120000;
-export const STALE_AGE_MS = 300000;
+const PULSE_MAX_AGE_MS = 120000;
+const STALE_AGE_MS = 300000;
 /** @param {PairSummary['workers'][number]} worker @param {number} [now] @returns {number} */
-export function activityAge(worker, now = Date.now()) {
+function activityAge(worker, now = Date.now()) {
   const last = Math.max(worker.observation?.at || 0, worker.lastExchange?.at || 0);
   return last > 0 ? Math.max(0, now - last) : 0;
 }
@@ -66,7 +66,7 @@ export function staleWorkers(summary, now = Date.now()) {
 }
 
 /** @param {{tokens?: unknown, seconds?: unknown} | null | undefined} speed @returns {string} */
-export function speedLabel(speed) {
+function speedLabel(speed) {
   const tokens = speed?.tokens, seconds = speed?.seconds;
   if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0
     || typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return 'avg — tok/s';
@@ -83,7 +83,7 @@ function observedSpeed(observation) {
 /** @param {unknown} value @param {number} [max] @returns {string} */
 function inline(value, max = 200) { return cleanText(value, 4000).replace(/\s+/g, ' ').trim().slice(0, max); }
 /** @param {number} cost @returns {string} */
-export function costLabel(cost) {
+function costLabel(cost) {
   if (cost >= 0.1) return `$${cost.toFixed(2)}`;
   return cost >= 0.001 ? `$${cost.toFixed(3)}` : '<$0.001';
 }
@@ -133,7 +133,7 @@ function activityLabel(tool, target) {
  * @param {number} now
  * @returns {{icon: string, color: IndicatorColor, text: string, details: {text: string, color: IndicatorColor}[], active: boolean}}
  */
-export function workerStage(summary, w, mainBusy, now) {
+function workerStage(summary, w, mainBusy, now) {
   /** @param {string} text @param {IndicatorColor} [color] */
   const d = (text, color = 'muted') => ({ text, color });
   const t = w.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
@@ -204,7 +204,7 @@ function workerLabel(summary, id) {
   return summary.workers.length === 1 ? 'W' : `W${summary.workers.findIndex(w => w.id === id) + 1}`;
 }
 /** @param {PairSummary} summary @returns {PairSummary['workers'][number] | undefined} */
-export function planWorker(summary) {
+function planWorker(summary) {
   const planned = summary.workers.filter(w => Array.isArray(w.task?.stepList) && w.task.stepList.length > 0);
   return planned.find(w => ['working', 'settling', 'starting', 'question', 'review', 'blocked'].includes(w.status)) || planned[0];
 }
@@ -214,7 +214,7 @@ export function planWorker(summary) {
  * @param {number} [maxCells]
  * @returns {{filled: number, empty: number, label: string, percent: number}}
  */
-export function progressBar(done, total, maxCells = 10) {
+function progressBar(done, total, maxCells = 10) {
   const cells = Math.min(Math.max(1, total), Math.max(1, maxCells));
   const filled = total > 0 ? Math.min(cells, Math.round((cells * done) / total)) : 0;
   return { filled, empty: cells - filled, label: `${done}/${total}`, percent: total > 0 ? Math.round((100 * done) / total) : 0 };
@@ -223,7 +223,7 @@ export function progressBar(done, total, maxCells = 10) {
 /** @typedef {'done' | 'active' | 'review' | 'held' | 'todo'} StepState */
 
 /** @param {StepState} state @returns {string} */
-export function stepSymbol(state) {
+function stepSymbol(state) {
   if (state === 'done') return '✔';
   if (state === 'active') return '▶';
   if (state === 'review') return '◐';
@@ -231,7 +231,7 @@ export function stepSymbol(state) {
   return '○';
 }
 /** @param {StepState} state @returns {IndicatorColor} */
-export function stepColor(state) {
+function stepColor(state) {
   if (state === 'done') return 'success';
   if (state === 'active') return 'accent';
   if (state === 'review' || state === 'held') return 'warning';
@@ -360,7 +360,7 @@ export function statusText(summary, native = null, now = Date.now()) {
  * @param {{title: string, subtitle?: string[], hints?: string, theme?: PanelTheme | null}} options
  * @returns {string[]}
  */
-export function chrome(body, width, { title, subtitle = [], hints = '', theme }) {
+function chrome(body, width, { title, subtitle = [], hints = '', theme }) {
   const fg = painter(theme);
   const bold = (/** @type {string} */ text) => (theme?.bold ? theme.bold(text) : text);
   const rule = fg('border', '─'.repeat(Math.max(1, width)));
@@ -383,7 +383,7 @@ function wrapHanging(raw, styled, span) {
   return [' '.repeat(indent) + first, ...more.map(part => ' '.repeat(hang) + part)];
 }
 /** @param {PanelTheme | null | undefined} theme @returns {(line: string) => string} */
-export function panelFormat(theme) {
+function panelFormat(theme) {
   const fg = painter(theme);
   return line => {
     const indent = /^ */.exec(line)?.[0].length || 0, body = line.slice(indent), pad = ' '.repeat(indent);
@@ -405,7 +405,7 @@ export function panelFormat(theme) {
  * @param {{title: string, theme?: PanelTheme | null, keys?: KeyMatcher | null, rows?: () => number | undefined, close: () => void} & TextViewOptions} options
  * @returns {{render(width: number): string[], handleInput(data: string): void}}
  */
-export function createTextView(raw, { title, theme, keys, rows = () => undefined, close, paint, format, section }) {
+function createTextView(raw, { title, theme, keys, rows = () => undefined, close, paint, format, section }) {
   let offset = 0, width = 80, message = '', lastQuery = '';
   /** @type {number | null} */ let cursor = null;
   /** @type {string | null} */ let query = null;
@@ -494,7 +494,7 @@ export async function textView(ctx, title, text, options = {}) {
  * @param {{title: string, subtitle?: string[], confirm?: string, cancel?: string, initial?: string, theme?: PanelTheme | null, keys?: KeyMatcher | null, rows?: () => number | undefined, done: (id: string | undefined) => void}} options
  * @returns {{render(width: number): string[], handleInput(data: string): void}}
  */
-export function createMenuView(entries, { title, subtitle = [], confirm = 'select', cancel = 'close', initial, theme, keys, rows = () => undefined, done }) {
+function createMenuView(entries, { title, subtitle = [], confirm = 'select', cancel = 'close', initial, theme, keys, rows = () => undefined, done }) {
   const fg = painter(theme);
   const items = entries.flatMap((entry, index) => ('id' in entry ? [index] : []));
   let selected = Math.max(0, items.findIndex(index => /** @type {{id: string}} */ (entries[index]).id === initial));
@@ -765,7 +765,7 @@ async function numberInput(ctx, title, current, { optional = false, scale = 1, a
 }
 /** @typedef {{id: string, provider: string, name?: string, reasoning?: boolean, thinkingLevelMap?: Partial<Record<string, string | null>>}} EffortModel */
 /** @param {EffortModel} model @returns {import('./contracts.js').Effort[]} */
-export function supportedEfforts(model) {
+function supportedEfforts(model) {
   if (!model.reasoning) return ['off'];
   return EFFORT_LEVELS.filter(level => {
     const mapped = model.thinkingLevelMap?.[level];
@@ -774,7 +774,7 @@ export function supportedEfforts(model) {
   });
 }
 /** @param {EffortModel} model @param {import('./contracts.js').Effort} effort @returns {import('./contracts.js').Effort} */
-export function clampEffort(model, effort) {
+function clampEffort(model, effort) {
   const levels = supportedEfforts(model), at = EFFORT_LEVELS.indexOf(effort);
   if (levels.includes(effort)) return effort;
   return EFFORT_LEVELS.slice(at + 1).find(level => levels.includes(level)) || EFFORT_LEVELS.slice(0, Math.max(0, at)).reverse().find(level => levels.includes(level)) || levels[0] || 'off';
@@ -1001,7 +1001,7 @@ function messageText(content) {
  * the raw text. The model still reads the full content. `null` leaves Pi's default rendering.
  * @param {string} text @param {boolean} expanded @returns {[string | null, string][] | null}
  */
-export function pairMessageLines(text, expanded) {
+function pairMessageLines(text, expanded) {
   const kind = /^FABRIC PAIR (REPORT|NOTICE|SUPERVISION|CHECK)\b/.exec(text)?.[1];
   if (!kind) return null;
   if (kind !== 'REPORT') {

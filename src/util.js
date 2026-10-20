@@ -16,7 +16,7 @@ export const clone = value => structuredClone(value);
 /** @param {unknown} value @returns {string} */
 export const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 /** @param {unknown} value @returns {string} */
-export function stableJSON(value) {
+function stableJSON(value) {
   if (Array.isArray(value)) return `[${value.map(item => stableJSON(item === undefined ? null : item)).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = /** @type {Record<string, unknown>} */ (value);
@@ -88,7 +88,7 @@ export async function atomicJSON(file, value, { durable = true, compact = false 
   } finally { await handle?.close().catch(() => {}); await fs.unlink(tmp).catch(() => {}); }
 }
 /** @param {string} dir */
-export async function syncDirectory(dir) {
+async function syncDirectory(dir) {
   /** @type {import('node:fs/promises').FileHandle | undefined} */
   let handle;
   try { handle = await fs.open(dir, constants.O_RDONLY); await handle.sync(); }
@@ -127,7 +127,7 @@ export async function processStartedAt(pid) {
     });
   });
 }
-export const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
+const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
 /** @param {unknown} owner @returns {Promise<boolean>} */
 export async function ownerAlive(owner) {
   if (!plain(owner) || typeof owner.pid !== 'number') return false;
