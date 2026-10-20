@@ -92,22 +92,25 @@ export function validate(schema, value, label = 'input') {
 function assertDispatchShape(input) { validate(dispatchSchema, input); }
 /** @param {unknown} input @returns {asserts input is DecisionShape} */
 function assertDecisionShape(input) { validate(decisionSchema, input); }
+/** @param {Step[]} steps */
+function assertUniqueStepIds(steps) {
+  /** @type {Set<string>} */
+  const ids = new Set(); for (const step of steps) { safeId(step.id, 'step.id'); assert(!ids.has(step.id), 'Step IDs must be unique'); ids.add(step.id); }
+}
 /** @param {unknown} input @returns {asserts input is DecisionPayload} */
 function assertDecisionPayload(input) {
   assertDecisionShape(input); safeId(input.workerId, 'workerId'); safeId(input.taskId, 'taskId'); safeId(input.reportId, 'reportId');
   if (input.action === 'approve') assert(/^[a-f0-9]{64}$/.test(input.checkpointHash || ''), 'Approval requires the exact checkpointHash');
   if (input.steps !== undefined) {
     assert(input.action === 'revise', 'Only revise may replace the plan steps');
-    /** @type {Set<string>} */
-    const ids = new Set(); for (const step of input.steps) { safeId(step.id, 'step.id'); assert(!ids.has(step.id), 'Step IDs must be unique'); ids.add(step.id); }
+    assertUniqueStepIds(input.steps);
   }
 }
 
 /** @param {unknown} input @returns {DispatchPayload} */
 export function validateDispatch(input) {
   assertDispatchShape(input); assert(JSON.stringify(input).length <= 64000, 'Work order is too large; use concise instructions and repository references (64 KB maximum)'); safeId(input.workerId, 'workerId'); safeId(input.requestId, 'requestId');
-  /** @type {Set<string>} */
-  const ids = new Set(); for (const step of input.steps) { safeId(step.id, 'step.id'); assert(!ids.has(step.id), 'Step IDs must be unique'); ids.add(step.id); }
+  assertUniqueStepIds(input.steps);
   return input;
 }
 /** @param {unknown} input @returns {ReportPayload} */
