@@ -1268,10 +1268,9 @@ export class PairController extends EventEmitter {
       if (!ready.length) return null;
       this.assertSingleUnacknowledged();
       const drafts = ready.map(notice => {
-        const r = this.record(notice.workerId);
-        assert(r.task?.report?.reportId === notice.reportId, 'Notice no longer matches its retained report');
+        const draft = this.deliveryDetails(notice);
         notice.status = 'offered'; notice.offeredAt = Date.now(); notice.channel = 'boundary';
-        return { message: this.reportMessage(r), details: { reportId: notice.reportId, workerId: r.id, taskId: r.task.id, ownerEpoch: notice.ownerEpoch, workerGeneration: notice.workerGeneration, attemptId: notice.attemptId, deliveryOperationId: notice.deliveryOperationId } };
+        return draft;
       });
       this.setPhase('open');
       const token = { consumedRevision: this.state.mainPhase?.revision ?? 0, activity: this.activity, runToken: permit.runToken, ownerEpoch: this.state.ownerEpoch, reportIds: ready.map(notice => notice.reportId) };
