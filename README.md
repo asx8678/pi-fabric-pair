@@ -30,8 +30,7 @@ disposable Git workspace with manual startup and every-step review.
 
 Pair's controller runs inside Main's Pi process and manages one persistent worker
 through Pi's JSONL RPC. The worker edits the Git workspace and saves reports
-locally before Main is notified. See the
-[architecture and invariants](docs/ARCHITECTURE.md).
+locally before Main is notified.
 
 ## Get started
 
@@ -68,10 +67,23 @@ and recursive agents. They affect Main too if it shares the profile; Fabric has 
 per-process setting yet. Prewalk may stay enabled, but `prewalk.alwaysRearm` must
 not be `true`: an auto-armed worker would hand its first edit to another model.
 Keep native automatic compaction enabled. Pair checks this setup without editing
-it. See the [quickstart](docs/QUICKSTART.md) for paths and troubleshooting.
+it; `/pair doctor` reports what is missing.
 
-If you tighten Fabric's approval policies, classify Pair's tools too; see
-[approval risk for Pair tools](docs/REFERENCE.md#approval-risk-for-pair-tools).
+Fabric gives Pair's tools its default risk, `execute`. If your Fabric approval
+policy asks for or denies some risk classes, classify Pair's tools in the same
+`fabric.json`:
+
+```json
+{
+  "capture": {
+    "risks": {
+      "pair_status": "read", "pair_inspect": "read",
+      "pair_yield": "write", "pair_cancel": "write", "pair_report": "write",
+      "pair_dispatch": "agent", "pair_decide": "agent", "pair_recover": "agent"
+    }
+  }
+}
+```
 
 ### 3. Start the worker
 
@@ -100,8 +112,7 @@ Now ask Main:
 > results, and ask me before approving it.
 
 By default (`autoDeliverReports: true`) a finished report is delivered to Main
-automatically once Main's current work is done, and never interrupts it; see
-[Report delivery](docs/REFERENCE.md#report-delivery-phases-and-branches). Review gates govern
+automatically once Main's current work is done, and never interrupts it. Review gates govern
 Main's decisions; asking the human before each approval requires that explicit
 instruction.
 
@@ -127,8 +138,7 @@ resume; staged model changes require finishing or cancelling the current task.
 Invalid configuration leaves the last valid settings in use.
 
 Cancel and stop do not undo file changes. Normal Main shutdown also stops owned
-workers; `/new`, `/resume` or a fork asks first while the worker is running. The [reference](docs/REFERENCE.md) covers pause, resume, staged settings,
-and the remaining commands.
+workers; `/new`, `/resume` or a fork asks first while the worker is running.
 
 ## Review you can inspect
 
@@ -181,8 +191,7 @@ refresh; `/pair doctor` says when Main or the worker uses one. Fabric's `cache.h
 warming) is a separate paid opt-in for Main. Pair holds no leases and never changes
 Pi's settings. Pair's inference budgets exclude Main usage and warming. Pi (through
 1.1.0) does not yet send these refreshes in a Pair session (its warmer stops once
-Pair's messages are in context); see the
-[cache reference](docs/REFERENCE.md#context-warming-and-cost).
+Pair's messages are in context).
 
 ## More details
 
@@ -192,12 +201,4 @@ are outside this MVP. The repository bundles no automated tests: verify changes
 with the static checks (`npm run typecheck`, `npm run pack:check`) and manual
 review.
 
-[Quickstart](docs/QUICKSTART.md) |
-[Architecture](docs/ARCHITECTURE.md) |
-[Reference](docs/REFERENCE.md) |
-[Example config](fabric-pair.example.json) |
-[Compatibility](docs/COMPATIBILITY.md) |
-[Security](docs/SECURITY.md) |
-[Changelog](CHANGELOG.md)
-
-[MIT license](LICENSE).
+[Example config](fabric-pair.example.json) | [MIT license](LICENSE)

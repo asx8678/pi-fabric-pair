@@ -43,15 +43,8 @@
     "docs/assets/pi-fabric-pair-architecture.svg",
     "docs/assets/pi-fabric-pair-review-loop.svg",
     "docs/assets/pi-fabric-pair-context.svg",
-    "docs/ARCHITECTURE.md",
-    "docs/QUICKSTART.md",
-    "docs/REFERENCE.md",
-    "docs/SCOPE-AMENDMENT.md",
-    "docs/COMPATIBILITY.md",
-    "docs/SECURITY.md",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md",
     "fabric-pair.example.json"
   ],
   "scripts": {
