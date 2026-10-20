@@ -21,6 +21,19 @@ function contextUsage(value) {
   return { tokens: value.tokens, contextWindow: value.contextWindow, percent: value.percent };
 }
 
+/**
+ * @template {string} C
+ * @param {{fg(color: C, text: string): string} | null | undefined} theme
+ * @returns {(color: C, text: string) => string}
+ */
+function painter(theme) { return (color, text) => (theme ? theme.fg(color, text) : text); }
+/**
+ * @param {{render(width: number): string[], handleInput(data: string): void}} view
+ * @param {{requestRender?(): void}} tui
+ * @returns {import('@earendil-works/pi-tui').Component}
+ */
+function viewComponent(view, tui) { return { render: width => view.render(width), handleInput(data) { view.handleInput(data); tui.requestRender?.(); }, invalidate() {} }; }
+
 /** @param {string} status @returns {string} */
 export function symbol(status) {
   if (['working', 'settling', 'starting'].includes(status)) return '◉';
@@ -168,8 +181,7 @@ export function workerStage(summary, w, mainBusy, now) {
  * @returns {string}
  */
 export function indicator(summary, mainBusy, theme, now = Date.now()) {
-  /** @param {IndicatorColor} color @param {string} text @returns {string} */
-  const paint = (color, text) => (theme ? theme.fg(color, text) : text);
+  const paint = painter(theme);
   const dot = paint('dim', ' · ');
   const primary = planWorker(summary) || summary.workers[0];
   const many = summary.workers.length > 1;
@@ -232,8 +244,7 @@ export function planLine(summary, theme) {
   const worker = planWorker(summary);
   const list = worker?.task?.stepList;
   if (!worker || !list?.length) return null;
-  /** @param {IndicatorColor} color @param {string} text @returns {string} */
-  const paint = (color, text) => (theme ? theme.fg(color, text) : text);
+  const paint = painter(theme);
   const done = list.filter(step => step.state === 'done').length;
   const bar = progressBar(done, list.length);
   const owner = summary.workers.length > 1 ? `${paint('muted', workerLabel(summary, worker.id))} ` : '';
@@ -350,8 +361,7 @@ export function statusText(summary, native = null, now = Date.now()) {
  * @returns {string[]}
  */
 export function chrome(body, width, { title, subtitle = [], hints = '', theme }) {
-  /** @param {PanelColor} color @param {string} text */
-  const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  const fg = painter(theme);
   const bold = (/** @type {string} */ text) => (theme?.bold ? theme.bold(text) : text);
   const rule = fg('border', '─'.repeat(Math.max(1, width)));
   const pad = (/** @type {string} */ line) => ` ${truncateToWidth(line, Math.max(1, width - 2), '')}`;
@@ -374,8 +384,7 @@ function wrapHanging(raw, styled, span) {
 }
 /** @param {PanelTheme | null | undefined} theme @returns {(line: string) => string} */
 export function panelFormat(theme) {
-  /** @param {PanelColor} color @param {string} text */
-  const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  const fg = painter(theme);
   return line => {
     const indent = /^ */.exec(line)?.[0].length || 0, body = line.slice(indent), pad = ' '.repeat(indent);
     if (indent >= 4 || !body) return line;
@@ -401,8 +410,7 @@ export function createTextView(raw, { title, theme, keys, rows = () => undefined
   /** @type {number | null} */ let cursor = null;
   /** @type {string | null} */ let query = null;
   /** @type {{width: number, lines: string[], starts: number[]}} */ let cache = { width: -1, lines: [], starts: [] };
-  /** @param {PanelColor} color @param {string} text */
-  const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  const fg = painter(theme);
   const styleLine = (/** @type {string} */ line) => { if (format) return format(line); const color = paint?.(line); return color ? fg(color, line) : line; };
   const layout = () => {
     if (cache.width === width) return cache;
@@ -476,8 +484,7 @@ export async function textView(ctx, title, text, options = {}) {
   const raw = cleanText(text, 100000).replace(/\t/g, '    ').split('\n');
   await ctx.ui.custom((tui, theme, keys, done) => {
     const view = createTextView(raw, { ...options, ...(options.panel ? { format: panelFormat(theme) } : {}), title, theme, keys, rows: () => tui.terminal?.rows, close: () => done(undefined) });
-    /** @type {import('@earendil-works/pi-tui').Component} */
-    const component = { render: width => view.render(width), handleInput(data) { view.handleInput(data); tui.requestRender?.(); }, invalidate() {} };
+    const component = viewComponent(view, tui);
     return component;
   });
 }
@@ -488,8 +495,7 @@ export async function textView(ctx, title, text, options = {}) {
  * @returns {{render(width: number): string[], handleInput(data: string): void}}
  */
 export function createMenuView(entries, { title, subtitle = [], confirm = 'select', cancel = 'close', initial, theme, keys, rows = () => undefined, done }) {
-  /** @param {PanelColor} color @param {string} text */
-  const fg = (color, text) => (theme ? theme.fg(color, text) : text);
+  const fg = painter(theme);
   const items = entries.flatMap((entry, index) => ('id' in entry ? [index] : []));
   let selected = Math.max(0, items.findIndex(index => /** @type {{id: string}} */ (entries[index]).id === initial));
   const labelWidth = Math.min(36, Math.max(0, ...entries.map(entry => ('id' in entry && entry.value !== undefined ? visibleWidth(entry.label) : 0))));
@@ -539,8 +545,7 @@ export async function menu(ctx, entries, options) {
   }
   return ctx.ui.custom((tui, theme, keys, done) => {
     const view = createMenuView(entries, { ...options, theme, keys, rows: () => tui.terminal?.rows, done });
-    /** @type {import('@earendil-works/pi-tui').Component} */
-    const component = { render: width => view.render(width), handleInput(data) { view.handleInput(data); tui.requestRender?.(); }, invalidate() {} };
+    const component = viewComponent(view, tui);
     return component;
   });
 }
