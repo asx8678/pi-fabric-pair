@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { types as nodeTypes } from 'node:util';
-import { validateUsageObservation, validateUsageTotals, UsageValidationError } from './observations.js';
+import { validateUsageObservation, validateUsageTotals } from './observations.js';
 
 /** @typedef {import('./observations.js').UsageObservation} UsageObservation */
 /** @typedef {import('./observations.js').UsageTotals} UsageTotals */
@@ -66,8 +66,7 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {'activating' | 'running' | 'awaiting_settle' | 'question' | 'blocked' | 'review' | 'paused' | 'interrupted' | 'completed' | 'cancelled'} TaskStatus */
 /** @typedef {'stopped' | 'starting' | 'ready' | 'working' | 'settling' | 'question' | 'blocked' | 'review' | 'paused' | 'attention' | 'error' | 'running' | 'awaiting_settle' | 'interrupted'} WorkerStatus */
 /** @typedef {{hash: string, taskId: string, workerId: string, acceptedAt: number, status: string}} StoredRequestV1 */
-/** @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual' | 'auto' | 'prompt', observedAt?: number, observedBranch?: number, autoAttempts?: number, error?: string}} HistoricalNoticeV1 */
-/** @typedef {HistoricalNoticeV1 & {ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} StoredNoticeV1 */
+/** @typedef {{reportId: string, workerId: string, taskId: string, status: 'pending' | 'delivery_pending' | 'offered' | 'delivered' | 'delivery_failed' | 'resolved' | 'superseded', createdAt: number, deliveredAt?: number, offeredAt?: number, channel?: 'tool-result' | 'boundary' | 'manual' | 'auto' | 'prompt', observedAt?: number, observedBranch?: number, autoAttempts?: number, error?: string, ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} StoredNoticeV1 */
 /** @typedef {{status: 'open' | 'yielded', since: number, ownerSession: string, ownerEpoch: number, revision?: number, runToken?: string | null, armed?: boolean, activity?: number}} StoredMainPhaseV1 */
 /** @typedef {{id: string, status: string, file: string}} StoredHistoryV1 */
 /** @typedef {{direction: 'main→worker' | 'worker→main', kind: string, at: number}} StoredExchangeV1 */
@@ -81,28 +80,16 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {{agentDir: string, piCompaction: unknown, cacheWarming: unknown, fabricCompaction: unknown, fabricShellHangMs: number | null, fabricAgentMaxDepth: number | null, prewalkDisabled: boolean, prewalkAutoArm?: boolean, prewalkConfigured: boolean, note: string}} StoredNativeSettings */
 /** @typedef {{protocol: 1, pairVersion: string, pid: number, cwd: string, trusted: boolean, sessionId: string, sessionFile?: string, model: (StoredModel & {contextWindow: number}) | null, thinkingLevel: Effort | 'max' | null, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}, sourcePaths: string[], context: StoredContextUsage | null, native: StoredNativeSettings, checkedAt: number, scope: string, nonce: string, workerId: string, ownerSession: string}} HistoricalProbeV1 */
 /** @typedef {HistoricalProbeV1 & {ownerEpoch: number, workerGeneration: number, meshRoot?: string}} StoredProbeV1 */
-/** @typedef {Omit<ReportEnvelope, 'ownerEpoch' | 'workerGeneration' | 'attemptId' | 'attemptNumber'>} HistoricalReportEnvelopeV1 */
-/** @typedef {HistoricalReportEnvelopeV1 & {checkpoint: Checkpoint, snapshotRef: string, inspectedAt?: number}} HistoricalFinalizedReportV1 */
-/** @typedef {Omit<ContinuationDecisionFields, 'ownerEpoch' | 'workerGeneration' | 'attemptId' | 'deliveryOperationId'> & DecisionCheckpoint} HistoricalContinuationDecisionV1 */
-/** @typedef {CancelDecision | HistoricalContinuationDecisionV1} HistoricalDecisionV1 */
 /** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, summaryDetail: SummaryDetail}} PreDeferredPolicyV1 */
-/** @typedef {Omit<PreDeferredPolicyV1, 'mode'> & {mode: 'final' | 'milestones' | 'strict'}} HistoricalTaskPolicyV1 */
 /** @typedef {PreDeferredPolicyV1 & {maxRevisionsPerStep: number}} StoredPolicyV1 */
 /** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number, pausedBy?: 'human', mainRecoveries?: number}} StoredTaskFieldsV1 */
 /** @typedef {StoredTaskFieldsV1 & {workerId: string, attemptId: string, attemptNumber: number, pendingReport: ReportEnvelope | null, report: FinalizedReport | null, decisions: Record<string, StoredDecision>} & ({policy: StoredPolicyV1, limits: TaskLimits} | {policy: PreDeferredPolicyV1, limits: BaseTaskLimits})} StoredTaskV1 */
-/** @typedef {StoredTaskFieldsV1 & {policy: HistoricalTaskPolicyV1, limits: BaseTaskLimits, pendingReport: HistoricalReportEnvelopeV1 | null, report: HistoricalFinalizedReportV1 | null, decisions: Record<string, HistoricalDecisionV1>}} HistoricalTaskV1 */
 /** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null, pid?: number, spawnedAt?: number}} StoredWorkerFieldsV1 */
 /** @typedef {StoredWorkerFieldsV1 & {workerGeneration: number, task: StoredTaskV1 | null}} StoredWorkerV1 */
-/** @typedef {StoredWorkerFieldsV1 & {task: HistoricalTaskV1 | null}} HistoricalWorkerV1 */
 /** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, cwd: string, workers: Record<string, StoredWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, StoredNoticeV1>, mainPhase?: StoredMainPhaseV1, branch?: number}} StoredStateV1 */
-/** @typedef {{version: 1, ownerSession: string, cwd: string, workers: Record<string, HistoricalWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, HistoricalNoticeV1>, mainPhase?: StoredMainPhaseV1, branch?: number}} HistoricalStateV1 */
 /** @typedef {'invalid-field' | 'missing-required-field' | 'mixed-identity' | 'partial-policy-layout' | 'hash-mismatch' | 'inconsistent-reference' | 'unsupported-version' | 'unsupported-shape' | 'unsupported-policy'} StoredIssueCode */
 /** @typedef {{code: StoredIssueCode, path: string, message: string}} StoredIssue */
-/** @typedef {{path: string, policyLayout: 'pre-deferred-policy' | 'current-policy', alias: 'final' | 'strict' | null}} StoredTaskLayout */
-/** @typedef {{path: string, profile: 'current' | 'historical', record: 'telemetry' | 'probe'}} StoredDiagnosticLayout */
-/** @typedef {{code: string, path: string}} ReconciliationReason */
-/** @typedef {{taskLayouts: StoredTaskLayout[], diagnosticLayouts: StoredDiagnosticLayout[], reconciliationReasons: ReconciliationReason[], unsupported: StoredIssue[]}} ProfileFacts */
-/** @typedef {{nonAuthorizing: true, original: unknown} & ({kind: 'recognized', identityLayout: 'pre-identity' | 'identity-bearing', taskLayouts: readonly StoredTaskLayout[], diagnosticLayouts: readonly StoredDiagnosticLayout[], storedBinding: {ownerSession: string, cwd: string}, bindingStatus: 'unchecked', reconciliationReasons: readonly ReconciliationReason[]} | {kind: 'rejected', category: 'corrupt' | 'unsupported', issue: StoredIssue})} StoredStateClassification */
+/** @typedef {{unsupported: StoredIssue[]}} ProfileFacts */
 
 class StoredValidationError extends Error {
   /** @param {StoredIssueCode} code @param {string} path @param {string} message @param {'corrupt' | 'unsupported'} [category] */
@@ -199,10 +186,10 @@ function knownVersion(value, label, supported) {
 }
 /** @param {unknown} condition @param {string} path @param {string} message */
 function reference(condition, path, message) { invariant(condition, message, path, 'inconsistent-reference'); }
-/** @param {unknown} value @param {string} label @param {boolean} historical */
-function checkDecision(value, label, historical) {
+/** @param {unknown} value @param {string} label */
+function checkDecision(value, label) {
   const decision = object(value, label), action = choice(required(decision, 'action', label), ['answer', 'approve', 'revise', 'cancel'], `${label}.action`);
-  const identity = historical ? [] : ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'];
+  const identity = ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'];
   keys(decision, action === 'cancel' ? ['hash', 'action', 'at'] : ['hash', 'action', 'feedback', 'checkpointHash', 'at', 'reviewerModel', 'delivery', ...identity], label);
   hash(required(decision, 'hash', label), `${label}.hash`); integer(required(decision, 'at', label), `${label}.at`);
   if (action === 'cancel') return;
@@ -210,19 +197,15 @@ function checkDecision(value, label, historical) {
   const checkpoint = required(decision, 'checkpointHash', label);
   if (action === 'approve') hash(checkpoint, `${label}.checkpointHash`);
   else if (checkpoint !== null) invariant(text(checkpoint, `${label}.checkpointHash`, 64).length > 0, `${label}.checkpointHash must not be empty`, `${label}.checkpointHash`);
-  if (!historical) {
-    for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(decision, key, label), `${label}.${key}`, 1);
-    for (const key of ['attemptId', 'deliveryOperationId']) id(required(decision, key, label), `${label}.${key}`);
-  }
+  for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(decision, key, label), `${label}.${key}`, 1);
+  for (const key of ['attemptId', 'deliveryOperationId']) id(required(decision, key, label), `${label}.${key}`);
   const reviewerModel = required(decision, 'reviewerModel', label); if (reviewerModel !== null) text(reviewerModel, `${label}.reviewerModel`, 1000);
   choice(required(decision, 'delivery', label), ['pending', 'accepted', 'not_required', 'not_sent_budget'], `${label}.delivery`);
 }
 /** @param {unknown} value @param {string} label @returns {asserts value is StoredDecision} */
-function assertStoredDecision(value, label) { checkDecision(value, label, false); }
+function assertStoredDecision(value, label) { checkDecision(value, label); }
 /** @param {unknown} value @param {string} label @returns {StoredDecision} */
 function validateStoredDecision(value, label) { assertStoredDecision(value, label); return value; }
-/** @param {unknown} value @param {string} label @returns {asserts value is HistoricalDecisionV1} */
-function assertHistoricalDecision(value, label) { checkDecision(value, label, true); }
 /** @param {unknown} value @param {string} label @returns {asserts value is LastDecision | null} */
 function assertLastDecision(value, label) {
   if (value === null) return;
@@ -315,7 +298,7 @@ function assertWorkerSpec(value, label) {
 function validateWorkerSpec(value, label) { assertWorkerSpec(value, label); return value; }
 
 /** @returns {ProfileFacts} */
-function profileFacts() { return { taskLayouts: [], diagnosticLayouts: [], reconciliationReasons: [], unsupported: [] }; }
+function profileFacts() { return { unsupported: [] }; }
 /** @param {ProfileFacts} facts */
 function rejectUnsupported(facts) {
   const issue = facts.unsupported[0];
@@ -331,8 +314,8 @@ function isLegacyTaskShape(value, label) {
   invariant(!mixed, `${label} has a partial policy/limit layout`, mixed?.path || label, 'partial-policy-layout');
   return !firstPresent;
 }
-/** @param {JSONObject} task @param {string} label @param {boolean} historical @param {ProfileFacts} facts */
-function checkStoredPolicy(task, label, historical, facts) {
+/** @param {JSONObject} task @param {string} label @param {ProfileFacts} facts */
+function checkStoredPolicy(task, label, facts) {
   const legacy = isLegacyTaskShape(task, label), at = `${label}.policy`, policy = object(task.policy, at);
   keys(policy, POLICY_KEYS, at);
   const mode = choice(required(policy, 'mode', at), ['final', 'strict', 'final-only', 'milestones', 'every-step', 'adaptive'], `${at}.mode`);
@@ -342,12 +325,6 @@ function checkStoredPolicy(task, label, historical, facts) {
   choice(required(policy, 'summaryDetail', at), ['minimal', 'normal', 'detailed'], `${at}.summaryDetail`);
   if (Object.hasOwn(policy, 'maxStepFiles')) integer(policy.maxStepFiles, `${at}.maxStepFiles`, 1, 1000);
   validateTaskLimits(task.limits, `${label}.limits`, { legacy });
-  const alias = mode === 'final' || mode === 'strict' ? mode : null;
-  facts.taskLayouts.push({ path: label, policyLayout: legacy ? 'pre-deferred-policy' : 'current-policy', alias });
-  if (legacy) facts.reconciliationReasons.push({ code: 'pre-deferred-policy', path: label });
-  if (alias) facts.reconciliationReasons.push({ code: 'policy-alias', path: `${at}.mode` });
-  if (historical && !legacy) facts.unsupported.push({ code: 'unsupported-shape', path: label, message: 'No proven pre-identity producer supplied deferred policy fields' });
-  if (historical && (mode === 'final-only' || mode === 'every-step')) facts.unsupported.push({ code: 'unsupported-shape', path: `${at}.mode`, message: 'No proven pre-identity producer supplied the renamed policy vocabulary' });
   if (mode === 'adaptive') facts.unsupported.push({ code: 'unsupported-policy', path: `${at}.mode`, message: 'Adaptive policy requires explicit reconciliation' });
 }
 /** @param {unknown} value @param {string} label */
@@ -378,25 +355,22 @@ function checkDetachedEffect(value, label) {
   if (pid !== null) invariant(typeof pid === 'number' && Number.isInteger(pid), `${label}.pid must be an integer or null`, `${label}.pid`);
   integer(required(effect, 'detectedAt', label), `${label}.detectedAt`);
 }
-/** @param {JSONObject} record @param {string} label @param {'telemetry' | 'probe'} kind @param {ProfileFacts} facts @returns {boolean} */
-function diagnosticHistorical(record, label, kind, facts) {
+/** @param {JSONObject} record @param {string} label @param {'telemetry' | 'probe'} kind @returns {boolean} */
+function diagnosticHistorical(record, label, kind) {
   const markers = kind === 'telemetry' ? ['ownerSession', 'ownerEpoch', 'workerGeneration'] : ['ownerEpoch', 'workerGeneration'];
   const present = markers.filter(key => Object.hasOwn(record, key));
   invariant(present.length === 0 || present.length === markers.length, `${label} has partial diagnostic identity`, label, 'mixed-identity');
-  const historical = present.length === 0;
-  facts.diagnosticLayouts.push({ path: label, profile: historical ? 'historical' : 'current', record: kind });
-  facts.reconciliationReasons.push({ code: 'diagnostic-provenance-unchecked', path: label });
-  return historical;
+  return present.length === 0;
 }
 /** @param {unknown} value @param {string} label */
 function checkSpeed(value, label) {
   const speed = object(value, label); keys(speed, ['tokens', 'seconds'], label);
   for (const key of ['tokens', 'seconds']) invariant(typeof speed[key] === 'number' && Number.isFinite(speed[key]) && speed[key] > 0, `${label}.${key} must be a positive finite number`, `${label}.${key}`);
 }
-/** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @param {ProfileFacts} facts */
-function checkTelemetry(value, label, workerId, ownerSession, facts) {
+/** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession */
+function checkTelemetry(value, label, workerId, ownerSession) {
   if (value === null) return;
-  const record = object(value, label), historical = diagnosticHistorical(record, label, 'telemetry', facts);
+  const record = object(value, label), historical = diagnosticHistorical(record, label, 'telemetry');
   keys(record, ['version', 'nonce', 'workerId', 'pid', 'sessionId', 'context', 'currentTool', 'lastUsage', 'compacting', 'detachedEffect', 'phase', 'model', 'at', ...(historical ? [] : ['ownerSession', 'ownerEpoch', 'workerGeneration', 'warming', 'speed', 'currentTarget'])], label);
   if (!historical && Object.hasOwn(record, 'speed') && record.speed !== null) checkSpeed(record.speed, `${label}.speed`);
   if (!historical && Object.hasOwn(record, 'currentTarget') && record.currentTarget !== null) text(record.currentTarget, `${label}.currentTarget`, 200);
@@ -420,7 +394,7 @@ function assertCurrentTelemetry(value, label) {
   invariant(['ownerSession', 'ownerEpoch', 'workerGeneration'].every(key => Object.hasOwn(record, key)), `${label} requires complete current diagnostic identity`, label, 'mixed-identity');
   const workerId = id(required(record, 'workerId', label), `${label}.workerId`);
   const ownerSession = text(required(record, 'ownerSession', label), `${label}.ownerSession`, 10000);
-  checkTelemetry(value, label, workerId, ownerSession, facts);
+  checkTelemetry(value, label, workerId, ownerSession);
   for (const key of ['ownerSession', 'nonce', 'sessionId']) invariant(text(record[key], `${label}.${key}`, 10000).length > 0, `${label}.${key} must not be empty`, `${label}.${key}`);
   rejectUnsupported(facts);
 }
@@ -479,10 +453,10 @@ function checkNativeSettings(value, label) {
   bool(required(native, 'prewalkDisabled', label), `${label}.prewalkDisabled`); bool(required(native, 'prewalkConfigured', label), `${label}.prewalkConfigured`);
   if (Object.hasOwn(native, 'prewalkAutoArm')) bool(native.prewalkAutoArm, `${label}.prewalkAutoArm`); // optional: absent in probes recorded before it existed
 }
-/** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @param {ProfileFacts} facts */
-function checkProbe(value, label, workerId, ownerSession, facts) {
+/** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession */
+function checkProbe(value, label, workerId, ownerSession) {
   if (value === null) return;
-  const probe = object(value, label), historical = diagnosticHistorical(probe, label, 'probe', facts);
+  const probe = object(value, label), historical = diagnosticHistorical(probe, label, 'probe');
   keys(probe, ['protocol', 'pairVersion', 'pid', 'cwd', 'trusted', 'sessionId', 'sessionFile', 'meshRoot', 'model', 'thinkingLevel', 'capabilities', 'versions', 'sourcePaths', 'context', 'native', 'checkedAt', 'scope', 'nonce', 'workerId', 'ownerSession', ...(historical ? [] : ['ownerEpoch', 'workerGeneration'])], label);
   knownVersion(required(probe, 'protocol', label), `${label}.protocol`, 1); integer(required(probe, 'pid', label), `${label}.pid`, 1);
   for (const key of ['pairVersion', 'cwd', 'sessionId', 'scope', 'nonce']) text(required(probe, key, label), `${label}.${key}`, 10000);
@@ -510,15 +484,14 @@ function checkProbe(value, label, workerId, ownerSession, facts) {
  * @param {string} workerId
  * @param {Set<string>} stepIds
  * @param {boolean} current
- * @param {boolean} historical
  */
-function validateTaskReportIdentity(report, label, task, workerId, stepIds, current, historical) {
+function validateTaskReportIdentity(report, label, task, workerId, stepIds, current) {
   const payload = object(report.payload, `${label}.payload`);
   reference(payload.taskId === task.id, `${label}.payload.taskId`, 'Report targets a different task');
   reference(report.workerId === workerId, `${label}.workerId`, 'Report targets a different worker');
   reference(typeof payload.stepId === 'string' && stepIds.has(payload.stepId), `${label}.payload.stepId`, 'Report targets a step outside the task plan');
-  if (current || !historical && report.attemptId === task.attemptId) {
-    for (const key of historical ? ['planRevision', 'leaseId'] : ['attemptId', 'attemptNumber', 'planRevision', 'leaseId']) reference(report[key] === task[key], `${label}.${key}`, 'Report contradicts its task attempt');
+  if (current || report.attemptId === task.attemptId) {
+    for (const key of ['attemptId', 'attemptNumber', 'planRevision', 'leaseId']) reference(report[key] === task[key], `${label}.${key}`, 'Report contradicts its task attempt');
   }
   if (!current) return; // Resolved history retains its original producer tuple.
   const steps = array(task.steps, 'task.steps'), stepIndex = integer(task.stepIndex, 'task.stepIndex', 0, steps.length - 1), step = object(steps[stepIndex], 'task.steps current');
@@ -527,15 +500,13 @@ function validateTaskReportIdentity(report, label, task, workerId, stepIds, curr
   reference(!finalOnly || payload.kind !== 'checkpoint', `${label}.payload.kind`, 'Final-only policy does not accept intermediate checkpoints');
   reference(payload.kind !== 'final_review' || finalOnly || stepIndex === steps.length - 1, `${label}.payload.kind`, 'Premature final review');
 }
-/** @param {unknown} value @param {string} label @param {string} workerId @param {boolean} historical @param {ProfileFacts} facts */
-function checkStoredTask(value, label, workerId, historical, facts) {
+/** @param {unknown} value @param {string} label @param {string} workerId @param {ProfileFacts} facts */
+function checkStoredTask(value, label, workerId, facts) {
   const task = object(value, label);
-  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', 'pausedBy', 'mainRecoveries', ...(historical ? [] : ['workerId', 'attemptId', 'attemptNumber'])], label);
+  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', 'pausedBy', 'mainRecoveries', 'workerId', 'attemptId', 'attemptNumber'], label);
   for (const key of ['id', 'requestId', 'leaseId']) id(required(task, key, label), `${label}.${key}`);
-  if (!historical) {
-    reference(id(required(task, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Task targets a different worker');
-    id(required(task, 'attemptId', label), `${label}.attemptId`); integer(required(task, 'attemptNumber', label), `${label}.attemptNumber`, 1);
-  }
+  reference(id(required(task, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Task targets a different worker');
+  id(required(task, 'attemptId', label), `${label}.attemptId`); integer(required(task, 'attemptNumber', label), `${label}.attemptNumber`, 1);
   text(required(task, 'objective', label), `${label}.objective`, 6000); text(required(task, 'context', label), `${label}.context`, 24000);
   array(required(task, 'constraints', label), `${label}.constraints`).forEach((entry, index) => text(entry, `${label}.constraints[${index}]`, 2000));
   const steps = array(required(task, 'steps', label), `${label}.steps`);
@@ -545,28 +516,27 @@ function checkStoredTask(value, label, workerId, historical, facts) {
   steps.forEach((entry, index) => { const at = `${label}.steps[${index}]`, step = validateStep(entry, at); reference(!stepIds.has(step.id), `${at}.id`, 'Duplicate step identity'); stepIds.add(step.id); });
   integer(required(task, 'stepIndex', label), `${label}.stepIndex`, 0, steps.length - 1); integer(required(task, 'planRevision', label), `${label}.planRevision`, 1);
   const status = choice(required(task, 'status', label), TASK_STATUSES, `${label}.status`);
-  checkStoredPolicy(task, label, historical, facts); validateVerification(required(task, 'verification', label), `${label}.verification`);
+  checkStoredPolicy(task, label, facts); validateVerification(required(task, 'verification', label), `${label}.verification`);
   for (const key of ['startedAt', 'updatedAt', 'revisions', 'turns']) integer(required(task, key, label), `${label}.${key}`);
   text(required(task, 'baseSnapshotRef', label), `${label}.baseSnapshotRef`, 10000); validateUsageTotals(required(task, 'usage', label), `${label}.usage`);
   const decisions = object(required(task, 'decisions', label), `${label}.decisions`);
   for (const [reportId, decision] of Object.entries(decisions)) {
     const at = `${label}.decisions.${id(reportId, `${label}.decisions key`)}`;
-    if (historical) assertHistoricalDecision(decision, at); else validateStoredDecision(decision, at);
+    validateStoredDecision(decision, at);
   }
   for (const key of ['pendingReport', 'report']) {
     const value = required(task, key, label); if (value === null) continue;
     const at = `${label}.${key}`;
-    checkReport(value, at, historical, key === 'report'); const report = object(value, at), reportId = id(report.reportId, `${at}.reportId`);
+    checkReport(value, at, key === 'report'); const report = object(value, at), reportId = id(report.reportId, `${at}.reportId`);
     const waiting = ['question', 'blocked', 'review'].includes(status);
     const suspended = status === 'paused' || status === 'interrupted';
-    const sameAttempt = historical ? report.leaseId === task.leaseId && report.planRevision === task.planRevision : report.attemptId === task.attemptId;
+    const sameAttempt = report.attemptId === task.attemptId;
     const decided = Object.hasOwn(decisions, reportId), current = key === 'pendingReport' || !decided && (waiting || suspended && sameAttempt);
-    validateTaskReportIdentity(report, at, task, workerId, stepIds, current, historical);
-    if (!decided) facts.reconciliationReasons.push({ code: current ? 'report-obligation-unresolved' : 'report-resolution-ambiguous', path: at });
+    validateTaskReportIdentity(report, at, task, workerId, stepIds, current);
     if (decided) {
       const decision = object(decisions[reportId], `${label}.decisions.${reportId}`), payload = object(report.payload, `${at}.payload`);
       if (decision.action !== 'cancel') {
-        if (!historical) reference(decision.attemptId === report.attemptId, `${label}.decisions.${reportId}.attemptId`, 'Decision targets a different retained report attempt');
+        reference(decision.attemptId === report.attemptId, `${label}.decisions.${reportId}.attemptId`, 'Decision targets a different retained report attempt');
         reference(decision.action !== 'answer' || payload.kind === 'question', `${label}.decisions.${reportId}.action`, 'Only a question accepts an answer');
         if (decision.action === 'approve') {
           reference(key === 'report' && (payload.kind === 'checkpoint' || payload.kind === 'final_review'), `${label}.decisions.${reportId}.action`, 'Only a finalized review accepts approval');
@@ -592,19 +562,18 @@ function checkStoredTask(value, label, workerId, historical, facts) {
  * @param {string} label
  * @param {string} workerId
  * @param {string} ownerSession
- * @param {boolean} historical
  * @param {ProfileFacts} facts
  */
-function checkWorkerRecord(value, label, workerId, ownerSession, historical, facts) {
+function checkWorkerRecord(value, label, workerId, ownerSession, facts) {
   const record = object(value, label);
-  keys(record, ['id', 'cwd', 'repoRoot', 'status', 'sessionId', 'sessionFile', 'bound', 'task', 'history', 'usage', 'error', 'diagnosticFile', 'lastObservation', 'lastExchange', 'staleReports', 'probe', 'pid', 'spawnedAt', ...(historical ? [] : ['workerGeneration'])], label);
+  keys(record, ['id', 'cwd', 'repoRoot', 'status', 'sessionId', 'sessionFile', 'bound', 'task', 'history', 'usage', 'error', 'diagnosticFile', 'lastObservation', 'lastExchange', 'staleReports', 'probe', 'pid', 'spawnedAt', 'workerGeneration'], label);
   reference(id(required(record, 'id', label), `${label}.id`) === workerId, `${label}.id`, 'Worker identity differs from its map key');
   for (const key of ['cwd', 'repoRoot']) text(required(record, key, label), `${label}.${key}`, 10000);
   choice(required(record, 'status', label), WORKER_STATUSES, `${label}.status`);
   for (const key of ['sessionId', 'sessionFile']) nullableText(required(record, key, label), `${label}.${key}`);
-  if (!historical) integer(required(record, 'workerGeneration', label), `${label}.workerGeneration`);
+  integer(required(record, 'workerGeneration', label), `${label}.workerGeneration`);
   const bound = validateWorkerSpec(required(record, 'bound', label), `${label}.bound`); reference(bound.id === workerId, `${label}.bound.id`, 'Bound identity differs from its worker');
-  const task = required(record, 'task', label); if (task !== null) checkStoredTask(task, `${label}.task`, workerId, historical, facts);
+  const task = required(record, 'task', label); if (task !== null) checkStoredTask(task, `${label}.task`, workerId, facts);
   const history = array(required(record, 'history', label), `${label}.history`); invariant(history.length <= 40, `${label}.history is too large`, `${label}.history`);
   history.forEach((entry, index) => {
     const at = `${label}.history[${index}]`, item = object(entry, at); keys(item, ['id', 'status', 'file'], at);
@@ -615,8 +584,8 @@ function checkWorkerRecord(value, label, workerId, ownerSession, historical, fac
   if (Object.hasOwn(record, 'diagnosticFile')) text(record.diagnosticFile, `${label}.diagnosticFile`, 10000);
   if (Object.hasOwn(record, 'pid')) integer(record.pid, `${label}.pid`, 1);
   if (Object.hasOwn(record, 'spawnedAt')) integer(record.spawnedAt, `${label}.spawnedAt`);
-  if (Object.hasOwn(record, 'lastObservation')) checkTelemetry(record.lastObservation, `${label}.lastObservation`, workerId, ownerSession, facts);
-  if (Object.hasOwn(record, 'probe')) checkProbe(record.probe, `${label}.probe`, workerId, ownerSession, facts);
+  if (Object.hasOwn(record, 'lastObservation')) checkTelemetry(record.lastObservation, `${label}.lastObservation`, workerId, ownerSession);
+  if (Object.hasOwn(record, 'probe')) checkProbe(record.probe, `${label}.probe`, workerId, ownerSession);
   if (Object.hasOwn(record, 'lastExchange') && record.lastExchange !== null) {
     const at = `${label}.lastExchange`, exchange = object(record.lastExchange, at); keys(exchange, ['direction', 'kind', 'at'], at);
     choice(required(exchange, 'direction', at), ['main→worker', 'worker→main'], `${at}.direction`); text(required(exchange, 'kind', at), `${at}.kind`, 10000); integer(required(exchange, 'at', at), `${at}.at`);
@@ -681,13 +650,13 @@ function checkRequest(value, label) {
   for (const key of ['taskId', 'workerId']) id(required(request, key, label), `${label}.${key}`);
   integer(required(request, 'acceptedAt', label), `${label}.acceptedAt`); text(required(request, 'status', label), `${label}.status`, 80);
 }
-/** @param {unknown} value @param {string} label @param {string} reportId @param {boolean} historical */
-function checkNotice(value, label, reportId, historical) {
+/** @param {unknown} value @param {string} label @param {string} reportId */
+function checkNotice(value, label, reportId) {
   const notice = object(value, label);
-  keys(notice, ['reportId', 'workerId', 'taskId', 'status', 'createdAt', 'deliveredAt', 'error', 'offeredAt', 'channel', 'observedAt', 'observedBranch', 'autoAttempts', ...(historical ? [] : ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'])], label);
+  keys(notice, ['reportId', 'workerId', 'taskId', 'status', 'createdAt', 'deliveredAt', 'error', 'offeredAt', 'channel', 'observedAt', 'observedBranch', 'autoAttempts', 'ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'], label);
   reference(id(required(notice, 'reportId', label), `${label}.reportId`) === reportId, `${label}.reportId`, 'Notice identity differs from its map key');
-  for (const key of ['workerId', 'taskId', ...(historical ? [] : ['attemptId', 'deliveryOperationId'])]) id(required(notice, key, label), `${label}.${key}`);
-  if (!historical) for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(notice, key, label), `${label}.${key}`, 1);
+  for (const key of ['workerId', 'taskId', 'attemptId', 'deliveryOperationId']) id(required(notice, key, label), `${label}.${key}`);
+  for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(notice, key, label), `${label}.${key}`, 1);
   choice(required(notice, 'status', label), ['pending', 'delivery_pending', 'offered', 'delivered', 'delivery_failed', 'resolved', 'superseded'], `${label}.status`);
   integer(required(notice, 'createdAt', label), `${label}.createdAt`);
   if (Object.hasOwn(notice, 'deliveredAt')) integer(notice.deliveredAt, `${label}.deliveredAt`);
@@ -711,8 +680,8 @@ function checkMainPhase(value, label) {
   if (Object.hasOwn(phase, 'armed')) bool(phase.armed, `${label}.armed`);
   if (Object.hasOwn(phase, 'activity')) integer(phase.activity, `${label}.activity`, 0);
 }
-/** @param {JSONObject} state @param {boolean} historical */
-function checkRetainedReferences(state, historical) {
+/** @param {JSONObject} state */
+function checkRetainedReferences(state) {
   /** @type {Map<string, {workerId: string, task?: JSONObject}>} */
   const tasks = new Map();
   /** @type {Map<string, {workerId: string, task: JSONObject, report: JSONObject}>} */
@@ -727,7 +696,6 @@ function checkRetainedReferences(state, historical) {
   const attempts = new Map();
   /** @param {JSONObject} record @param {string} at @param {string} taskId @param {string} workerId */
   function retainAttempt(record, at, taskId, workerId) {
-    if (historical) return;
     const attemptId = id(record.attemptId, `${at}.attemptId`), tuple = { workerId, taskId,
       attemptNumber: integer(record.attemptNumber, `${at}.attemptNumber`, 1), planRevision: integer(record.planRevision, `${at}.planRevision`, 1), leaseId: token(record.leaseId, `${at}.leaseId`) };
     const previous = attempts.get(attemptId);
@@ -780,12 +748,12 @@ function checkRetainedReferences(state, historical) {
     const retained = reports.get(reportId);
     if (retained) {
       reference(notice.workerId === retained.workerId && notice.taskId === retained.task.id, at, 'Notice contradicts its retained report');
-      if (!historical) for (const key of ['ownerEpoch', 'workerGeneration', 'attemptId']) reference(notice[key] === retained.report[key], `${at}.${key}`, 'Notice contradicts its retained report producer');
+      for (const key of ['ownerEpoch', 'workerGeneration', 'attemptId']) reference(notice[key] === retained.report[key], `${at}.${key}`, 'Notice contradicts its retained report producer');
     }
     const decided = decisions.get(reportId);
     if (decided) {
       reference(notice.workerId === decided.workerId && notice.taskId === decided.task.id, at, 'Notice contradicts its retained decision');
-      if (!historical && decided.decision.action !== 'cancel') reference(notice.attemptId === decided.decision.attemptId, `${at}.attemptId`, 'Notice contradicts its retained decision attempt');
+      if (decided.decision.action !== 'cancel') reference(notice.attemptId === decided.decision.attemptId, `${at}.attemptId`, 'Notice contradicts its retained decision attempt');
     }
   }
   for (const [reportId, decided] of decisions) {
@@ -793,58 +761,33 @@ function checkRetainedReferences(state, historical) {
     reference(decided.workerId === retained.workerId && decided.task.id === retained.task.id, `state.workers.${decided.workerId}.task.decisions.${reportId}`, 'Decision contradicts retained report ownership');
   }
 }
-/** @param {unknown} value @param {boolean} historical @param {ProfileFacts} facts */
-function checkStoredStateProfile(value, historical, facts) {
-  const state = object(value, 'state'); keys(state, ['version', 'ownerSession', 'cwd', 'workers', 'requests', 'notices', 'mainPhase', 'branch', ...(historical ? [] : ['ownerEpoch'])], 'state');
+/** @param {unknown} value @param {ProfileFacts} facts @returns {asserts value is StoredStateV1} */
+function checkStoredStateProfile(value, facts) {
+  const state = object(value, 'state'); keys(state, ['version', 'ownerSession', 'cwd', 'workers', 'requests', 'notices', 'mainPhase', 'branch', 'ownerEpoch'], 'state');
   integer(required(state, 'version', 'state'), 'state.version', STATE_VERSION, STATE_VERSION);
   const ownerSession = text(required(state, 'ownerSession', 'state'), 'state.ownerSession', 10000); text(required(state, 'cwd', 'state'), 'state.cwd', 10000);
-  if (!historical) integer(required(state, 'ownerEpoch', 'state'), 'state.ownerEpoch');
+  integer(required(state, 'ownerEpoch', 'state'), 'state.ownerEpoch');
   const workers = object(required(state, 'workers', 'state'), 'state.workers');
-  for (const [workerId, record] of Object.entries(workers)) checkWorkerRecord(record, `state.workers.${workerId}`, id(workerId, 'state.workers key'), ownerSession, historical, facts);
+  for (const [workerId, record] of Object.entries(workers)) checkWorkerRecord(record, `state.workers.${workerId}`, id(workerId, 'state.workers key'), ownerSession, facts);
   const requests = object(required(state, 'requests', 'state'), 'state.requests');
   for (const [requestId, request] of Object.entries(requests)) checkRequest(request, `state.requests.${id(requestId, 'state.requests key')}`);
   const notices = object(required(state, 'notices', 'state'), 'state.notices');
-  for (const [reportId, notice] of Object.entries(notices)) checkNotice(notice, `state.notices.${reportId}`, id(reportId, 'state.notices key'), historical);
+  for (const [reportId, notice] of Object.entries(notices)) checkNotice(notice, `state.notices.${reportId}`, id(reportId, 'state.notices key'));
   if (Object.hasOwn(state, 'mainPhase')) checkMainPhase(state.mainPhase, 'state.mainPhase');
   if (Object.hasOwn(state, 'branch')) integer(state.branch, 'state.branch', 0);
-  checkRetainedReferences(state, historical);
-  if (historical) for (const diagnostic of facts.diagnosticLayouts) {
-    if (diagnostic.profile === 'current') facts.unsupported.push({ code: 'unsupported-shape', path: diagnostic.path, message: 'No proven pre-identity producer supplied current diagnostic identities' });
-  }
+  checkRetainedReferences(state);
   rejectUnsupported(facts);
 }
-/** @param {unknown} value @param {ProfileFacts} facts @returns {asserts value is StoredStateV1} */
-function assertStoredStateProfile(value, facts) { checkStoredStateProfile(value, false, facts); }
-/** @param {unknown} value @param {ProfileFacts} facts @returns {asserts value is HistoricalStateV1} */
-function assertHistoricalStateProfile(value, facts) { checkStoredStateProfile(value, true, facts); }
 /** @param {unknown} value @param {{ownerSession: string, cwd: string}} expected @returns {StoredStateV1} */
 export function validateStoredState(value, expected) {
   assertInertJSON(value, 'state');
   const state = object(value, 'state');
   invariant(!selectIdentityLayout(state), 'Stored Pair state requires identity-bearing records', 'state.ownerEpoch', 'missing-required-field');
-  assertStoredStateProfile(value, profileFacts());
+  checkStoredStateProfile(value, profileFacts());
   reference(value.ownerSession === expected.ownerSession, 'state.ownerSession', 'Stored Pair state belongs to a different Main session');
   reference(value.cwd === expected.cwd, 'state.cwd', 'Stored Pair state belongs to a different workspace');
   return value;
 }
-/** @param {unknown} value @returns {StoredStateClassification} */
-export function classifyStoredState(value) {
-  try {
-    assertInertJSON(value, 'state');
-    const state = object(value, 'state'), historical = selectIdentityLayout(state), facts = profileFacts();
-    if (historical) assertHistoricalStateProfile(value, facts); else assertStoredStateProfile(value, facts);
-    facts.reconciliationReasons.unshift({ code: 'binding-unchecked', path: 'state' }, { code: historical ? 'missing-identity' : 'identity-provenance-unchecked', path: 'state' }, { code: 'accounting-completeness-unchecked', path: 'state.workers' });
-    return { kind: 'recognized', nonAuthorizing: true, original: value, identityLayout: historical ? 'pre-identity' : 'identity-bearing',
-      taskLayouts: facts.taskLayouts, diagnosticLayouts: facts.diagnosticLayouts,
-      storedBinding: { ownerSession: text(state.ownerSession, 'state.ownerSession', 10000), cwd: text(state.cwd, 'state.cwd', 10000) },
-      bindingStatus: 'unchecked', reconciliationReasons: facts.reconciliationReasons };
-  } catch (error) {
-    if (error instanceof StoredValidationError) return { kind: 'rejected', nonAuthorizing: true, original: value, category: error.category, issue: { code: error.code, path: error.path, message: error.message } };
-    if (error instanceof UsageValidationError) return { kind: 'rejected', nonAuthorizing: true, original: value, category: 'corrupt', issue: { code: error.code, path: error.path, message: error.message } };
-    throw error;
-  }
-}
-
 /** @param {unknown} value @param {string} [label] @returns {asserts value is ReportPayload} */
 function assertReportPayload(value, label = 'report payload') {
   const payload = object(value, label); keys(payload, ['taskId', 'stepId', 'kind', 'summary', 'question', 'decisions', 'changedFiles', 'checks', 'stepComplete'], label);
@@ -861,15 +804,15 @@ function assertReportPayload(value, label = 'report payload') {
 /** @param {unknown} value @param {string} [label] @returns {ReportPayload} */
 export function validateReportPayload(value, label = 'report payload') { assertReportPayload(value, label); return value; }
 
-/** @param {unknown} value @param {string} label @param {boolean} historical @param {boolean} finalized */
-function checkReport(value, label, historical, finalized) {
-  const report = object(value, label), envelopeKeys = historical ? REPORT_KEYS.filter(key => !['ownerEpoch', 'workerGeneration', 'attemptId', 'attemptNumber'].includes(key)) : REPORT_KEYS;
-  keys(report, finalized ? [...envelopeKeys, 'checkpoint', 'snapshotRef', 'inspectedAt'] : envelopeKeys, label);
+/** @param {unknown} value @param {string} label @param {boolean} finalized */
+function checkReport(value, label, finalized) {
+  const report = object(value, label);
+  keys(report, finalized ? [...REPORT_KEYS, 'checkpoint', 'snapshotRef', 'inspectedAt'] : REPORT_KEYS, label);
   knownVersion(required(report, 'version', label), `${label}.version`, WIRE_VERSION);
-  for (const key of historical ? ['reportId', 'workerId'] : ['reportId', 'workerId', 'attemptId']) id(required(report, key, label), `${label}.${key}`);
+  for (const key of ['reportId', 'workerId', 'attemptId']) id(required(report, key, label), `${label}.${key}`);
   token(required(report, 'leaseId', label), `${label}.leaseId`);
   for (const key of ['ownerSession', 'nonce', 'sessionId']) text(required(report, key, label), `${label}.${key}`, 10000);
-  for (const key of historical ? ['planRevision'] : ['ownerEpoch', 'workerGeneration', 'attemptNumber', 'planRevision']) integer(required(report, key, label), `${label}.${key}`, 1);
+  for (const key of ['ownerEpoch', 'workerGeneration', 'attemptNumber', 'planRevision']) integer(required(report, key, label), `${label}.${key}`, 1);
   const payload = validateReportPayload(required(report, 'payload', label), `${label}.payload`), payloadHash = hash(required(report, 'payloadHash', label), `${label}.payloadHash`);
   invariant(payloadHash === payloadDigest(payload), `${label}.payloadHash does not match payload`, `${label}.payloadHash`, 'hash-mismatch');
   integer(required(report, 'createdAt', label), `${label}.createdAt`);
@@ -893,7 +836,7 @@ function checkReport(value, label, historical, finalized) {
   if (Object.hasOwn(report, 'inspectedAt')) integer(report.inspectedAt, `${label}.inspectedAt`);
 }
 /** @param {unknown} value @param {string} [label] @returns {asserts value is ReportEnvelope} */
-function assertReportEnvelope(value, label = 'report') { checkReport(value, label, false, false); }
+function assertReportEnvelope(value, label = 'report') { checkReport(value, label, false); }
 /** @param {unknown} value @param {string} [label] @returns {ReportEnvelope} */
 export function validateReportEnvelope(value, label = 'report') { assertReportEnvelope(value, label); return value; }
 
