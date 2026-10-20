@@ -44,9 +44,12 @@ cd pi-fabric-pair
 pi install "$PWD"
 ```
 
-The extension runs directly from source. Do not run `npm install` in this checkout:
-Pi would then load Pair's development copies of Pi's own packages instead of the
-running Pi's. Use a separate clone for the static checks. Open Pi in your implementation project's
+The extension runs directly from source and needs no `npm install`. Pi loads the
+two Pi packages Pair imports (`@earendil-works/pi-coding-agent` and
+`@earendil-works/pi-tui`) from the running Pi, never from this checkout (checked
+against the extension loader of Pi 1.1 through 1.3), so the development
+dependencies that `npm install` adds for the tests and static checks do not change
+what Pair runs against. Open Pi in your implementation project's
 Git working tree. Keep Pair state outside that tree; the default
 `~/.pi/agent` location does this.
 
@@ -125,19 +128,28 @@ instruction.
 | `/pair status` | See activity, progress, and observed cache usage. |
 | `/pair reload` | Reload saved Pair settings while Main stays open. |
 | `/pair restart worker` | Reload settings and restart only the worker, keeping its conversation. |
+| `/pair start worker` | Start the worker and continue its conversation. |
+| `/pair pause worker` | Pause the task and hold the worker. |
+| `/pair resume worker` | Resume a paused or interrupted task. |
 | `/pair report` | Read the current report as a card: Pair's own checks first, then the worker's claims (read-only; Main still inspects). |
 | `/pair diff` | Scroll the checkpoint diff; `[`/`]` jump between files, `/` searches. |
+| `/pair transcript worker` | Follow the worker transcript; `o` switches between one line per tool call and the full output. |
 | `/pair inbox` | Inspect retained reports. |
 | `/pair yield` | Explicitly send retained, unacknowledged reports to Main. |
 | `/pair reconcile` | After a Main crash, prove the old worker process exited so the worker can be used again. |
 | `/pair cancel worker` | Cancel the task and keep the conversation. |
 | `/pair stop worker` | Stop the worker process and retain its history. |
+| `/pair reset-worker worker` | Start the next task in a new conversation (old session files are archived, not deleted). |
+| `/pair indicator mode` | Choose the footer badge and live line: `minimal`, `compact`, `board` or `off`. |
+| `/pair doctor` | Diagnose Pair, Pi and Fabric setup. |
+| `/pair import-backup global\|project file` | Import retained Pair V1 limits from a `.v1.bak` file. |
 
 Restart keeps Main's model and session open. Interrupted work waits for explicit
 resume; staged model changes require finishing or cancelling the current task.
 Invalid configuration leaves the last valid settings in use.
 
-Cancel and stop do not undo file changes. Normal Main shutdown also stops owned
+Pause and cancel ask first, from a command, the menu or the dashboard; stop asks
+while a task is running. None of them undoes file changes. Normal Main shutdown also stops owned
 workers; `/new`, `/resume` or a fork asks first while the worker is running.
 
 `/pair` completes its own subcommands, configured worker IDs (second word of
@@ -304,7 +316,7 @@ stay calm because Main handles them. Choose what sits above the editor with
 | `minimal` (default) | The badge plus one live line with a progress bar, the step, activity, elapsed time, step revisions and cost. |
 | `compact` | The badge only. |
 | `board` | The badge plus a plan board: one row per step, with finished steps collapsed when the plan is long. |
-| `off` | Nothing. Commands still work. |
+| `off` | Nothing. Commands and the attention cue still work. |
 
 ```
 ■■■▣▣□□□□□ 2/4 · ▶ Wire retries into fetch client · editing client.js · 3m12s · rev 1/3 · $0.14/$2.00
@@ -354,24 +366,27 @@ Main and Worker keep separate conversations. Include relevant constraints in
 each work order; the worker does not inherit Main's private chat. Native Pi/Fabric
 manages compaction, while Pair retains task state separately.
 
-The status line's **cache** reading (for example `cache M 99% W 100%`) shows the
-share of measured input read from provider cache on each role's last request. The hero artwork's 99-100% values are examples;
-actual results vary.
+`/pair status` shows each role's **cache** reading (for example `last read 99.2%`):
+the share of measured input read from provider cache on that role's last request.
+The live line adds the worker's reading (`cache 31%`) only when it falls below 50%.
+The hero artwork's 99-100% values are examples; actual results vary.
 
-Both roles can use Pi's native cache warmer. With `"cacheWarming": "idle"` in
-Pi's global settings, Pair keeps Main's cache warm while the worker works and the
-worker's cache warm while its report waits for Main, using Pi's own savings rule.
-This works for every model with a priced prompt cache: Pi warms only models it
-knows a cache lifetime for (built in: Anthropic only), so Pair gives any other
-model whose cache reads cost less than its input a 4-minute lifetime before it
-runs, and never changes one Pi already knows. A model with no cache-read price is
-never warmed, because each refresh would bill the whole prompt and save nothing. Pi stops 30 minutes after a
-session's last request. Pair never warms a Codex model, because Pi cannot cap that
-refresh; `/pair doctor` says when Main or the worker uses one. Fabric's `cache.hold` (Fabric 0.97.0 or newer, on a Pi with scoped
-warming) is a separate paid opt-in for Main. Pair holds no leases and never changes
-Pi's settings. Pair's inference budgets exclude Main usage and warming. Pi (through
-1.3.0) does not yet send these refreshes in a Pair session (its warmer stops once
-Pair's messages are in context).
+Native warming does nothing in a Pair session yet: Pi (through 1.3.0) stops its
+warmer once Pair's messages are in context, so it sends no refreshes for either
+role. Pair's support takes effect on a Pi that sends them.
+There, with `"cacheWarming": "idle"` in Pi's global settings, Pair keeps Main's
+cache warm while the worker works and the worker's cache warm while its report
+waits for Main, using Pi's own savings rule. Pi warms only models it knows a cache
+lifetime for (built in: Anthropic only), so Pair gives any other model whose cache
+reads cost less than its input a 4-minute lifetime before it runs, and never
+changes one Pi already knows. A model with no cache-read price is never warmed,
+because each refresh would bill the whole prompt and save nothing. Pair never warms
+a Codex model, or an OpenAI Responses model used through a ChatGPT sign-in,
+because Pi cannot cap that refresh; `/pair doctor` says when Main or the worker
+uses one. Pi stops 30 minutes after a session's last request. Fabric's
+`cache.hold` (Fabric 0.97.0 or newer, on a Pi with scoped warming) is a separate
+paid opt-in for Main. Pair holds no leases and never changes Pi's settings. Pair's
+inference budgets exclude Main usage and warming.
 
 ## More details
 
@@ -380,14 +395,17 @@ boundary. Unattended operation, automatic crash recovery, and multiple writers
 are outside this MVP.
 
 `npm test` runs the repository's own suites (plain `node --test` over
-`test/**/*.test.js`; nothing outside `test/` is collected). They cover the parts
-that are pure functions of data: the task projection the UI reads (including
-tasks saved before newer fields existed), the badge, live line, board, dashboard,
-transcript and chat cards rendered from fixed summaries, the dashboard and
-transcript views driven by keypresses against fake controllers, the attention
-cue, and a harness smoke test that loads `src/ui.js` with Pi's TUI packages.
-They do not drive a live session, so still
-verify behaviour with the static checks (`npm run typecheck`, `npm run pack:check`)
-and manual review.
+`test/**/*.test.js`; nothing outside `test/` is collected) offline, in temporary
+directories, with fake Pi RPC hosts in place of real workers. The UI suites cover
+the parts that are pure functions of data: the task projection the UI reads
+(including tasks saved before newer fields existed), the badge, live line, board,
+dashboard, transcript and chat cards rendered from fixed summaries, the dashboard
+and transcript views driven by keypresses against fake controllers, the attention
+cue, and a harness smoke test that loads `src/ui.js` with Pi's TUI packages. The
+controller, worker and runtime suites cover the handoff fences, report delivery
+and recovery, verification and evidence, worker restarts, startup checks, RPC
+framing and settings ([test/README.md](test/README.md)). They do not drive a live
+session or a real model, so still run the static checks (`npm run typecheck`,
+`npm run pack:check`) and review behaviour by hand.
 
 [Example config](fabric-pair.example.json) | [MIT license](LICENSE)

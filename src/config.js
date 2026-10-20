@@ -29,7 +29,7 @@ export function isIndicator(value) { return INDICATORS.some(mode => mode === val
 const CONFIG_VERSION = 2;
 
 /** @type {Readonly<PairConfig>} */
-const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
+export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   version: CONFIG_VERSION,
   enabled: false,
   autoStart: true,
@@ -161,7 +161,7 @@ function assertConfigLayer(raw) {
 }
 
 /** @param {unknown} raw @returns {ConfigLayer} */
-function validateConfigLayer(raw) {
+export function validateConfigLayer(raw) {
   assertConfigLayer(raw);
   const layer = structuredClone(raw);
   for (const key of DEPRECATED_KEYS) delete /** @type {Record<string, unknown>} */ (layer)[key];

@@ -270,22 +270,24 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   function renderNow(summary) {
     if (!ctxRef || ctxRef.mode !== 'tui') return;
     const ui = ctxRef.ui, current = controller, mode = config?.indicator ?? 'minimal';
-    if (!current || mode === 'off') {
-      snapshot = null; surface?.clear();
+    if (!current) {
+      snapshot = null; surface?.clear(); cue?.restore();
       return;
     }
     snapshot = summary ?? current.summary();
     // The surface paints the badge, and keeps the live line or board above the editor in step with the mode.
-    indicatorSurface(ui).update(snapshot, mode, busy);
+    if (mode === 'off') surface?.clear();
+    else indicatorSurface(ui).update(snapshot, mode, busy);
     // The opt-in attention cue: a title prefix and one bell per new attention event, then Pi's title back.
+    // It is its own setting, so it runs whatever the indicator shows, 'off' included.
     // Rebuild when the setting changes, so toggling it in settings takes effect without a restart.
     // Turning it off puts Pi's title back first; a new project gets Pi's own title from Pi.
     if (cue && (cue.cwd !== ctxRef.cwd || cue.attentionEnabled !== (config?.attentionCue === true))) {
       if (cue.cwd === ctxRef.cwd) cue.restore();
       cue = null;
     }
-    // The bell is only rung when Pi's UI can set a title at all (it has no raw terminal writer), and
-    // createAttentionCue's default writer confines it to a real TTY.
+    // The title goes through Pi's ui.setTitle when Pi has one; Pi has no raw terminal writer, so the bell is
+    // written by createAttentionCue's default ringBell, which confines it to a real TTY.
     if (!cue) cue = createAttentionCue({ setTitle: title => ctxRef?.ui.setTitle?.(title) }, { cwd: ctxRef.cwd, sessionName: sessionName(ctxRef), enabled: config?.attentionCue === true });
     cue.update(snapshot);
   }
@@ -312,7 +314,6 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     return { ...old, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null, busy,
       context: ctx.getContextUsage?.() || null, ...(usage === undefined ? {} : { lastUsage: usage }) };
   }
-  /** @returns {ConfigObservation} */
   /**
    * What Main needs from pair_status: workers, their tasks and Pair's switches. Session files, PIDs,
    * telemetry and config provenance stay in /pair status and /pair doctor.
@@ -325,6 +326,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
         task: w.task, lastExchange: w.lastExchange, error: w.error, pendingConfiguration: w.pendingConfiguration })),
       configuration: { version: configuration.version, scope: configuration.scope, pendingMigrations: configuration.pendingMigrations } };
   }
+  /** @returns {ConfigObservation} */
   function configObservation() {
     return { version: config?.version, scope, provenance: configState?.provenance || {}, pendingMigrations: (configState?.migrations || []).filter(item => item !== null).map(({ scope: migrationScope, kind, sourceFile, targetFile, fromVersion, toVersion, warnings }) => ({ scope: migrationScope, kind, sourceFile, targetFile, fromVersion, toVersion, warnings })) };
   }
@@ -573,6 +575,16 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     if (!running.length) return true;
     return ctx.ui.confirm('Stop worker', `${running.join(', ')} ${running.length === 1 ? 'is' : 'are'} running a task. Stopping interrupts it; the conversation and file changes are kept. Inspect the changes, then /pair resume to continue. Stop now?`);
   }
+  // Pause and cancel ask first on every route (typed, menu and dashboard), as resume does: a dashboard key is
+  // easy to hit by mistake, and a cancelled task cannot be resumed.
+  /** @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx @param {string} id @returns {Promise<boolean>} */
+  function confirmPause(ctx, id) {
+    return ctx.ui.confirm('Pause worker', `Stop the current step on ${id} and hold the task? File changes are kept; resume continues it.`);
+  }
+  /** @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx @param {string} id @returns {Promise<boolean>} */
+  function confirmCancel(ctx, id) {
+    return ctx.ui.confirm('Cancel task', `End the task on ${id}? A cancelled task cannot be resumed. The worker conversation is kept and file changes are not undone.`);
+  }
   /**
    * Follow mode for a worker transcript: refresh while open and stay pinned to the bottom unless the human
    * scrolls up. Used by /pair transcript, the menu item and the dashboard's t key.
@@ -689,9 +701,9 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           if (await confirmStop(ctx, c, targets)) for (const worker of targets) await c.stop(worker);
           return;
         }
-        if (command === 'pause') { await c.pause(id); informMain(`the human paused worker ${id}. Do not resume it yourself.`); return; }
+        if (command === 'pause') { if (await confirmPause(ctx, id)) { await c.pause(id); informMain(`the human paused worker ${id}. Do not resume it yourself.`); } return; }
         if (command === 'resume') { if (await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) { await offerProfileRepair(c, id); await c.resume(id); } return; }
-        if (command === 'cancel') { await c.cancel(id, rest.join(' ') || 'Cancelled by the user'); informMain(`the human cancelled the task on worker ${id}. Do not re-dispatch it unless the user asks.`); return; }
+        if (command === 'cancel') { if (await confirmCancel(ctx, id)) { await c.cancel(id, rest.join(' ') || 'Cancelled by the user'); informMain(`the human cancelled the task on worker ${id}. Do not re-dispatch it unless the user asks.`); } return; }
         /** @param {string} workerId */
         const reconcileWorker = async workerId => {
           let outcome = await c.reconcile(workerId);
@@ -785,9 +797,8 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           if (action === 'diff') { await showDiff(target); return { reopen: true }; }
           if (action === 'transcript') { await followTranscript(ctx, target); return { reopen: true }; }
           if (action === 'yield') { await showYield(); return { reopen: !deliveredToMain }; }
-          // One key on the dashboard is easy to hit by mistake, so pause and cancel ask first, as resume does.
           if (action === 'pause') {
-            if (!await ctx.ui.confirm('Pause worker', `Stop the current step on ${target} and hold the task? File changes are kept; resume continues it.`)) return { reopen: true };
+            if (!await confirmPause(ctx, target)) return { reopen: true };
             await c.pause(target); informMain(`the human paused worker ${target}. Do not resume it yourself.`); return { reopen: true, notice: `Paused worker ${target}.` };
           }
           if (action === 'resume') {
@@ -795,7 +806,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
             await offerProfileRepair(c, target); await c.resume(target); return { reopen: true, notice: `Resumed worker ${target}.` };
           }
           if (action === 'cancel') {
-            if (!await ctx.ui.confirm('Cancel task', `End the task on ${target}? A cancelled task cannot be resumed. The worker conversation is kept and file changes are not undone.`)) return { reopen: true };
+            if (!await confirmCancel(ctx, target)) return { reopen: true };
             const reason = await ctx.ui.input('Cancel reason (the worker conversation is kept; file changes are not undone)', 'Cancelled by the user');
             if (reason === undefined) return { reopen: true };
             await c.cancel(target, reason.trim() || 'Cancelled by the user');
@@ -836,9 +847,10 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           if (item.action === 'enable') { await apply({ ...await readScope(scope), enabled: true }, scope); return; }
           if (item.action === 'restart') return await restartWorker(ctx, current.workers.length > 1 ? target : undefined);
           if (item.action === 'stop') { if (await confirmStop(ctx, c, [target])) await c.stop(target); return; }
-          if (item.action === 'pause') { await c.pause(target); informMain(`the human paused worker ${target}. Do not resume it yourself.`); return; }
+          if (item.action === 'pause') { if (await confirmPause(ctx, target)) { await c.pause(target); informMain(`the human paused worker ${target}. Do not resume it yourself.`); } return; }
           if (item.action === 'resume') { if (await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) { await offerProfileRepair(c, target); await c.resume(target); } return; }
           if (item.action === 'cancel') {
+            if (!await confirmCancel(ctx, target)) return;
             const reason = await ctx.ui.input('Cancel reason (the worker conversation is kept; file changes are not undone)', 'Cancelled by the user');
             if (reason !== undefined) { await c.cancel(target, reason.trim() || 'Cancelled by the user'); informMain(`the human cancelled the task on worker ${target}. Do not re-dispatch it unless the user asks.`); }
             return;

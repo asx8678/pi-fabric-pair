@@ -14,9 +14,9 @@ Do not arm native Prewalk for a Pair assignment.
 
 With Fabric active, Pair's tools are captured extension tools with the refs
 `extensions.pair_status`, `extensions.pair_dispatch`, `extensions.pair_inspect`,
-`extensions.pair_decide`, `extensions.pair_cancel` and `extensions.pair_yield`.
-The worker role exposes `extensions.pair_report`. Call them directly inside
-`fabric_exec`; do not search the catalog first:
+`extensions.pair_decide`, `extensions.pair_cancel`, `extensions.pair_recover` and
+`extensions.pair_yield`. The worker role exposes `extensions.pair_report`. Call
+them directly inside `fabric_exec`; do not search the catalog first:
 
 ```ts
 return await extensions.pair_status({});

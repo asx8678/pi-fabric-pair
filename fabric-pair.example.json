@@ -69,5 +69,6 @@
     "timeoutMs": 600000
   },
   "mainSupervision": false,
+  "attentionCue": false,
   "maxMainRecoveries": 3
 }

@@ -2,7 +2,7 @@
  * The opt-in terminal attention cue: one title prefix and one bell per new attention event, and Pi's own
  * title restored as soon as nothing needs the human. Display only; it never affects work.
  */
-import { planWorker, workerState } from './ui.js';
+import { workerState } from './ui.js';
 
 /** Pi's own title format uses this prefix (pi-coding-agent dist/config.js APP_TITLE, which the package does
  * not export from its entry point, so it is mirrored here). */

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { createDashboard, createFollowView, dashboardAction, dashboardKeys, dashboardLines, dashboardMoreKeys, dashboardView } from '../src/ui.js';
+import { createDashboard, createFollowView, dashboardAction, dashboardItems, dashboardKeys, dashboardLines, dashboardMenu, dashboardMoreKeys, dashboardView, menu } from '../src/ui.js';
 
 const NOW = 1_700_000_000_000;
 const strip = (/** @type {string} */ text) => text.replace(/\u001b\[[0-9;]*m/g, '');
@@ -537,4 +537,21 @@ test('transcript lines are styled by their marker and wrap under their text', as
   assert.equal(colorOf('✖ fabric_exec'), 'warning');
   assert.equal(colorOf('I will run'), undefined, "the worker's own words keep the default color");
   view.dispose();
+});
+
+test('without the TUI, the menu names the worker an action is for, so each choice runs on its own worker', async () => {
+  const two = summary({ workers: [worker(), worker({ id: 'w2', pid: 43, sessionId: 'session-2' })] });
+  const items = dashboardItems(two), entries = dashboardMenu(items);
+  /** @type {string[]} */
+  let offered = [];
+  /** @param {string} choice */
+  const pick = choice => menu(/** @type {any} */ ({ mode: 'rpc', ui: { select: async (/** @type {string} */ _title, /** @type {string[]} */ options) => { offered = options; return choice; } } }), entries, { title: 'Pair' });
+  const id = await pick('Worker · w2 · Pause');
+  assert.equal(new Set(offered).size, offered.length, 'every option is unique');
+  assert.ok(offered.includes('Worker · w1 · Pause') && offered.includes('Worker · w2 · Pause'), offered.join(' | '));
+  assert.deepEqual({ action: items[Number(id)].action, workerId: items[Number(id)].workerId }, { action: 'pause', workerId: 'w2' });
+  assert.equal(items[Number(await pick('Worker · w1 · Cancel task'))].workerId, 'w1');
+  assert.ok(offered.includes('Status'), 'a label that appears once is offered as it is');
+  assert.equal(await pick('Close'), undefined);
+  assert.equal(await pick(/** @type {any} */ (undefined)), undefined, 'a dismissed select chooses nothing');
 });

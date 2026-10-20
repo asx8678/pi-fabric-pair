@@ -5,7 +5,7 @@ import { assertReportSize, reportSchema } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope, validateReportPayload } from './contracts.js';
 import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, pairToolRoute, isDirectMutation, nativeSettings, probeNative, providerFileWrite, refusedProgramReason, requestsDetachedEffect, reviewWarmingAction, signedIn, toolName, toolPlacement } from './native.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
-import { pushActivity } from './timeline.js';
+import { normalizeActivity, pushActivity } from './timeline.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionAPI} ExtensionAPI */
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} ExtensionContext */
@@ -102,7 +102,7 @@ export function registerWorker(pi, env = process.env) {
   const gateFile = path.join(dir, 'authority.json');
   const latchFile = path.join(dir, 'latch.json');
   const workOrderFile = path.join(dir, 'work-order.json');
-  const reportSerial = new Serial(), telemetrySerial = new Serial();
+  const reportSerial = new Serial(), telemetrySerial = new Serial(), activitySerial = new Serial();
   /** @type {ExtensionContext | undefined} */
   let ctxRef;
   /** @type {Authority | null} */
@@ -188,6 +188,10 @@ export function registerWorker(pi, env = process.env) {
   }
   /** The newest telemetry not yet written; queued writes take it, so a burst of events writes once. @type {{packet: import('./contracts.js').StoredTelemetryV1, durable: boolean} | null} */
   let telemetryNext = null;
+  /** Recent tool events, newest last. Null until session_start seeds it from activity.json, so a restarted worker keeps its list. @type {import('./timeline.js').ActivityEvent[] | null} */
+  let activity = null;
+  /** Whether activity changed since the last queued write took it. */
+  let activityDirty = false;
   /**
    * Telemetry is display state for the controller and Pi awaits each hook, so writes skip fsync unless
    * `durable` (a detached effect or a report, which the controller must still see after a crash).
@@ -300,6 +304,7 @@ export function registerWorker(pi, env = process.env) {
     ctxRef = ctx; stopped = parentDead; lastUsage = null; speed = null; speedStart = null;
     if (parentDead) { ctx.abort(); ctx.shutdown(); return; }
     await mkdirPrivate(dir); await load(); await probe(ctx);
+    activity ??= normalizeActivity(await readJSON(path.join(dir, 'activity.json'), null, 64 * 1024).catch(() => null));
     clearInterval(parentTimer);
     const parentPid = Number(env.PI_FABRIC_PAIR_PARENT_PID);
     if (!hadIpc && Number.isInteger(parentPid) && parentPid > 1) {
@@ -385,18 +390,23 @@ export function registerWorker(pi, env = process.env) {
   });
   /**
    * Recent worker activity lives in its own small file next to telemetry.json: the older Main validates
-   * telemetry.json strictly, so its shape must not change. A failure here is never fatal.
-   * @param {string} tool @param {string | null} target @param {string} cwd
+   * telemetry.json strictly, so its shape must not change. The list is kept here and each event is pushed
+   * before the handler awaits, so a parallel batch of tool calls keeps every event in Pi's order. The file is
+   * display state like telemetry: written without fsync, one write at a time, and a burst writes once. A
+   * failure here is never fatal.
+   * @param {string} tool @param {string | null} target
    */
-  async function recordActivity(tool, target, cwd) {
-    try {
-      const file = path.join(dir, 'activity.json');
-      const existing = await readJSON(file, null, 64 * 1024).catch(() => null);
-      const events = pushActivity(existing && typeof existing === 'object' && 'events' in existing ? /** @type {{events: import('./timeline.js').ActivityEvent[]}} */ (existing).events : null, { tool, target: target ?? '', at: Date.now() });
-      await atomicJSON(file, { version: 1, events });
-    } catch { /* activity is a convenience, never a reason to interrupt a tool call */ }
+  function recordActivity(tool, target) {
+    if (stopped) return;
+    activity = pushActivity(activity, { tool, target: target ?? '', at: Date.now() });
+    activityDirty = true;
+    activitySerial.run(async () => {
+      if (!activityDirty) return;
+      activityDirty = false;
+      await atomicJSON(path.join(dir, 'activity.json'), { version: 1, events: activity }, { durable: false });
+    }).catch(() => { /* activity is a convenience, never a reason to interrupt a tool call */ });
   }
-  pi.on('tool_execution_start', async (event, ctx) => { currentTool = event.toolName; currentTarget = toolTarget(event.toolName, event.args, ctx.cwd); await telemetry(ctx); void recordActivity(event.toolName, currentTarget, ctx.cwd); });
+  pi.on('tool_execution_start', async (event, ctx) => { currentTool = event.toolName; currentTarget = toolTarget(event.toolName, event.args, ctx.cwd); recordActivity(event.toolName, currentTarget); await telemetry(ctx); });
   pi.on('tool_execution_end', async (_event, ctx) => { currentTool = null; currentTarget = null; await telemetry(ctx); });
   pi.on('message_start', async event => {
     if (event.message?.role === 'assistant') speedStart = performance.now();
@@ -439,7 +449,7 @@ export function registerWorker(pi, env = process.env) {
   pi.on('agent_settled', async (_event, ctx) => { currentTool = null; currentTarget = null; await telemetry(ctx); });
   pi.on('model_select', async (_event, ctx) => { speed = null; speedStart = null; await telemetry(ctx); });
   pi.on('session_shutdown', async () => {
-    stopped = true; clearInterval(parentTimer); process.removeListener('disconnect', parentGone); await reportSerial.drain(); await telemetrySerial.drain();
+    stopped = true; clearInterval(parentTimer); process.removeListener('disconnect', parentGone); await reportSerial.drain(); await telemetrySerial.drain(); await activitySerial.drain();
   });
   return { load, probe, getState: () => ({ authority, report }) };
 }

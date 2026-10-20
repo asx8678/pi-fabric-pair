@@ -9,7 +9,7 @@ import { APP_TITLE, attentionOf, createAttentionCue, piTitle, ringBell } from '.
 import { dashboardKeys, dashboardLines, stepHistory, timelineLine } from '../src/ui.js';
 import { taskSummary } from '../src/controller.js';
 import { validateConfig } from '../src/config.js';
-import { validateStoredState } from '../src/contracts.js';
+import { migrateStoredState, validateStoredState } from '../src/contracts.js';
 
 const NOW = 1_700_000_000_000;
 const strip = (/** @type {string} */ text) => text.replace(/\u001b\[[0-9;]*m/g, '');
@@ -395,6 +395,15 @@ test('state written before the timeline existed still validates, and a stored ti
   // A corrupt entry is rejected rather than silently kept.
   assert.throws(() => validateStoredState(state([{ type: 'nope', reportId: 'r1', step: 1, action: 'approve', at: 3, feedback: '' }]), { ownerSession: 's', cwd: '/tmp' }));
   assert.throws(() => validateStoredState(state('nope'), { ownerSession: 's', cwd: '/tmp' }));
+  // Loading drops it first: the timeline is history, so a damaged entry never stops the task from loading.
+  const good = { type: 'decision', reportId: 'r1', step: 1, action: 'approve', at: 3, feedback: 'ok' };
+  const loaded = migrateStoredState(state([{ type: 'nope', reportId: 'r1', step: 1, action: 'approve', at: 3, feedback: '' }, good, { type: 'report', reportId: 'r2', step: 1.5, kind: 'checkpoint', at: 4, verification: {} }]));
+  assert.equal(loaded.migrated, true);
+  assert.deepEqual(loaded.state.workers.w1.task.timeline, [good], 'only the entries that pass the check are kept');
+  assert.doesNotThrow(() => validateStoredState(loaded.state, { ownerSession: 's', cwd: '/tmp' }));
+  assert.deepEqual(migrateStoredState(state('nope')).state.workers.w1.task.timeline, [], 'a timeline that is not a list starts empty');
+  const intact = state([good]);
+  assert.equal(migrateStoredState(intact).migrated, false, 'a valid timeline is left as it is');
 });
 
 test('the default bell writes to a TTY stdout and nothing else', () => {

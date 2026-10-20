@@ -71,7 +71,7 @@ export function staleWorkers(summary, now = Date.now()) {
 }
 
 /** @param {{tokens?: unknown, seconds?: unknown} | null | undefined} speed @returns {string} */
-function speedLabel(speed) {
+export function speedLabel(speed) {
   const tokens = speed?.tokens, seconds = speed?.seconds;
   if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0
     || typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return 'avg — tok/s';
@@ -1141,6 +1141,7 @@ export function createFollowView(source, options = {}) {
       if (disposed) return;
       // o was pressed while this read ran: read again in the mode now shown.
       if (asked !== full) { refresh(); return; }
+      if (next === text) return; // nothing new to paint
       text = next;
       try { options.onUpdate?.(); } catch { /* a repaint request must not stop the refresh */ }
     });
@@ -1296,7 +1297,7 @@ export function statusText(summary, native = null, now = Date.now()) {
   lines.push('## Details', row('Session', summary.ownerSession));
   if (summary.mainPhase) lines.push(row('Main phase', `${summary.mainPhase.status} (explicit, non-authorizing)${summary.mainPhase.current ? '' : ' · stale binding: reports stay retained'}`));
   lines.push(row('Delivery', summary.autoDeliverReports === false ? 'automatic delivery off' : 'automatic delivery on'),
-    row('Warming', `Pi's native idle refreshes, kept for Main while the worker works and for the worker while its report waits (every model except Codex; ${DEFAULT_CACHE_LIFETIME_S} s lifetime where Pi knows none)${native ? ` · native ${native.cacheWarming}${native.cacheWarming === 'idle' ? '' : ' (not warmed)'}` : ''} · Main can also use Fabric cache.hold (Fabric ${FABRIC_CACHE_VERSION}+ on a Pi with scoped warming) · Pair holds no leases`));
+    row('Warming', `Pi's native idle refreshes, kept for Main while the worker works and for the worker while its report waits (models with a priced prompt cache, except Codex and ChatGPT sign-in models; ${DEFAULT_CACHE_LIFETIME_S} s lifetime where Pi knows none) · Pi through 1.3.0 sends none in a Pair session${native ? ` · native ${native.cacheWarming}${native.cacheWarming === 'idle' ? '' : ' (not warmed)'}` : ''} · Main can also use Fabric cache.hold (Fabric ${FABRIC_CACHE_VERSION}+ on a Pi with scoped warming) · Pair holds no leases`));
   for (const w of summary.workers) {
     lines.push(row(w.id, `PID ${w.pid || 'not running'} · session ${w.sessionId || 'not created'}`), row('Workspace', `${w.cwd}${w.workspaceGit === false ? ' · not a Git repository' : ''}`));
     if (w.usage) lines.push(row('Usage', `${w.usage.requests} responses · reported $${w.usage.reportedCost.toFixed(4)} · ${w.usage.unknownCostRequests} with unknown price (inference only)`));
@@ -1504,7 +1505,22 @@ export async function menu(ctx, entries, options) {
   const items = /** @type {{id: string, label: string, value?: string}[]} */ (entries.filter(entry => 'id' in entry));
   if (!items.length) return undefined;
   if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') {
-    const labels = items.map(item => (item.value ? `${item.label}: ${item.value}` : item.label));
+    // A select hands back the chosen text, so each option must be unique. A label that appears more than once
+    // (the same action for two workers) is named with its section, and a text that still repeats is numbered,
+    // so every choice maps back to its own entry.
+    /** @type {string[]} */
+    const sections = [];
+    let section = '';
+    for (const entry of entries) { if ('id' in entry) sections.push(section); else section = entry.section; }
+    const repeated = new Set(items.map(item => item.label).filter((label, i, all) => all.indexOf(label) !== i));
+    /** @type {string[]} */
+    const labels = [];
+    items.forEach((item, i) => {
+      const base = `${repeated.has(item.label) && sections[i] ? `${sections[i]} · ` : ''}${item.value ? `${item.label}: ${item.value}` : item.label}`;
+      let text = base;
+      for (let n = 2; labels.includes(text) || text === 'Close'; n++) text = `${base} (${n})`;
+      labels.push(text);
+    });
     const choice = await ctx.ui.select([options.title, ...(options.subtitle || [])].join('\n'), [...labels, 'Close']);
     return items[labels.indexOf(choice ?? '')]?.id;
   }

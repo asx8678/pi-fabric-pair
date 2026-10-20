@@ -166,6 +166,8 @@ export class PairController extends EventEmitter {
     this.workspaceGit = new Map();
     /** Worker tool activity, refreshed from each worker's activity.json. Missing means none yet. @type {Map<string, import('./timeline.js').ActivityEvent[]>} */
     this.recentActivity = new Map();
+    /** The last transcript read, with the session file state it came from; one entry, so at most one text is kept. @type {{key: string, file: string, ino: number, size: number, mtimeMs: number, text: string} | null} */
+    this.lastTranscript = null;
     /** @type {Set<string>} reports already announced as held by the automatic-delivery cap */ this.capWarned = new Set();
     this.storageDir = storageDir; this.dir = storageDir || '';
     this.scanIntervalMs = Number.isFinite(scanIntervalMs) && scanIntervalMs > 0 ? scanIntervalMs : 2000;
@@ -1637,7 +1639,9 @@ export class PairController extends EventEmitter {
     assert(!String(r.error || '').startsWith('EXIT_UNCONFIRMED'), 'The worker exit is unconfirmed; ask the human to run /pair reconcile');
     const used = t.mainRecoveries ?? 0;
     assert(used < this.config.maxMainRecoveries, `Main already recovered this task ${used} times (maxMainRecoveries). Stop and ask the human.`);
-    t.mainRecoveries = used + 1; // saved with the resume, so a restart does not refill the budget
+    // Counted before the attempt, so a recovery that fails still spends one and Main's retries stay bounded.
+    // It is saved with the resume (or the next save), so a restart does not refill the budget.
+    t.mainRecoveries = used + 1;
     if (r.status === 'error') await this.stop(id);
     const outcome = await this.resume(id, { by: 'main', instruction });
     return { ...outcome, recoveriesUsed: used + 1, recoveriesAllowed: this.config.maxMainRecoveries };
@@ -1788,8 +1792,15 @@ ${guidance}`;
   async transcript(id, options = {}) {
     const file = this.record(id).sessionFile;
     assert(file, `Worker ${id} has no retained session yet`);
+    const full = options.full === true, key = `${id}\0${full}`;
+    // Follow mode asks every two seconds: an unchanged session file gives back the text it gave last time,
+    // without rereading its tail. The state is taken before the read, so a write during it reads again next time.
+    const { ino, size, mtimeMs } = await fs.lstat(file), last = this.lastTranscript;
+    if (last && last.key === key && last.file === file && last.ino === ino && last.size === size && last.mtimeMs === mtimeMs) return last.text;
     const entries = await readJsonlTail(file, TRANSCRIPT_TAIL_BYTES);
-    return transcriptText(entries.filter(entry => entry.type === 'message' && isRpcRecord(entry.message)).map(entry => entry.message), { full: options.full === true });
+    const text = transcriptText(entries.filter(entry => entry.type === 'message' && isRpcRecord(entry.message)).map(entry => entry.message), { full });
+    this.lastTranscript = { key, file, ino, size, mtimeMs, text };
+    return text;
   }
   /** @returns {Promise<void>} */
   close() {

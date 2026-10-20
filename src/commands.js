@@ -5,7 +5,7 @@
 
 /** @typedef {{value: string, label: string, description: string}} PairCompletion */
 
-/** The review/format detail /pair accepts. @type {readonly string[]} */
+/** The /pair subcommands, in the order completion lists them. @type {readonly string[]} */
 export const PAIR_COMMANDS = ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'yield', 'reconcile', 'indicator', 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup'];
 
 /** @type {Record<string, string>} */

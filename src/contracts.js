@@ -254,7 +254,7 @@ function assertTaskLimits(value, label = 'task.limits', { legacy = false } = {})
 /** @overload @param {unknown} value @param {string} [label] @param {{legacy?: false}} [options] @returns {TaskLimits} */
 /** @overload @param {unknown} value @param {string} [label] @param {{legacy?: boolean}} [options] @returns {LegacyTaskLimits} */
 /** @param {unknown} value @param {string} [label] @param {{legacy?: boolean}} [options] @returns {LegacyTaskLimits} */
-function validateTaskLimits(value, label = 'task.limits', options = {}) { assertTaskLimits(value, label, options); return value; }
+export function validateTaskLimits(value, label = 'task.limits', options = {}) { assertTaskLimits(value, label, options); return value; }
 
 /** @param {unknown} value @param {string} label @returns {asserts value is VerificationPolicy} */
 function assertVerification(value, label) {
@@ -515,6 +515,14 @@ function checkTimeline(value, label) {
     else text(record.action, `${at}.action`, 20), text(record.feedback, `${at}.feedback`, 1000);
   }
 }
+/**
+ * The timeline entries that pass checkTimeline, for loading: a hand-edited or damaged entry is dropped, and a
+ * timeline that is not a list starts empty, so history never stops a task from loading.
+ * @param {unknown} value @param {string} label @returns {unknown[]}
+ */
+function keptTimeline(value, label) {
+  return (Array.isArray(value) ? value : []).filter(entry => { try { checkTimeline([entry], label); return true; } catch { return false; } });
+}
 /** @param {unknown} value @param {string} label @param {string} workerId @param {ProfileFacts} facts */
 function checkStoredTask(value, label, workerId, facts) {
   const task = object(value, label);
@@ -568,7 +576,8 @@ function checkStoredTask(value, label, workerId, facts) {
     reference(decision.action === last.action && decision.feedback === last.feedback, `${label}.lastDecision`, 'Last decision contradicts its retained decision');
   }
   for (const key of ['dispatchSettleSequence', 'pendingSince', 'completedAt', 'stepRevisions', 'mainRecoveries']) if (Object.hasOwn(task, key)) integer(task[key], `${label}.${key}`);
-  // Optional and additive: a task written before the timeline existed has none, and a corrupt entry is dropped.
+  // Optional and additive: a task written before the timeline existed has none. Loading drops a corrupt entry
+  // first (migrateStoredState), so this check only refuses a timeline Pair itself would write wrongly.
   if (Object.hasOwn(task, 'timeline')) checkTimeline(task.timeline, `${label}.timeline`);
   if (Object.hasOwn(task, 'abortRequested')) bool(task.abortRequested, `${label}.abortRequested`);
   if (Object.hasOwn(task, 'pausedBy')) choice(task.pausedBy, ['human'], `${label}.pausedBy`);
@@ -626,6 +635,10 @@ export function migrateStoredState(value) {
       if (policy.mode === 'final') { policy.mode = 'final-only'; migrated = true; }
       else if (policy.mode === 'strict') { policy.mode = 'every-step'; migrated = true; }
       else invariant(policy.mode !== 'adaptive', 'Stored adaptive task policy requires explicit human reconciliation');
+      if (Object.hasOwn(task, 'timeline')) {
+        const kept = keptTimeline(task.timeline, `state.workers.${workerId}.task.timeline`);
+        if (!Array.isArray(task.timeline) || kept.length !== task.timeline.length) { task.timeline = kept; migrated = true; }
+      }
     }
   }
   return { state, migrated };
