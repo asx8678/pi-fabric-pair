@@ -15,21 +15,6 @@
     ]
   },
   "include": [
-    "src/extension.js",
-    "src/main.js",
-    "src/worker.js",
-    "src/controller.js",
-    "src/actor-runtime.js",
-    "src/rpc.js",
-    "src/config.js",
-    "src/schema.js",
-    "src/contracts.js",
-    "src/evidence.js",
-    "src/native.js",
-    "src/util.js",
-    "src/metrics.js",
-    "src/observations.js",
-    "src/peer-review.js",
-    "src/ui.js"
+    "src/*.js"
   ]
 }
