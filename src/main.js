@@ -74,9 +74,17 @@ function isWake(message) {
 }
 const RECEIPT_CHECK_MS = 30_000, RECEIPT_MAX_MS = 2 * 60 * 60_000;
 const INPUT_HOLD_MS = 60_000;
-const TESTED_PI = '>=1.1.0 <1.4.0';
+/** Tested Pi range as [major, minor]: from TESTED_PI_MIN inclusive up to TESTED_PI_BELOW exclusive. */
+const TESTED_PI_MIN = [1, 1], TESTED_PI_BELOW = [1, 4];
+const TESTED_PI = `>=${TESTED_PI_MIN.join('.')}.0 <${TESTED_PI_BELOW.join('.')}.0`;
+/** @param {number[]} a @param {number[]} b */
+const compareMinor = (a, b) => (a[0] - b[0]) || (a[1] - b[1]);
 /** @param {string} version */
-function piTested(version) { const [major, minor] = String(version).split('.').map(Number); return major === 1 && minor === 1; }
+function piTested(version) {
+  const [major, minor] = String(version).split('.').map(Number);
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return false;
+  return compareMinor([major, minor], TESTED_PI_MIN) >= 0 && compareMinor([major, minor], TESTED_PI_BELOW) < 0;
+}
 /**
  * The model reads `content`. Fabric also shows a nested call's `details`, so a copy there would
  * repeat the whole result; nothing in Pair reads it.
