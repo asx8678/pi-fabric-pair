@@ -9,8 +9,8 @@ import { Evidence, repositoryRoot, verifyConfigured } from './evidence.js';
 import { validateConfig } from './config.js';
 import { peerReviewSummary, readPeerReview, runPeerReview } from './peer-review.js';
 import { excludedExtension, liveResidentHosts, meshRootFor, preflightNativeProfile } from './native.js';
-import { assertReportSize, validateDecision, validateDispatch, validateReport } from './schema.js';
-import { incrementCounter, migrateStoredState, STATE_VERSION, TASK_NOTE_LIMIT, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateStoredState } from './contracts.js';
+import { assertReportSize, validateDecision, validateDispatch } from './schema.js';
+import { incrementCounter, migrateStoredState, STATE_VERSION, TASK_NOTE_LIMIT, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateReportPayload, validateStoredState } from './contracts.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
 import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, digest, inside, mkdirPrivate, processStartedAt, processState, PROTOCOL, signalGroup, signallablePid, readJSON, readJsonlTail, safeId, Serial, stableDigest, uid } from './util.js';
 
@@ -902,7 +902,7 @@ export class PairController extends EventEmitter {
     assert(!t?.pendingReport && !(t?.report && t.report.attemptId === t.attemptId && t.report.leaseId === t.leaseId), 'A different immutable report already closed this lease');
     if (this.runtimeData.get(h)?.activationIntent !== control.intent || t?.status !== 'running') { stale('No current running implementation intent; retained report was not adopted'); return { control, disposition: 'stale' }; }
     assert(incoming.leaseId === t.leaseId && incoming.planRevision === t.planRevision, 'Report is stale or no step is running');
-    validateReport(incoming.payload); assertReportSize(incoming.payload, t.policy.summaryDetail, t.limits);
+    validateReportPayload(incoming.payload); assertReportSize(incoming.payload, t.policy.summaryDetail, t.limits);
     if (t.policy.mode === 'final-only') assert(incoming.payload.kind !== 'checkpoint', 'Final-only policy requires final_review for the complete plan, or a question/blocker.');
     assert(incoming.payload.taskId === t.id && incoming.payload.stepId === t.steps[t.stepIndex].id, 'Report task/step mismatch');
     assert(incoming.payloadHash === digest(incoming.payload), 'Report payload hash mismatch');

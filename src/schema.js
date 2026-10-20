@@ -1,7 +1,5 @@
 import { assert, plain, safeId } from './util.js';
-import { validateReportPayload } from './contracts.js';
 /** @typedef {import('./contracts.js').Step} Step */
-/** @typedef {import('./contracts.js').ReportPayload} ReportPayload */
 /** @typedef {{workerId: string, requestId: string, objective: string, constraints?: string[], context?: string, steps: Step[]}} DispatchPayload */
 /** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel', feedback: string, checkpointHash?: string, steps?: Step[]}} DecisionShape */
 /** @typedef {DecisionShape & ({action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'cancel'})} DecisionPayload */
@@ -113,8 +111,6 @@ export function validateDispatch(input) {
   assertUniqueStepIds(input.steps);
   return input;
 }
-/** @param {unknown} input @returns {ReportPayload} */
-export function validateReport(input) { return validateReportPayload(input); }
 /** @param {string | undefined} summaryDetail */
 export function reportByteLimit(summaryDetail) { return { minimal: 4000, normal: 12000, detailed: 32000 }[summaryDetail || 'normal'] || 12000; }
 /** @param {unknown} payload @param {string | undefined} summaryDetail @param {object | null} [limits] */

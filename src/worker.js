@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicJSON, assert, bounded, digest, inside, mkdirPrivate, plain, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
-import { assertReportSize, reportSchema, validateReport } from './schema.js';
-import { validateAuthority, validateLatch, validateReportEnvelope } from './contracts.js';
+import { assertReportSize, reportSchema } from './schema.js';
+import { validateAuthority, validateLatch, validateReportEnvelope, validateReportPayload } from './contracts.js';
 import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, pairToolRoute, isDirectMutation, nativeSettings, probeNative, providerFileWrite, refusedProgramReason, requestsDetachedEffect, reviewWarmingAction, signedIn, toolName, toolPlacement } from './native.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
 
@@ -150,7 +150,7 @@ export function registerWorker(pi, env = process.env) {
     const latch = rawLatch === null ? null : validateLatch(rawLatch);
     const currentLatch = latch !== null && latch.ownerEpoch === ownerEpoch && latch.workerGeneration === workerGeneration && latch.leaseId === next.leaseId && latch.attemptId === next.attemptId;
     if (currentLatch) {
-      validateReport(latch.report.payload); assert(latch.report.payloadHash === digest(latch.report.payload), 'Latched report payload hash mismatch');
+      validateReportPayload(latch.report.payload); assert(latch.report.payloadHash === digest(latch.report.payload), 'Latched report payload hash mismatch');
       assert(latch.report.ownerSession === ownerSession && latch.report.workerId === workerId && latch.report.nonce === nonce, 'Latched report producer mismatch');
     }
     report = currentLatch ? latch.report : null;
@@ -258,7 +258,7 @@ export function registerWorker(pi, env = process.env) {
   }
   /** @param {unknown} input @param {ExtensionContext} ctx @returns {Promise<ReportToolResult>} */
   async function submitReport(input, ctx) {
-    const params = validateReport(input);
+    const params = validateReportPayload(input);
     assert(authority && authority.phase === 'running', 'PAIR_WAIT: this step is not authorized');
     assert(!detachedEffect, 'PAIR_DETACHED_EFFECT: a shell job, agent, actor or other Fabric effect outlived its call; this worker must stop and reconcile before reporting.');
     const task = authority.task;
