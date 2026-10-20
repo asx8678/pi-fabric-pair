@@ -47,7 +47,7 @@ pi install "$PWD"
 
 The extension runs directly from source. Do not run `npm install` in this checkout:
 Pi would then load Pair's development copies of Pi's own packages instead of the
-running Pi's. Use a separate clone for `npm test`. Open Pi in your implementation project's
+running Pi's. Use a separate clone for the static checks. Open Pi in your implementation project's
 Git working tree. Keep Pair state outside that tree; the default
 `~/.pi/agent` location does this.
 
@@ -188,9 +188,9 @@ Pair's messages are in context); see the
 
 Pair provides workflow controls; OS and tool permissions remain your security
 boundary. Unattended operation, automatic crash recovery, and multiple writers
-are outside this MVP. Verify changes with the offline suite (`npm test`, no
-model requests or profile writes; see `tests/README.md`) and the static checks
-(`npm run typecheck`, `npm run pack:check`).
+are outside this MVP. The repository bundles no automated tests: verify changes
+with the static checks (`npm run typecheck`, `npm run pack:check`) and manual
+review.
 
 [Quickstart](docs/QUICKSTART.md) |
 [Architecture](docs/ARCHITECTURE.md) |
