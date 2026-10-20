@@ -74,7 +74,7 @@ function isWake(message) {
 }
 const RECEIPT_CHECK_MS = 30_000, RECEIPT_MAX_MS = 2 * 60 * 60_000;
 const INPUT_HOLD_MS = 60_000;
-const TESTED_PI = '>=1.1.0 <1.2.0';
+const TESTED_PI = '>=1.1.0 <1.4.0';
 /** @param {string} version */
 function piTested(version) { const [major, minor] = String(version).split('.').map(Number); return major === 1 && minor === 1; }
 /**
@@ -164,8 +164,8 @@ export function registerMain(pi) {
     const report = { customType: 'fabric-pair.report', content: message, display: true, details };
     if (mainOccupied()) pi.sendMessage(report, { deliverAs: 'followUp', triggerTurn: true });
     else {
-      // A turn started by a custom message skips before_agent_start, so it would run without
-      // Fabric's system prompt and miss the cache a user turn wrote. Start it as a prompt instead.
+      // On Pi 1.1 a turn started by a custom message skips before_agent_start (Pi 1.2+ runs it), so it
+      // would run without Fabric's system prompt and miss the cache a user turn wrote. Start it as a prompt instead.
       pi.sendMessage(report, { triggerTurn: false });
       void Promise.resolve(pi.sendUserMessage(WAKE_TEXT)).catch(() => {});
     }

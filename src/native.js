@@ -551,7 +551,7 @@ function hasCacheLifetime(model) {
 /** Lifetime, in seconds, Pair assumes for a model Pi knows none for: provider caches mostly fade after 3-5 idle minutes. */
 export const DEFAULT_CACHE_LIFETIME_S = 240;
 /**
- * Pi's warmer runs only for models with a `promptCache` lifetime, and Pi 1.1.0 ships one only for
+ * Pi's warmer runs only for models with a `promptCache` lifetime, and Pi 1.1 to 1.3 ship one only for
  * Anthropic models. Give the model about to run a default so warming works for every model with a
  * priced prompt cache. A lifetime Pi already knows is never changed, and Codex models and models
  * without a cache-read price are left without one.

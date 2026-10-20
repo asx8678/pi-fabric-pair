@@ -34,7 +34,7 @@ locally before Main is notified.
 
 ## Get started
 
-You need **Node.js 24+**, Git, and Pi 1.1 with Fabric, Fovea, and an authenticated model.
+You need **Node.js 24+**, Git, and Pi 1.1 to 1.3 with Fabric, Fovea, and an authenticated model.
 
 ### 1. Install
 
@@ -190,7 +190,7 @@ session's last request. Pair never warms a Codex model, because Pi cannot cap th
 refresh; `/pair doctor` says when Main or the worker uses one. Fabric's `cache.hold` (Fabric 0.97.0 or newer, on a Pi with scoped
 warming) is a separate paid opt-in for Main. Pair holds no leases and never changes
 Pi's settings. Pair's inference budgets exclude Main usage and warming. Pi (through
-1.1.0) does not yet send these refreshes in a Pair session (its warmer stops once
+1.3.0) does not yet send these refreshes in a Pair session (its warmer stops once
 Pair's messages are in context).
 
 ## More details
