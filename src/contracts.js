@@ -587,10 +587,6 @@ function checkStoredTask(value, label, workerId, historical, facts) {
   if (Object.hasOwn(task, 'pausedBy')) choice(task.pausedBy, ['human'], `${label}.pausedBy`);
   for (const key of ['interruption', 'previousStatus', 'cancelReason']) if (Object.hasOwn(task, key)) text(task[key], `${label}.${key}`, TASK_NOTE_LIMIT);
 }
-/** @param {unknown} value @param {string} label @param {string} workerId @returns {asserts value is StoredTaskV1} */
-function assertStoredTask(value, label, workerId) { const facts = profileFacts(); checkStoredTask(value, label, workerId, false, facts); rejectUnsupported(facts); }
-/** @param {unknown} value @param {string} label @param {string} workerId @returns {StoredTaskV1} */
-function validateStoredTask(value, label, workerId) { assertStoredTask(value, label, workerId); return value; }
 /**
  * @param {unknown} value
  * @param {string} label
@@ -630,16 +626,6 @@ function checkWorkerRecord(value, label, workerId, ownerSession, historical, fac
     stale.forEach((entry, index) => { const at = `${label}.staleReports[${index}]`, report = object(entry, at); keys(report, ['reportId', 'reason', 'at'], at); id(required(report, 'reportId', at), `${at}.reportId`); text(required(report, 'reason', at), `${at}.reason`, 10000); integer(required(report, 'at', at), `${at}.at`); });
   }
 }
-/**
- * @param {unknown} value
- * @param {string} label
- * @param {string} workerId
- * @param {string} ownerSession
- * @returns {asserts value is StoredWorkerV1}
- */
-function assertWorkerRecord(value, label, workerId, ownerSession) { const facts = profileFacts(); checkWorkerRecord(value, label, workerId, ownerSession, false, facts); rejectUnsupported(facts); }
-/** @param {unknown} value @param {string} label @param {string} workerId @param {string} ownerSession @returns {StoredWorkerV1} */
-function validateWorkerRecord(value, label, workerId, ownerSession) { assertWorkerRecord(value, label, workerId, ownerSession); return value; }
 
 /** @param {unknown} value @param {() => string} createAttemptId */
 export function migrateStoredState(value, createAttemptId) {
@@ -910,10 +896,6 @@ function checkReport(value, label, historical, finalized) {
 function assertReportEnvelope(value, label = 'report') { checkReport(value, label, false, false); }
 /** @param {unknown} value @param {string} [label] @returns {ReportEnvelope} */
 export function validateReportEnvelope(value, label = 'report') { assertReportEnvelope(value, label); return value; }
-/** @param {unknown} value @param {string} label @returns {asserts value is FinalizedReport} */
-function assertFinalizedReport(value, label) { checkReport(value, label, false, true); }
-/** @param {unknown} value @param {string} label @returns {FinalizedReport} */
-function validateFinalizedReport(value, label) { assertFinalizedReport(value, label); return value; }
 
 /** @param {unknown} value @param {ExpectedIdentity} [expected] @returns {asserts value is Authority} */
 function assertAuthority(value, expected = {}) {
