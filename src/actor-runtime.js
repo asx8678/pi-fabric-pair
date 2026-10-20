@@ -415,33 +415,37 @@ export class PiRuntime {
     requireValue(materialized.header.id === initial.sessionId, 'Pi did not materialize the bound session header');
     if (prelaunch) requireValue(isDeepStrictEqual(materialized.header, prelaunch.header), 'Bound session header changed during launch');
     requireValue(materialized.count - (prelaunch?.count ?? 0) <= 4, 'Session history has an unexpected initialization suffix');
-    this.#checkInitSuffix(prelaunch?.lastId ?? null, loaded.suffix, initial.thinkingLevel);
+    this.#checkInitSuffix(prelaunch?.lastId ?? null, loaded.suffix);
     await this.#compareTail(materialized, null); this.#assertCurrent(null);
     this.#history = materialized;
     await this.#send('set_model', { provider: o.spec.provider, modelId: o.spec.model }, null);
-    const modelState = await this.#readState(null);
+    await this.#readState(null);
     // The model and effort setters append a short suffix between two full comparisons (the launch
     // tail above, the probe below), so these passes check only that suffix against the file.
     const afterModel = await this.#extend(materialized, null, false);
-    this.#checkInitSuffix(materialized.lastId, afterModel.suffix, modelState.thinkingLevel);
+    this.#checkInitSuffix(materialized.lastId, afterModel.suffix);
     const levels = record(await this.#send('get_available_thinking_levels', {}, null), 'Thinking levels');
     requireValue(Array.isArray(levels.levels) && levels.levels.includes(o.spec.effort), `Unsupported worker effort: ${o.spec.effort}`);
     await this.#send('set_thinking_level', { level: o.spec.effort }, null);
     const state = await this.#readState(null); this.#exactState(state);
     const afterSetters = await this.#extend(afterModel.history, null, false);
     requireValue(afterSetters.history.count - materialized.count <= 4, 'Session history has an unexpected initialization suffix');
-    this.#checkInitSuffix(afterModel.history.lastId, afterSetters.suffix, o.spec.effort); this.#history = afterSetters.history;
+    this.#checkInitSuffix(afterModel.history.lastId, afterSetters.suffix); this.#history = afterSetters.history;
     await this.#waitIdle(this.#startupTimeout(), null); // separately scoped startup dialogs must finish first
     const readiness = await this.#bridgeCommand('probe', null);
     this.#assertCurrent(null); this.#ready = true; this.#wake(); return readiness;
   }
-  /** @param {string | null} parentId @param {RecordValue[]} suffix @param {string} initialThinking */
-  #checkInitSuffix(parentId, suffix, initialThinking) {
+  /**
+   * Any effort change is allowed here: an inherited extension may restore a per-model effort on the
+   * model switch (pi-model-sort does), and the effort is then set and checked exactly above.
+   * @param {string | null} parentId @param {RecordValue[]} suffix
+   */
+  #checkInitSuffix(parentId, suffix) {
     requireValue(suffix.length <= 4, 'Session history has an unexpected initialization suffix');
     /** @type {unknown} */ let parent = parentId;
     for (const entry of suffix) {
       requireValue(entry.parentId === parent, 'Initialization suffix moved the active branch'); parent = entry.id;
-      requireValue((entry.type === 'model_change' && entry.provider === this.#options.spec.provider && entry.modelId === this.#options.spec.model) || (entry.type === 'thinking_level_change' && entry.thinkingLevel === initialThinking), 'Unexpected session initialization entry');
+      requireValue((entry.type === 'model_change' && entry.provider === this.#options.spec.provider && entry.modelId === this.#options.spec.model) || (entry.type === 'thinking_level_change' && THINKING.has(String(entry.thinkingLevel))), 'Unexpected session initialization entry');
     }
   }
   /**
