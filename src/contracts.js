@@ -82,7 +82,7 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {HistoricalProbeV1 & {ownerEpoch: number, workerGeneration: number, meshRoot?: string}} StoredProbeV1 */
 /** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, summaryDetail: SummaryDetail}} PreDeferredPolicyV1 */
 /** @typedef {PreDeferredPolicyV1 & {maxRevisionsPerStep: number}} StoredPolicyV1 */
-/** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number, pausedBy?: 'human', mainRecoveries?: number}} StoredTaskFieldsV1 */
+/** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number, pausedBy?: 'human', mainRecoveries?: number, timeline?: import('./timeline.js').TimelineEntry[]}} StoredTaskFieldsV1 */
 /** @typedef {StoredTaskFieldsV1 & {workerId: string, attemptId: string, attemptNumber: number, pendingReport: ReportEnvelope | null, report: FinalizedReport | null, decisions: Record<string, StoredDecision>} & ({policy: StoredPolicyV1, limits: TaskLimits} | {policy: PreDeferredPolicyV1, limits: BaseTaskLimits})} StoredTaskV1 */
 /** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null, pid?: number, spawnedAt?: number}} StoredWorkerFieldsV1 */
 /** @typedef {StoredWorkerFieldsV1 & {workerGeneration: number, task: StoredTaskV1 | null}} StoredWorkerV1 */
@@ -500,10 +500,25 @@ function validateTaskReportIdentity(report, label, task, workerId, stepIds, curr
   reference(!finalOnly || payload.kind !== 'checkpoint', `${label}.payload.kind`, 'Final-only policy does not accept intermediate checkpoints');
   reference(payload.kind !== 'final_review' || finalOnly || stepIndex === steps.length - 1, `${label}.payload.kind`, 'Premature final review');
 }
+/**
+ * The optional per-task timeline: the last few reports and decisions. It is history for the dashboard, not
+ * authority, so only its shape is checked and an absent timeline stays valid.
+ * @param {unknown} value @param {string} label
+ */
+function checkTimeline(value, label) {
+  for (const [index, entry] of array(value, label).entries()) {
+    const at = `${label}[${index}]`, record = object(entry, at);
+    const type = choice(record.type, ['report', 'decision'], `${at}.type`);
+    id(record.reportId, `${at}.reportId`);
+    integer(record.step, `${at}.step`, 1); integer(record.at, `${at}.at`);
+    if (type === 'report') text(record.kind, `${at}.kind`, 40), object(record.verification, `${at}.verification`);
+    else text(record.action, `${at}.action`, 20), text(record.feedback, `${at}.feedback`, 1000);
+  }
+}
 /** @param {unknown} value @param {string} label @param {string} workerId @param {ProfileFacts} facts */
 function checkStoredTask(value, label, workerId, facts) {
   const task = object(value, label);
-  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', 'pausedBy', 'mainRecoveries', 'workerId', 'attemptId', 'attemptNumber'], label);
+  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', 'pausedBy', 'mainRecoveries', 'timeline', 'workerId', 'attemptId', 'attemptNumber'], label);
   for (const key of ['id', 'requestId', 'leaseId']) id(required(task, key, label), `${label}.${key}`);
   reference(id(required(task, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Task targets a different worker');
   id(required(task, 'attemptId', label), `${label}.attemptId`); integer(required(task, 'attemptNumber', label), `${label}.attemptNumber`, 1);
@@ -553,6 +568,8 @@ function checkStoredTask(value, label, workerId, facts) {
     reference(decision.action === last.action && decision.feedback === last.feedback, `${label}.lastDecision`, 'Last decision contradicts its retained decision');
   }
   for (const key of ['dispatchSettleSequence', 'pendingSince', 'completedAt', 'stepRevisions', 'mainRecoveries']) if (Object.hasOwn(task, key)) integer(task[key], `${label}.${key}`);
+  // Optional and additive: a task written before the timeline existed has none, and a corrupt entry is dropped.
+  if (Object.hasOwn(task, 'timeline')) checkTimeline(task.timeline, `${label}.timeline`);
   if (Object.hasOwn(task, 'abortRequested')) bool(task.abortRequested, `${label}.abortRequested`);
   if (Object.hasOwn(task, 'pausedBy')) choice(task.pausedBy, ['human'], `${label}.pausedBy`);
   for (const key of ['interruption', 'previousStatus', 'cancelReason']) if (Object.hasOwn(task, key)) text(task[key], `${label}.${key}`, TASK_NOTE_LIMIT);

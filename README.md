@@ -120,12 +120,12 @@ instruction.
 
 | Command | Purpose |
 | --- | --- |
-| `/pair` | Open the dashboard; it lists what needs you first. |
+| `/pair` or alt+w | Open the live dashboard; it lists what needs you first. |
 | `/pair settings` | Choose the worker, review policy, and limits. |
 | `/pair status` | See activity, progress, and observed cache usage. |
 | `/pair reload` | Reload saved Pair settings while Main stays open. |
 | `/pair restart worker` | Reload settings and restart only the worker, keeping its conversation. |
-| `/pair report` | Read the current report as a card (read-only; Main still inspects). |
+| `/pair report` | Read the current report as a card: Pair's own checks first, then the worker's claims (read-only; Main still inspects). |
 | `/pair diff` | Scroll the checkpoint diff; `[`/`]` jump between files, `/` searches. |
 | `/pair inbox` | Inspect retained reports. |
 | `/pair yield` | Explicitly send retained, unacknowledged reports to Main. |
@@ -139,6 +139,158 @@ Invalid configuration leaves the last valid settings in use.
 
 Cancel and stop do not undo file changes. Normal Main shutdown also stops owned
 workers; `/new`, `/resume` or a fork asks first while the worker is running.
+
+`/pair` completes its own subcommands, configured worker IDs (second word of
+start, stop, pause, resume, cancel, restart, report, diff, transcript, reconcile
+and reset-worker) and the indicator modes, each with a one-line description. A
+mistyped subcommand gets its closest matches: `Unknown Pair command "stpo". Did
+you mean /pair stop?`, or up to three when several are equally close.
+
+## The dashboard
+
+Press **alt+w**, or type `/pair` with no arguments, to open the dashboard. It is
+one live screen: the worker's model and state, the plan with the current step
+marked, the last checkpoint's Pair checks, and the keys that apply right now.
+It updates in place — elapsed time, activity and state — while it stays open, so
+you never reopen it to see change.
+
+```
+Pair  live
+claude-opus · high   ◉ working  3m12s · $0.14 · ctx 41% · step 2/3
+
+Add retry and backoff to the fetch client
+✔ 1 Add retry policy type           approved
+▶ 2 Wire retries into fetch client  editing src/http/client.js · rev 1/3
+○ 3 Tests for backoff
+
+  t transcript  p pause  c cancel  s settings  m more  ? help
+```
+
+| Key | Action (offered only when it applies) |
+| --- | --- |
+| `r` | Read the current report card. |
+| `d` | Scroll the checkpoint diff. |
+| `t` | Follow the transcript: refreshes about every two seconds, pinned to the bottom until you scroll up. |
+| `y` | Send retained reports to Main now. |
+| `p` | Pause a running task, or resume a paused or interrupted one. |
+| `c` | Cancel the task (asks for a reason; the conversation is kept). |
+| `s` | Settings, including the indicator mode. |
+| `m` | More: restart the worker, reload settings, run doctor. |
+| `?` | List every key. |
+| `esc` / `q` | Close. |
+
+The plan also carries its short history: under each step you see what happened to
+its reports and decisions (`↻ revise: honour Retry-After on 429`, `✔ approved`,
+`↻ report checkpoint · 1 Pair check failed`), newest last and at most three per
+step, within a bounded per-task timeline of the last 60 entries. A **Recent
+activity** section lists the worker's last few tool calls, newest last.
+
+Read-only screens (report, diff, transcript, doctor) return you to the dashboard
+when they close, so two screens never stack. Confirmation prompts are unchanged:
+cancel asks for a reason, resume and stop ask before they run. Without a task the
+dashboard is a readiness screen: it says what the worker is doing and offers the
+next step (choose a model, start the worker, turn Pair on).
+
+### Attention cue (opt-in)
+
+Turn on **Settings > Attention cue** (`attentionCue: true`) if you want the
+terminal to pull you back when a worker needs a person. While it is on, a state
+that needs you — a worker error or EXIT_UNCONFIRMED, a permission dialog, a
+stalled worker, a paused or interrupted task, or reports that cannot reach Main
+because automatic delivery is off — prefixes Pi's title with a short reason:
+
+```
+! pair · permission dialog — π - my-project
+```
+
+The bell rings once for each new event, not on every render; in a real terminal it
+is a BEL written to stdout only when stdout is a TTY, so pipes and rpc output stay
+clean. As soon as nothing
+needs you the title returns to Pi's own format (`π - <project>` or
+`π - <session> - <project>`), and Pair restores it on shutdown. It is off by
+default and only ever touches the title and the bell: review, question and
+blocked stay quiet, because those wait for Main.
+
+## How a report reads in the chat
+
+A report arrives as a card that keeps what Pair verified apart from what the
+worker says. Collapsed it is at most six lines:
+
+```
+◐ Checkpoint · step 2 · peer review: concerns
+  Added backoff with jitter; 429 honours Retry-After.
+Pair verified  ✔ typecheck  ✖ test (exit 1)
+Worker claims  3 reported pass, not verified
+  4 files · src/http/client.js, src/http/retry.js, test/retry.test.js, …
+⚠ STEP_TOO_LARGE: this every-step checkpoint changes 4 files (limit 2).
+```
+
+**Pair verified** comes only from the checks Pair ran itself, with the exit code
+or `(timed out)`, or `none configured` when the project defines none. **Worker
+claims** are the worker's own report and are always labelled *not verified*.
+Amber marks what needs attention — a failed check, a step-size or budget warning,
+a peer review that reported concerns. A question or blocked report leads with its
+question, so you can answer it without expanding; expanding restores the files
+row and adds the full summary, every changed file, all worker-reported checks, the
+peer review's findings, and the report ID with the checkpoint hash.
+
+A question or blocked card leads with its question:
+
+```
+◐ Question · step 2
+  Should retries apply to POST requests, or only to idempotent GET and PUT?
+Pair verified  ✔ typecheck
+Worker claims  1 reported pass, not verified
+```
+
+Pair's other chat cards use the same vocabulary: `◐ Pair notice` and `◐ Pair
+check` mean Main has something to handle, and `⚠ Pair supervision` means a worker
+problem. A `✔` marks a passing check or a finished task, never a notice.
+
+## Status at a glance
+
+Pi draws every extension's status text on one shared footer line, so Pair keeps
+its part to a small badge and puts the detail above the editor where it can use
+the full width. The badge is steady (it never blinks) and never repeats the step
+title:
+
+| Badge | Meaning |
+| --- | --- |
+| `pair ◉ 2/4 3m` | Working on step 2 of 4, three minutes into the task. |
+| `pair ◉ starting` | The worker process is starting. |
+| `pair ◐ 2/4 review` | A checkpoint waits for Main; Main reviews it, not you. |
+| `pair ◐ 2/4 question` | The worker asked Main a question. |
+| `pair ◐ 2/4 blocked` | The worker is blocked; Main handles it. |
+| `pair ◐ 2/4 final` | Final review waits for Main. |
+| `pair ! attention` | The worker errored or vanished; run `/pair reconcile` when it asks. |
+| `pair ! permission` | The worker is waiting on a permission dialog. |
+| `pair ! idle 6m` | No worker activity for six minutes: read `/pair transcript`. |
+| `pair ! 2 reports` | Reports are retained and automatic delivery is off: run `/pair yield`. |
+| `pair ⏸ 2/4 paused` | The task is paused and waits for `/pair resume`. |
+| `pair ⏸ 2/4 interrupted` | The worker was interrupted (crash, stop or an external abort); `/pair resume` continues. |
+| `pair ✔ 4/4 done` | Every step is approved. It settles to `pair ● ready` after about ten minutes. |
+| `pair ● ready` | The worker is idle and ready for the next task. |
+| `pair ○ set up` | No worker model is chosen yet: open `/pair`. |
+| `pair ○ off` | Pair is off or the worker is stopped. |
+| `pair W1 ◉2/4 W2 ●` | One short entry per worker once several are configured. |
+
+Amber and red are reserved for states that need you; review, question and blocked
+stay calm because Main handles them. Choose what sits above the editor with
+`/pair indicator <mode>` or **Settings > Indicator**:
+
+| Mode | Shows |
+| --- | --- |
+| `minimal` (default) | The badge plus one live line with the step, activity, elapsed time, step revisions and cost. |
+| `compact` | The badge only. |
+| `board` | The badge plus a plan board: one row per step, with finished steps collapsed when the plan is long. |
+| `off` | Nothing. Commands still work. |
+
+The step title flexes down to 16 columns first; only then does the line drop
+detail, lowest priority first: speed, cache, cost, step revisions, elapsed time,
+then activity. The `n/m` count stays last. An alert (stalled worker, permission
+dialog, near-full context, a reached limit, or failed Pair verification) keeps
+its place while anything else can go. Activity names the file rather than its
+path (`editing client.js`), and a command target stays as typed.
 
 ## Review you can inspect
 
@@ -197,8 +349,14 @@ Pair's messages are in context).
 
 Pair provides workflow controls; OS and tool permissions remain your security
 boundary. Unattended operation, automatic crash recovery, and multiple writers
-are outside this MVP. The repository bundles no automated tests: verify changes
-with the static checks (`npm run typecheck`, `npm run pack:check`) and manual
-review.
+are outside this MVP.
+
+`npm test` runs the repository's own suites (plain `node --test` over
+`test/**/*.test.js`; nothing outside `test/` is collected). They cover the parts
+that are pure functions of data: the task projection the UI reads (including
+tasks saved before newer fields existed) and a harness smoke test that loads
+`src/ui.js` with Pi's TUI packages. They do not drive a live session, so still
+verify behaviour with the static checks (`npm run typecheck`, `npm run pack:check`)
+and manual review.
 
 [Example config](fabric-pair.example.json) | [MIT license](LICENSE)

@@ -44,8 +44,13 @@ export function symbol(status) {
 }
 /** @typedef {'accent' | 'success' | 'warning' | 'error' | 'muted' | 'dim' | 'text'} IndicatorColor */
 
-const PULSE_MAX_AGE_MS = 120000;
 const STALE_AGE_MS = 300000;
+/** How long a finished task keeps its ✔ badge before settling to “ready”. */
+const DONE_BADGE_MS = 600000;
+/** More plan rows than this and the board collapses finished steps into one row. */
+const BOARD_ROW_CAP = 8;
+/** A board row keeps this much of its step title before its right-hand detail is dropped. */
+const ROW_TITLE_MIN = 16;
 /** @param {PairSummary['workers'][number]} worker @param {number} [now] @returns {number} */
 function activityAge(worker, now = Date.now()) {
   const last = Math.max(worker.observation?.at || 0, worker.lastExchange?.at || 0);
@@ -106,16 +111,6 @@ function nextAction(worker) {
   if (['attention', 'error'].includes(worker.status)) return '/pair';
   return '';
 }
-/** @param {PairSummary} summary @returns {string} */
-function cacheBadge(summary) {
-  const actors = [{ label: 'M', usage: summary.main?.lastUsage ?? null },
-    ...summary.workers.map(w => ({ label: workerLabel(summary, w.id), usage: w.observation?.lastUsage ?? null }))]
-    .flatMap(({ label, usage }) => {
-      const observed = validateUsageObservation(usage, 'Last cache-read usage');
-      return observed?.cacheRatio == null ? [] : [`${label} ${Math.floor(100 * observed.cacheRatio)}%`];
-    });
-  return actors.length ? `cache ${actors.join(' ')}` : '';
-}
 /** @param {string | null | undefined} tool @param {string | null | undefined} target @returns {string} */
 function activityLabel(tool, target) {
   const name = inline(tool, 40).replace(/^extensions\./, '');
@@ -126,7 +121,175 @@ function activityLabel(tool, target) {
   const what = inline(target, 60);
   return what && !/^(running Fabric code|reporting to Main)$/.test(verb) ? `${verb} ${what}` : verb;
 }
+/** @typedef {'working' | 'starting' | 'waiting' | 'attention' | 'permission' | 'paused' | 'done' | 'ready' | 'off' | 'setup' | 'stopped'} WorkerStateKind */
 /**
+ * The one state vocabulary every surface reads (badge, live line, board, dashboard).
+ * Pure: identical inputs give identical output at any time phase, so nothing blinks.
+ * Badge words are fixed vocabulary, never prose: the badge shares one footer line with every other extension.
+ * @typedef {object} WorkerState
+ * @property {WorkerStateKind} kind
+ * @property {string} icon
+ * @property {IndicatorColor} color
+ * @property {string} label short badge word ('review', 'idle 6m', 'off')
+ * @property {string} text sentence for text views
+ * @property {{text: string, color: IndicatorColor}[]} details
+ * @property {boolean} active
+ * @property {string} [reason] plain reason the human must act
+ * @property {string} [next] the command that resolves it
+ * @property {number} [step] 1-based
+ * @property {number} [steps]
+ * @property {string} [title] the current step title
+ * @property {number} [startedAt]
+ */
+/** @param {number} ms @returns {string} */
+function compactAge(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 120 ? `${minutes}m` : `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+}
+/** @param {number} ms @returns {string} */
+function elapsedLabel(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m${String(seconds % 60).padStart(2, '0')}s`;
+  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`;
+}
+/**
+ * @param {PairSummary} summary
+ * @param {PairSummary['workers'][number]} w
+ * @param {boolean} mainBusy
+ * @param {number} [now]
+ * @returns {WorkerState}
+ */
+export function workerState(summary, w, mainBusy, now = Date.now()) {
+  const primary = !summary.workers.length || (planWorker(summary) || summary.workers[0]) === w;
+  /** @param {string} text @param {IndicatorColor} [color] */
+  const d = (text, color = 'muted') => ({ text, color });
+  const t = w.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
+  const step = t ? t.step : undefined, steps = t ? t.steps : undefined;
+  const limits = t ? t.limits : undefined;
+  // Escalations the worker cannot clear itself; each one is raised into details and the badge reason.
+  const alerts = [
+    ...(t?.limitNotice ? [{ text: `⚠ ${t.limitNotice}`, color: /** @type {const} */ ('warning') }] : []),
+    ...(t && limits?.maxRevisionsPerStep !== null && limits?.maxRevisionsPerStep !== undefined && (t.stepRevisions ?? 0) >= limits.maxRevisionsPerStep ? [{ text: `⚠ step revision limit reached (${t.stepRevisions}/${limits.maxRevisionsPerStep})`, color: /** @type {const} */ ('warning') }] : []),
+    ...(t?.lastVerification?.some(check => !check.passed) ? [{ text: `⚠ Pair verification failed: ${t.lastVerification.filter(check => !check.passed).map(check => check.name).join(', ')}`, color: /** @type {const} */ ('warning') }] : [])
+  ];
+  const title = t ? inline(t.stepList?.find(s => ['active', 'review', 'held'].includes(s.state))?.title, 400) : '';
+  const cost = typeof w.task?.reportedCost === 'number' && w.task.reportedCost > 0 ? [d(costLabel(w.task.reportedCost))] : [];
+  /** @param {string} doing */
+  const withMain = doing => {
+    const waiting = summary.waitingReports || 0;
+    if (waiting) return d(mainBusy ? 'Main is busy; delivered when its current work is done' : 'delivering to Main');
+    return d(mainBusy ? `Main is ${doing}` : 'with Main');
+  };
+  /**
+   * @param {WorkerStateKind} kind @param {string} icon @param {IndicatorColor} color @param {string} label @param {string} text
+   * @param {Partial<WorkerState>} [extra]
+   * @returns {WorkerState}
+   */
+  const state = (kind, icon, color, label, text, extra = {}) => ({ kind, icon, color, label, text, details: [], active: false, step, steps, ...(title ? { title } : {}), ...(primary && w.task?.startedAt ? { startedAt: w.task.startedAt } : {}), ...extra });
+  // Reports waiting while automatic delivery is off: only the human can hand them to Main.
+  const waiting = summary.waitingReports || 0;
+  const yieldNeeded = waiting > 0 && summary.autoDeliverReports === false;
+  /**
+   * Calm states are replaced by the human-needed yield state when reports cannot reach Main by themselves.
+   * @template {WorkerState} S @param {S} calm @returns {S | WorkerState}
+   */
+  const unlessYield = calm => (yieldNeeded ? state('attention', '!', 'warning', `${waiting} report${waiting === 1 ? '' : 's'}`, 'Reports are waiting for Main', {
+    details: [d(`${waiting} report${waiting === 1 ? '' : 's'} retained`, 'warning'), d('/pair yield to send them', 'dim')],
+    reason: `${waiting} report${waiting === 1 ? '' : 's'} waiting · delivery off`, next: '/pair yield' }) : calm);
+  if (!summary.enabled && !t) return state('off', '○', 'dim', 'off', 'Pair off', { details: [d('/pair to turn on', 'dim')] });
+  if (!hasModel(w)) return state('setup', '○', 'warning', 'set up', 'Worker not set up', { details: [d('/pair to choose a model', 'dim')], reason: 'no model chosen' });
+  if (['error', 'attention'].includes(w.status)) return state('attention', '!', 'error', 'attention', 'Worker needs attention', { details: [...(w.error ? [d(inline(w.error, 80), 'error')] : []), d(nextAction(w) || '/pair', 'dim')], reason: 'worker needs attention', next: nextAction(w) || '/pair' });
+  if (w.status === 'permission') return state('permission', '!', 'warning', 'permission', 'Worker is asking for permission', { details: [d('answer the dialog', 'dim')], reason: 'permission dialog', next: 'answer the dialog' });
+  if (t?.status === 'activating') return state('starting', '◉', 'accent', 'starting', `Worker starting step ${t.step}/${t.steps}`, { details: [...(title ? [d(title, 'text')] : []), ...cost], active: true });
+  if (t && ['running', 'awaiting_settle'].includes(t.status) && ['working', 'settling', 'starting', 'ready'].includes(w.status)) {
+    const finishing = t.status === 'awaiting_settle' || w.status === 'settling';
+    const verb = finishing ? 'finishing' : t.lastDecision === 'revise' ? 'revising' : t.lastDecision === 'answer' ? 'continuing' : 'working on';
+    const age = activityAge(w, now), obs = w.observation, percent = obs?.context?.percent;
+    const activity = obs?.compacting ? 'compacting its context' : activityLabel(obs?.currentTool, obs && 'currentTarget' in obs ? /** @type {string | null | undefined} */ (obs.currentTarget) : null);
+    const base = { active: true, details: [
+      ...(title ? [d(title, 'text')] : []),
+      ...(age >= STALE_AGE_MS ? [d(`no activity for ${ageLabel(age)}`, 'warning')] : activity ? [d(activity, 'accent')] : []),
+      d(speedLabel(observedSpeed(obs)).replace(/^avg /, '')),
+      ...(typeof percent === 'number' && percent > 75 ? [d(`context ${Math.round(percent)}%`, percent > 90 ? 'error' : 'warning')] : []),
+      ...cost] };
+    // A silent worker needs the human, so it is not merely 'working'.
+    if (age >= STALE_AGE_MS) return state('attention', '!', 'warning', `idle ${compactAge(age)}`, `Worker idle ${ageLabel(age)}`, { ...base, reason: `no activity ${compactAge(age)}`, next: '/pair transcript' });
+    return unlessYield(state('working', '◉', 'success', verb, `Worker ${verb} step ${t.step}/${t.steps}`, { ...base, details: [...alerts, ...base.details], ...(alerts.length ? { reason: alerts[0].text.replace(/^⚠ /, '') } : {}) }));
+  }
+  if (t?.status === 'question') return unlessYield(state('waiting', '◐', 'accent', 'question', `Question for Main · step ${t.step}/${t.steps}`, { details: [withMain('answering'), ...cost] }));
+  if (t?.status === 'review') return unlessYield(state('waiting', '◐', 'accent', t.reportKind === 'final_review' ? 'final review' : 'review', t.reportKind === 'final_review' ? 'Final review for Main' : `Checkpoint ${t.step}/${t.steps} ready for review`, { details: [...(title ? [d(title, 'text')] : []), withMain('reviewing'), ...alerts, ...cost] }));
+  if (t?.status === 'blocked') return unlessYield(state('waiting', '◐', 'accent', 'blocked', `Worker blocked · step ${t.step}/${t.steps}`, { details: [withMain('looking at it'), ...cost] }));
+  if (t && ['paused', 'interrupted'].includes(t.status)) return state('paused', '⏸', 'warning', t.status, `Task ${t.status} · step ${t.step}/${t.steps}`, { details: [d(nextAction(w) || '/pair resume', 'dim'), ...cost], reason: `task ${t.status}`, next: nextAction(w) || '/pair resume' });
+  if (w.status === 'starting') return state('starting', '◉', 'accent', 'starting', 'Worker starting', { active: true });
+  const model = w.model.split('/').pop() || w.model;
+  // A finished task keeps its ✔ for a while, then settles to ● ready; the step count is the whole plan.
+  if (w.task?.status === 'completed' && (now - (w.task.updatedAt ?? 0)) < DONE_BADGE_MS) return { kind: 'done', icon: '✔', color: 'success', label: 'done', text: 'Task done · all steps approved', details: [d(`${w.task.steps}/${w.task.steps} approved · worker ready`, 'success')], active: false, step: w.task.steps, steps: w.task.steps, ...(w.task.startedAt ? { startedAt: w.task.startedAt } : {}) };
+  if (w.pid && w.status === 'ready') return state('ready', '●', 'success', 'ready', 'Worker ready', { details: [d(`${model} · ${w.effort}`)] });
+  const next = nextAction(w);
+  return state('stopped', '○', 'dim', 'off', 'Worker stopped', { details: next ? [d(next, next === 'not a Git repo' ? 'warning' : 'dim')] : [], ...(next === 'not a Git repo' ? { reason: 'not a Git repo' } : {}) });
+}
+/**
+ * The footer badge: tiny, steady, attention-first. It never carries the step title, because Pi renders
+ * every extension's setStatus text on one shared line (\<=24 columns, \<=32 with several workers).
+ * @param {PairSummary} summary
+ * @param {number} [now]
+ * @returns {string}
+ */
+export function footerBadge(summary, now = Date.now()) {
+  const primary = planWorker(summary) || summary.workers[0];
+  if (!primary) return 'pair ○ off';
+  const busy = !!summary.main?.busy, many = summary.workers.length > 1, cap = many ? 32 : 24;
+  const state = workerState(summary, primary, busy, now);
+  if (!many) return truncateToWidth(['pair', ...singleBadgeParts(state, now)].join(' '), cap, '…');
+  const order = [primary, ...summary.workers.filter(w => w !== primary)];
+  /** @type {string[]} */
+  const parts = [];
+  for (let i = 0; i < order.length; i++) {
+    const w = order[i], s = w === primary ? state : workerState(summary, w, busy, now);
+    const entry = `${workerLabel(summary, w.id)} ${s.icon}${progressPart(s)}`;
+    if (visibleWidth(['pair', ...parts, entry].join(' ')) > cap) { parts.push(`+${order.length - i}`); break; }
+    parts.push(entry);
+  }
+  return truncateToWidth(['pair', ...parts].join(' '), cap, '…');
+}
+/**
+ * The one badge form: steady icon, the step count where a step matters, then one short word.
+ * Never the step title: Pi shares this line with every other extension's status text.
+ * @param {WorkerState} state
+ * @param {number} now
+ * @returns {string[]}
+ */
+function singleBadgeParts(state, now) {
+  return [state.icon, progressPart(state), badgeWord(state, now)].filter(part => part.length > 0);
+}
+/** @param {WorkerState} state @returns {string} */
+function progressPart(state) {
+  return STEP_KINDS.has(state.kind) && state.step && state.steps ? `${state.step}/${state.steps}` : '';
+}
+/** Kinds where the step count tells the human something; attention and idle states do not need it. */
+const STEP_KINDS = new Set(['working', 'waiting', 'paused', 'done']);
+/**
+ * @param {WorkerState} state
+ * @param {number} now
+ * @returns {string}
+ */
+function badgeWord(state, now) {
+  if (state.kind === 'working') {
+    // A busy worker shows how long this task has run. Alerts (a failed check, a reached limit) belong to
+    // the live line and the dashboard, never to a badge word: the badge is timeless vocabulary.
+    return state.startedAt ? compactAge(now - state.startedAt) : 'working';
+  }
+  if (state.kind === 'attention') return state.reason ? state.label : 'attention';
+  if (state.kind === 'waiting') return state.label === 'final review' ? 'final' : state.label;
+  if (state.kind === 'stopped' || state.kind === 'off') return 'off';
+  return state.label;
+}
+/**
+ * The stage shape the text views, panels and dashboard already consume, derived from workerState.
  * @param {PairSummary} summary
  * @param {PairSummary['workers'][number]} w
  * @param {boolean} mainBusy
@@ -134,46 +297,11 @@ function activityLabel(tool, target) {
  * @returns {{icon: string, color: IndicatorColor, text: string, details: {text: string, color: IndicatorColor}[], active: boolean}}
  */
 function workerStage(summary, w, mainBusy, now) {
-  /** @param {string} text @param {IndicatorColor} [color] */
-  const d = (text, color = 'muted') => ({ text, color });
-  const t = w.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
-  const step = t ? `step ${t.step}/${t.steps}` : '';
-  const title = t ? inline(t.stepList?.find(s => ['active', 'review', 'held'].includes(s.state))?.title, 48) : '';
-  const cost = typeof w.task?.reportedCost === 'number' && w.task.reportedCost > 0 ? [d(costLabel(w.task.reportedCost))] : [];
-  /** @param {string} doing */
-  const withMain = doing => {
-    const waiting = summary.waitingReports || 0;
-    if (waiting && summary.autoDeliverReports === false) return d('waiting · pair_yield or /pair yield', 'warning');
-    if (waiting) return d(mainBusy ? 'Main is busy; delivered when its current work is done' : 'delivering to Main');
-    return d(mainBusy ? `Main is ${doing}` : 'with Main');
-  };
-  if (!summary.enabled && !t) return { icon: '○', color: 'dim', text: 'Pair off', details: [d('/pair to turn on', 'dim')], active: false };
-  if (!hasModel(w)) return { icon: '○', color: 'warning', text: 'Worker not set up', details: [d('/pair to choose a model', 'dim')], active: false };
-  if (['error', 'attention'].includes(w.status)) return { icon: '!', color: 'error', text: 'Worker needs attention', details: [...(w.error ? [d(inline(w.error, 80), 'error')] : []), d(nextAction(w) || '/pair', 'dim')], active: false };
-  if (w.status === 'permission') return { icon: '!', color: 'warning', text: 'Worker is asking for permission', details: [d('answer the dialog', 'dim')], active: false };
-  if (t?.status === 'activating') return { icon: '◉', color: 'accent', text: `Worker starting ${step}`, details: [...(title ? [d(title, 'text')] : []), ...cost], active: true };
-  if (t && ['running', 'awaiting_settle'].includes(t.status) && ['working', 'settling', 'starting', 'ready'].includes(w.status)) {
-    const verb = t.status === 'awaiting_settle' || w.status === 'settling' ? 'finishing' : t.lastDecision === 'revise' ? 'revising' : t.lastDecision === 'answer' ? 'continuing' : 'working on';
-    const age = activityAge(w, now), obs = w.observation, percent = obs?.context?.percent;
-    const activity = obs?.compacting ? 'compacting its context' : activityLabel(obs?.currentTool, obs && 'currentTarget' in obs ? /** @type {string | null | undefined} */ (obs.currentTarget) : null);
-    return { icon: '◉', color: 'success', text: `Worker ${verb} ${step}`, active: true, details: [
-      ...(title ? [d(title, 'text')] : []),
-      ...(age >= STALE_AGE_MS ? [d('no activity for 5+ min', 'error')] : activity ? [d(activity, 'accent')] : []),
-      d(speedLabel(observedSpeed(obs)).replace(/^avg /, '')),
-      ...(typeof percent === 'number' && percent > 75 ? [d(`context ${Math.round(percent)}%`, percent > 90 ? 'error' : 'warning')] : []),
-      ...cost] };
-  }
-  if (t?.status === 'question') return { icon: '◐', color: 'warning', text: `Question for Main · ${step}`, details: [withMain('answering'), ...cost], active: false };
-  if (t?.status === 'review') return { icon: '◐', color: 'warning', text: t.reportKind === 'final_review' ? 'Final review for Main' : `Checkpoint ${t.step}/${t.steps} ready for review`, details: [...(title ? [d(title, 'text')] : []), withMain('reviewing'), ...cost], active: false };
-  if (t?.status === 'blocked') return { icon: '◐', color: 'warning', text: `Worker blocked · ${step}`, details: [withMain('looking at it'), ...cost], active: false };
-  if (t && ['paused', 'interrupted'].includes(t.status)) return { icon: '⏸', color: 'warning', text: `Task ${t.status} · ${step}`, details: [d(nextAction(w) || '/pair resume', 'dim'), ...cost], active: false };
-  if (w.status === 'starting') return { icon: '◉', color: 'accent', text: 'Worker starting', details: [], active: true };
-  const model = w.model.split('/').pop() || w.model;
-  if (w.pid && w.status === 'ready') return { icon: '●', color: 'success', text: w.task?.status === 'completed' ? 'Task done · worker ready' : 'Worker ready', details: [d(`${model} · ${w.effort}`)], active: false };
-  const next = nextAction(w);
-  return { icon: '○', color: next === 'not a Git repo' ? 'warning' : 'dim', text: 'Worker stopped', details: next ? [d(next, next === 'not a Git repo' ? 'warning' : 'dim')] : [], active: false };
+  const s = workerState(summary, w, mainBusy, now);
+  return { icon: s.icon, color: s.color, text: s.text, details: s.details, active: s.active };
 }
 /**
+ * The footer status text: the tiny badge, painted. Kept as the single entry point main.js calls.
  * @param {PairSummary} summary
  * @param {boolean} mainBusy
  * @param {{fg(color: IndicatorColor, text: string): string}} [theme]
@@ -181,30 +309,17 @@ function workerStage(summary, w, mainBusy, now) {
  * @returns {string}
  */
 export function indicator(summary, mainBusy, theme, now = Date.now()) {
+  void mainBusy; // workerState recomputes its own busy flag from the summary
   const paint = painter(theme);
-  const dot = paint('dim', ' · ');
-  const primary = planWorker(summary) || summary.workers[0];
-  const many = summary.workers.length > 1;
-  const parts = [paint('dim', 'pair')];
-  for (const w of primary ? [primary, ...summary.workers.filter(other => other !== primary)] : []) {
-    const stage = workerStage(summary, w, mainBusy, now);
-    const blinking = stage.active && activityAge(w, now) <= PULSE_MAX_AGE_MS && Math.floor(now / 2000) % 2 === 1;
-    const label = many ? `${workerLabel(summary, w.id)} ` : '';
-    if (w !== primary) { parts.push(paint(stage.color, `${label}${stage.icon} ${stage.text}`)); continue; }
-    parts.push(paint(blinking ? 'dim' : stage.color, `${label}${stage.icon}`) + ' ' + paint(stage.color, stage.text), ...stage.details.map(detail => paint(detail.color, detail.text)));
-  }
-  const waiting = summary.waitingReports || 0, reviewing = primary?.task && ['question', 'review', 'blocked'].includes(primary.task.status);
-  if (waiting && !reviewing) parts.push(paint('warning', `◐ ${waiting} report${waiting === 1 ? '' : 's'} for Main`));
-  const cache = cacheBadge(summary);
-  if (cache) parts.push(paint('dim', cache));
-  return parts.join(dot);
+  const state = summary.workers.length ? workerState(summary, planWorker(summary) || summary.workers[0], !!summary.main?.busy, now) : null;
+  return paint(state ? state.color : 'dim', footerBadge(summary, now));
 }
 /** @param {PairSummary} summary @param {string} id @returns {string} */
 function workerLabel(summary, id) {
   return summary.workers.length === 1 ? 'W' : `W${summary.workers.findIndex(w => w.id === id) + 1}`;
 }
 /** @param {PairSummary} summary @returns {PairSummary['workers'][number] | undefined} */
-function planWorker(summary) {
+export function planWorker(summary) {
   const planned = summary.workers.filter(w => Array.isArray(w.task?.stepList) && w.task.stepList.length > 0);
   return planned.find(w => ['working', 'settling', 'starting', 'question', 'review', 'blocked'].includes(w.status)) || planned[0];
 }
@@ -233,51 +348,702 @@ function stepSymbol(state) {
 /** @param {StepState} state @returns {IndicatorColor} */
 function stepColor(state) {
   if (state === 'done') return 'success';
-  if (state === 'active') return 'accent';
-  if (state === 'review' || state === 'held') return 'warning';
+  // A checkpoint in review waits for Main, which is calm; a held step waits for the human.
+  if (state === 'active' || state === 'review') return 'accent';
+  if (state === 'held') return 'warning';
   return 'dim';
 }
 /** @param {StepState} state @returns {string} */
 function stepPrefix(state) { return state === 'done' ? `complete ${stepSymbol(state)}` : stepSymbol(state); }
-/** @param {PairSummary} summary @param {{fg(color: IndicatorColor, text: string): string}} [theme] @returns {string | null} */
-export function planLine(summary, theme) {
+/** @typedef {{rank: number, key: string, color: IndicatorColor, text: string, plain: string, flex?: boolean, min?: number, paint?: (plain: string) => string}} LiveSegment */
+const SEGMENT_SEPARATOR = ' · ';
+/** @param {number} done @param {number} total @param {number} cells @returns {string} */
+function barCells(done, total, cells) {
+  if (cells < 1) return '';
+  const filled = total > 0 ? Math.min(cells, Math.round((cells * done) / total)) : 0;
+  return '■'.repeat(filled) + '□'.repeat(cells - filled);
+}
+/**
+ * @param {number} done @param {number} total @param {number} cells @param {string} owner @param {string} count
+ * @param {(color: IndicatorColor, text: string) => string} paint
+ * @returns {LiveSegment}
+ */
+function progressSegment(done, total, cells, owner, count, paint) {
+  const bar = barCells(done, total, cells), filled = bar.split('□')[0].length, empty = bar.length - filled;
+  return { rank: 1, key: 'progress', color: 'muted',
+    text: (owner ? paint('muted', owner) + ' ' : '') + paint('success', '■'.repeat(filled)) + paint('dim', '□'.repeat(empty)) + (bar ? ' ' : '') + paint('muted', count),
+    plain: (owner ? owner + ' ' : '') + (bar ? bar + ' ' : '') + count };
+}
+/**
+ * Greedy width fitting, kept separate so the drop order is testable on its own.
+ * Lowest rank goes first; the flexing title shrinks to its minimum before any higher rank is dropped.
+ * @param {LiveSegment[]} segments
+ * @param {number} width
+ * @returns {string | null} the fitted line, or null when even the progress segment does not fit
+ */
+export function fitSegments(segments, width) {
+  const kept = segments.slice();
+  /** @returns {string} */
+  const joined = () => kept.map(segment => segment.text).join(SEGMENT_SEPARATOR);
+  for (;;) {
+    if (visibleWidth(joined()) <= width) return joined();
+    const flex = kept.find(segment => segment.flex);
+    if (flex) {
+      const target = visibleWidth(flex.plain) - (visibleWidth(joined()) - width);
+      if (target >= (flex.min ?? 16)) {
+        const plain = truncateToWidth(flex.plain, target, '…');
+        flex.plain = plain;
+        flex.text = flex.paint ? flex.paint(plain) : plain;
+        if (visibleWidth(joined()) <= width) return joined();
+      }
+    }
+    // Progress (rank 1) always survives; an alert (rank 2) survives while any rank above it remains.
+    let victim = -1;
+    for (let index = 0; index < kept.length; index++) {
+      const segment = kept[index];
+      const droppable = segment.rank > 1 && (segment.rank > 2 || !kept.some(other => other.rank > 2));
+      if (droppable && (victim < 0 || segment.rank > kept[victim].rank)) victim = index;
+    }
+    if (victim < 0) return null;
+    kept.splice(victim, 1);
+  }
+}
+/**
+ * The live line above the editor (indicator 'minimal'): one width-aware line, or nothing without a task.
+ * @param {PairSummary} summary
+ * @param {number} width
+ * @param {{fg(color: IndicatorColor, text: string): string}} [theme]
+ * @param {number} [now]
+ * @returns {string[]}
+ */
+export function liveLine(summary, width, theme, now = Date.now()) {
+  if (!(width > 0)) return [];
   const worker = planWorker(summary);
   const list = worker?.task?.stepList;
-  if (!worker || !list?.length) return null;
+  if (!worker || !list?.length) return [];
   const paint = painter(theme);
-  const done = list.filter(step => step.state === 'done').length;
-  const bar = progressBar(done, list.length);
-  const owner = summary.workers.length > 1 ? `${paint('muted', workerLabel(summary, worker.id))} ` : '';
-  const parts = [`${owner}${paint('success', '■'.repeat(bar.filled))}${paint('dim', '□'.repeat(bar.empty))} ${paint('muted', bar.label)}`];
+  const task = /** @type {NonNullable<PairSummary['workers'][number]['task']>} */ (worker.task);
+  const done = list.filter(step => step.state === 'done').length, many = summary.workers.length > 1;
+  const state = workerState(summary, worker, !!summary.main?.busy, now);
   const current = list.findIndex(step => ['active', 'review', 'held'].includes(step.state));
-  if (current >= 0) {
-    const step = list[current];
-    parts.push(paint(stepColor(step.state), `${stepSymbol(step.state)} ${current + 1}. ${inline(step.title)}`));
-    const later = list.length - current - 1;
-    if (later) parts.push(paint('dim', `${later} more`));
-  } else if (done === list.length) parts.push(paint('success', 'all steps approved'));
-  return parts.join(paint('dim', ' · '));
+  const step = current >= 0 ? list[current] : null;
+  const owner = many ? workerLabel(summary, worker.id) : '';
+  const count = task.step + '/' + task.steps;
+  /** @param {number} cells @returns {LiveSegment[]} */
+  const build = cells => {
+    /** @type {LiveSegment[]} */
+    const segments = [progressSegment(done, list.length, cells, owner, count, paint)];
+    const alert = alertText(worker, state, now);
+    if (alert) segments.push({ rank: 2, key: 'alert', color: alert.color, text: paint(alert.color, '⚠ ' + alert.text), plain: '⚠ ' + alert.text, paint: plain => paint(alert.color, plain) });
+    const title = step ? inline(step.title, 400) : done === list.length ? 'all steps approved' : inline(task.objective, 200);
+    const symbol = step ? stepSymbol(step.state) : '✔', titleColor = step ? stepColor(step.state) : 'success';
+    segments.push({ rank: 3, key: 'title', color: titleColor, text: paint(titleColor, symbol + ' ' + title), plain: symbol + ' ' + title, flex: true, min: 16, paint: plain => paint(titleColor, plain) });
+    const activity = activityText(worker);
+    if (activity) segments.push({ rank: 4, key: 'activity', color: 'accent', text: paint('accent', activity), plain: activity, paint: plain => paint('accent', plain) });
+    if (task.startedAt) { const elapsed = elapsedLabel(now - task.startedAt); segments.push({ rank: 5, key: 'elapsed', color: 'muted', text: paint('muted', elapsed), plain: elapsed, paint: plain => paint('muted', plain) }); }
+    const perStep = task.limits?.maxRevisionsPerStep;
+    if ((task.stepRevisions ?? 0) > 0 && typeof perStep === 'number') {
+      const revisions = 'rev ' + task.stepRevisions + '/' + perStep;
+      segments.push({ rank: 6, key: 'revisions', color: 'muted', text: paint('muted', revisions), plain: revisions, paint: plain => paint('muted', plain) });
+    }
+    if (typeof task.reportedCost === 'number' && task.reportedCost > 0) {
+      const budget = task.limits?.maxReportedCostUsd;
+      const cost = typeof budget === 'number' ? costLabel(task.reportedCost) + '/' + costLabel(budget) : costLabel(task.reportedCost);
+      segments.push({ rank: 7, key: 'cost', color: 'muted', text: paint('muted', cost), plain: cost, paint: plain => paint('muted', plain) });
+    }
+    // Slow cache reads and a measured speed only earn space when they say something notable.
+    const cache = validateUsageObservation(worker.observation?.lastUsage ?? null, 'Last cache-read usage')?.cacheRatio;
+    if (typeof cache === 'number' && cache < 0.5) { const text = 'cache ' + Math.round(cache * 100) + '%'; segments.push({ rank: 8, key: 'cache', color: 'muted', text: paint('muted', text), plain: text, paint: plain => paint('muted', plain) }); }
+    const speed = speedLabel(observedSpeed(worker.observation)).replace('avg ', '');
+    if (!speed.includes('—')) segments.push({ rank: 9, key: 'speed', color: 'muted', text: paint('muted', speed), plain: speed, paint: plain => paint('muted', plain) });
+    return segments;
+  };
+  // A wide bar first, then progressively narrower ones: the n/m count always stays.
+  for (const cells of [10, 8, 6, 4, 2, 0]) {
+    const line = fitSegments(build(cells), width);
+    if (line !== null) return [truncateToWidth(line, width, '…')];
+  }
+  return [];
+}
+/**
+ * The one alert the live line shows, or null. Alerts mark the reasons a human must act.
+ * @param {PairSummary['workers'][number]} worker
+ * @param {WorkerState} state
+ * @param {number} now
+ * @returns {{text: string, color: IndicatorColor} | null}
+ */
+function alertText(worker, state, now) {
+  if (state.kind === 'permission') return { text: 'permission dialog', color: 'warning' };
+  if (state.kind === 'attention') return { text: state.reason || 'needs attention', color: state.color === 'error' ? 'error' : 'warning' };
+  const percent = worker.observation?.context?.percent;
+  if (typeof percent === 'number' && percent >= 90) return { text: 'context ' + Math.round(percent) + '%', color: 'error' };
+  // Limits, step-revision caps and failed Pair verification are raised by workerState into details.
+  const detail = state.details.find(item => item.color === 'warning' || item.color === 'error');
+  if (detail) return { text: detail.text.replace('⚠ ', ''), color: detail.color };
+  if (state.kind === 'paused') return { text: 'held ' + compactAge(now - (worker.task?.updatedAt ?? now)), color: 'warning' };
+  return null;
+}
+/**
+ * A short path ('client.js') when the target looks like a file, the target as given otherwise (a command).
+ * The compact surfaces show basenames; the dashboard keeps the full path.
+ * @param {unknown} target @returns {string | null | undefined}
+ */
+function baseName(target) {
+  if (target == null) return target;
+  if (typeof target !== 'string') return undefined;
+  const trimmed = target.trim();
+  if (!trimmed || /\s/.test(trimmed) || !trimmed.includes('/')) return trimmed;
+  const base = trimmed.replace(/\/+$/, '').split('/').pop();
+  return base || trimmed;
+}
+/** @param {PairSummary['workers'][number]} worker @param {boolean} [full] keep the full path (dashboard) */
+function activityText(worker, full = false) {
+  const observation = worker.observation;
+  if (observation?.compacting) return 'compacting context';
+  const target = observation && 'currentTarget' in observation ? /** @type {string | null | undefined} */ (observation.currentTarget) : null;
+  return activityLabel(observation?.currentTool, full ? target : baseName(target));
+}
+/**
+ * The board (indicator 'board'): a header line, then one row per step, with finished steps collapsed
+ * into one '✔ N done' row when the plan is longer than the cap.
+ * @param {PairSummary} summary
+ * @param {number} width
+ * @param {{fg(color: IndicatorColor, text: string): string}} [theme]
+ * @param {number} [now]
+ * @returns {string[]}
+ */
+export function boardLines(summary, width, theme, now = Date.now()) {
+  if (!(width > 0)) return [];
+  const worker = planWorker(summary);
+  const list = worker?.task?.stepList;
+  if (!worker || !list?.length) return [];
+  const paint = painter(theme);
+  const task = /** @type {NonNullable<PairSummary['workers'][number]['task']>} */ (worker.task);
+  const state = workerState(summary, worker, !!summary.main?.busy, now);
+  const spend = typeof task.reportedCost === 'number' && task.reportedCost > 0
+    ? (typeof task.limits?.maxReportedCostUsd === 'number' ? costLabel(task.reportedCost) + '/' + costLabel(task.limits.maxReportedCostUsd) : costLabel(task.reportedCost)) : '';
+  const meta = [task.startedAt ? elapsedLabel(now - task.startedAt) : '', spend].filter(Boolean).join(' · ');
+  const head = 'Pair · ' + inline(task.objective, 200);
+  /** @typedef {{prefix: string, title: string, right: string, color: IndicatorColor}} BoardRow */
+  const revisions = (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? 'rev ' + task.stepRevisions + '/' + task.limits.maxRevisionsPerStep : '';
+  /** @type {BoardRow[]} */
+  const rows = list.map((step, index) => ({
+    prefix: stepSymbol(step.state) + ' ' + (index + 1) + ' ',
+    title: inline(step.title, 200),
+    right: step.state === 'active' ? [activityText(worker), revisions].filter(Boolean).join(' · ')
+      : step.state === 'review' ? 'waiting for Main' : step.state === 'held' ? 'held' : '',
+    color: stepColor(step.state) }));
+  /** @type {BoardRow[]} */
+  const shown = [];
+  if (rows.length > BOARD_ROW_CAP) {
+    const firstUnfinished = list.findIndex(step => step.state !== 'done');
+    const finished = firstUnfinished < 0 ? rows.length : firstUnfinished;
+    if (finished > 1) shown.push({ prefix: '✔ ', title: finished + ' done', right: '', color: 'success' });
+    shown.push(...rows.slice(finished > 1 ? finished : 0));
+  } else shown.push(...rows);
+  const lines = [meta ? fitRow(head, meta, width) : truncateToWidth(head, width, '…'),
+    ...shown.map(row => row.right ? fitRow(paint(row.color, row.prefix + row.title), row.right, width, row.prefix) : truncateToWidth(paint(row.color, row.prefix + row.title), width, '…'))];
+  if (state.kind === 'attention' || state.kind === 'permission' || state.kind === 'paused') {
+    const alert = alertText(worker, state, now);
+    if (alert) lines.push(truncateToWidth(paint(alert.color, '⚠ ' + alert.text), width, '…'));
+  }
+  return lines;
+}
+/** @param {string} left @param {string} right @param {number} width @returns {string} */
+function padBetween(left, right, width) {
+  const gap = width - visibleWidth(left) - visibleWidth(right);
+  return gap > 1 ? left + ' '.repeat(gap) + right : left + ' ' + right;
+}
+/**
+ * A row with left and right text: the right side keeps its place and the left title shrinks to about 16
+ * columns before the right side is dropped — the same rule the live line applies to its segments.
+ * @param {string} left @param {string} right @param {number} width @param {string} [prefix] unstyled leading glyphs
+ * @returns {string}
+ */
+function fitRow(left, right, width, prefix = '') {
+  const gap = 2;
+  const room = width - visibleWidth(right) - gap;
+  if (room >= ROW_TITLE_MIN) {
+    const fitted = truncateToWidth(left, room, '…');
+    return padBetween(fitted, right, width);
+  }
+  // Too narrow for both: drop the right side, keep the title with the full width.
+  void prefix;
+  return truncateToWidth(left, width, '…');
+}
+/**
+ * @param {() => PairSummary | null} current
+ * @param {{fg(color: IndicatorColor, text: string): string}} theme
+ * @param {(summary: PairSummary, width: number, theme: {fg(color: IndicatorColor, text: string): string}) => string[]} [draw]
+ * @returns {import('@earendil-works/pi-tui').Component}
+ */
+export function summaryWidget(current, theme, draw = (summary, width) => liveLine(summary, width, theme)) {
+  return {
+    render(width) {
+      const summary = current();
+      if (!summary || !(width > 0)) return [];
+      // A display failure must never break Pi's frame: an empty widget is the safe fallback.
+      try { return draw(summary, width, theme).map(line => truncateToWidth(line, width, '…')); } catch { return []; }
+    },
+    invalidate() {},
+  };
+}
+/**
+ * The 'minimal' indicator widget: the live line, one row.
+ * @param {() => PairSummary | null} current
+ * @param {{fg(color: IndicatorColor, text: string): string}} theme
+ * @returns {import('@earendil-works/pi-tui').Component}
+ */
+export function liveWidget(current, theme) { return summaryWidget(current, theme, (summary, width) => liveLine(summary, width, theme)); }
+/**
+ * The 'board' indicator widget: header plus step rows.
+ * @param {() => PairSummary | null} current
+ * @param {{fg(color: IndicatorColor, text: string): string}} theme
+ * @returns {import('@earendil-works/pi-tui').Component}
+ */
+export function boardWidget(current, theme) { return summaryWidget(current, theme, (summary, width) => boardLines(summary, width, theme)); }
+
+/**
+ * What the widget draws, so an unchanged plan does not re-render. Plan structure comes from the summary;
+ * the clock buckets cover the two values that move on their own (task elapsed and idle age), so a tick
+ * re-renders only when a shown number can change.
+ * @param {PairSummary} summary
+ * @param {string} mode
+ * @param {number} [now]
+ * @returns {string}
+ */
+export function widgetSignature(summary, mode, now = Date.now()) {
+  const plan = summary.workers.map(w => [w.id, w.status, w.pid, w.task ? [w.task.id, w.task.status, w.task.step, w.task.revisions, w.task.stepRevisions, w.task.reportId, w.task.lastDecision, w.task.stepList.map(step => [step.id, step.state]), w.task.reportedCost, w.task.limitNotice, w.task.lastVerification, w.task.updatedAt] : null, w.observation?.currentTool ?? null, w.observation && 'currentTarget' in w.observation ? w.observation.currentTarget ?? null : null, w.observation?.compacting ?? null, w.observation?.lastUsage ?? null, w.error ?? null]);
+  const ticks = summary.workers.map(w => {
+    const last = Math.max(w.observation?.at || 0, w.lastExchange?.at || 0);
+    return [w.task?.startedAt ? Math.floor((now - w.task.startedAt) / 1000) : 0, last > 0 ? Math.floor((now - last) / 60000) : 0];
+  });
+  return JSON.stringify([mode, plan, ticks, summary.waitingReports, summary.autoDeliverReports, summary.enabled, summary.main?.busy ?? null]);
+}
+/** @typedef {{setStatus(key: string, text: string | undefined): void, setWidget(key: string, factory: ((tui: import('@earendil-works/pi-tui').TUI, theme: {fg(color: IndicatorColor, text: string): string}) => import('@earendil-works/pi-tui').Component) | undefined, options?: {placement?: 'aboveEditor' | 'belowEditor'}): void, theme?: {fg(color: IndicatorColor, text: string): string}}} IndicatorUi */
+/**
+ * Keeps Pair's footer badge and its above-editor widget in step with one summary.
+ * The widget remembers the mode it was created for, so switching minimal <-> board replaces the component
+ * instead of leaving the old one drawing; compact, off and a missing task remove it.
+ * @param {IndicatorUi} ui
+ * @returns {{ui: IndicatorUi, update(summary: PairSummary | null, mode: string, mainBusy?: boolean, now?: number): void, clear(): void}}
+ */
+export function createIndicatorSurface(ui) {
+  /** @type {{mode: string, signature: string, tui?: import('@earendil-works/pi-tui').TUI} | null} */
+  let shown = null;
+  /** @type {PairSummary | null} */
+  let latest = null;
+  /** @type {string | undefined | symbol} */
+  let status = Symbol('unset');
+  /** @param {string | undefined} text */
+  const showStatus = text => {
+    if (status === text) return;
+    status = text;
+    ui.setStatus('fabric-pair', text);
+  };
+  const removeWidget = () => {
+    if (!shown) return;
+    shown = null;
+    ui.setWidget('fabric-pair', undefined);
+  };
+  return {
+    ui,
+    update(summary, mode, mainBusy = false, now = Date.now()) {
+      if (!summary || mode === 'off') {
+        latest = null;
+        removeWidget();
+        showStatus(undefined);
+        return;
+      }
+      latest = summary;
+      showStatus(indicator(summary, mainBusy, ui.theme, now));
+      // compact is the badge alone; minimal and board stack a widget above the editor.
+      if (mode !== 'minimal' && mode !== 'board') { removeWidget(); return; }
+      if (shown && shown.mode !== mode) removeWidget();
+      const signature = widgetSignature(summary, mode, now);
+      // A summary returned by a fresh summary() call is a new object every tick, so compare content only.
+      if (!shown) {
+        // Record the mode before registering: Pi may create the component later, and a second update
+        // must not register it again.
+        /** @type {NonNullable<typeof shown>} */
+        const entry = shown = { mode, signature };
+        ui.setWidget('fabric-pair', (tui, theme) => {
+          entry.tui = tui;
+          return mode === 'board' ? boardWidget(() => latest, theme) : liveWidget(() => latest, theme);
+        }, { placement: 'aboveEditor' });
+      } else if (shown.signature !== signature) {
+        shown.signature = signature;
+        shown.tui?.requestRender?.();
+      }
+    },
+    clear() { latest = null; removeWidget(); showStatus(undefined); },
+  };
+}
+/** @typedef {'report' | 'diff' | 'transcript' | 'yield' | 'pause' | 'resume' | 'cancel' | 'settings' | 'restart' | 'reload' | 'doctor' | 'start' | 'model' | 'enable' | 'reconcile' | 'stop' | 'repl' | 'more' | 'help' | 'close'} DashboardAction */
+/** @typedef {{key: string, action: DashboardAction, label: string}} DashboardKeyHint */
+
+/** The widest the overlay may be; wider terminals keep a readable column. */
+const DASHBOARD_MAX_WIDTH = 100;
+
+/**
+ * The dashboard's keys for the current state. A key only exists when its action applies, so the hint line
+ * can never offer a key that does nothing.
+ * @param {PairSummary} summary
+ * @param {string} [workerId]
+ * @returns {DashboardKeyHint[]}
+ */
+export function dashboardKeys(summary, workerId) {
+  const worker = (workerId ? summary.workers.find(w => w.id === workerId) : null) || planWorker(summary) || summary.workers[0];
+  if (!worker) return [{ key: 's', action: 'settings', label: 'settings' }, { key: 'm', action: 'more', label: 'more' }, { key: '?', action: 'help', label: 'help' }];
+  const task = worker.task && !['completed', 'cancelled'].includes(worker.task.status) ? worker.task : null;
+  /** @type {DashboardKeyHint[]} */
+  const keys = [];
+  if (task?.reportId && ['question', 'review', 'blocked'].includes(task.status)) {
+    keys.push({ key: 'r', action: 'report', label: 'report' }, { key: 'd', action: 'diff', label: 'diff' });
+  }
+  if (worker.sessionId) keys.push({ key: 't', action: 'transcript', label: 'transcript' });
+  if ((summary.waitingReports || 0) > 0) keys.push({ key: 'y', action: 'yield', label: 'yield' });
+  if (task && ['running', 'awaiting_settle'].includes(task.status)) keys.push({ key: 'p', action: 'pause', label: 'pause' });
+  if (task && ['paused', 'interrupted'].includes(task.status)) keys.push({ key: 'p', action: 'resume', label: 'resume' });
+  if (task) keys.push({ key: 'c', action: 'cancel', label: 'cancel' });
+  if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) keys.push({ key: '!', action: 'reconcile', label: 'reconcile' });
+  // Start needs a chosen model: without one it could only fail with a notice, and s settings covers that state.
+  if (!worker.pid && task === null && hasModel(worker)) keys.push({ key: 'n', action: 'start', label: 'start' });
+  keys.push({ key: 's', action: 'settings', label: 'settings' }, { key: 'm', action: 'more', label: 'more' }, { key: '?', action: 'help', label: 'help' });
+  return keys;
+}
+/**
+ * Maps one keypress to an action, or null when the key does not apply to this state.
+ * @param {string} data
+ * @param {PairSummary} summary
+ * @param {string} [workerId]
+ * @returns {DashboardAction | null}
+ */
+export function dashboardAction(data, summary, workerId) {
+  if (data === '\u001b' || data === 'q') return 'close';
+  const hint = dashboardKeys(summary, workerId).find(item => item.key === data);
+  return hint ? hint.action : null;
+}
+/**
+ * The row under the "More" key: maintenance actions that never need a second screen.
+ * @returns {DashboardKeyHint[]}
+ */
+export function dashboardMoreKeys() {
+  return [{ key: 'r', action: 'restart', label: 'restart worker' }, { key: 'l', action: 'reload', label: 'reload settings' }, { key: 'd', action: 'doctor', label: 'doctor' }, { key: '?', action: 'help', label: 'help' }];
+}
+/**
+ * The short history line under a step: what happened to this step's reports and decisions.
+ * @param {import('./timeline.js').TimelineEntry} entry
+ * @returns {{text: string, color: IndicatorColor, step: number}}
+ */
+export function timelineLine(entry) {
+  const step = Math.max(1, Math.trunc(entry.step));
+  if (entry.type === 'report') {
+    const failed = entry.verification.failed;
+    return { step, color: failed ? 'warning' : 'muted', text: `↻ report ${entry.kind}${failed ? ` · ${failed} Pair check${failed === 1 ? '' : 's'} failed` : ''}` };
+  }
+  if (entry.action === 'approve') return { step, color: 'success', text: '✔ approved' };
+  if (entry.action === 'revise') return { step, color: 'warning', text: `↻ revise: ${entry.feedback || 'no feedback'}` };
+  if (entry.action === 'answer') return { step, color: 'accent', text: `↻ answer: ${entry.feedback || 'no feedback'}` };
+  if (entry.action === 'cancel') return { step, color: 'warning', text: '✖ cancelled' };
+  return { step, color: 'muted', text: `↻ ${entry.action}` };
+}
+/**
+ * History lines for one step, newest last, bounded so the dashboard stays short.
+ * @param {import('./timeline.js').TimelineEntry[] | undefined} timeline
+ * @param {number} step
+ * @param {number} [limit]
+ * @returns {{text: string, color: IndicatorColor}[]}
+ */
+export function stepHistory(timeline, step, limit = 3) {
+  const entries = Array.isArray(timeline) ? timeline.filter(entry => entry.step === step) : [];
+  return entries.slice(Math.max(0, entries.length - limit)).map(entry => { const line = timelineLine(entry); return { text: line.text, color: line.color }; });
+}
+
+/** @param {PairSummary} summary @param {string} [workerId] @returns {PairSummary['workers'][number] | undefined} */
+function dashboardWorker(summary, workerId) {
+  return (workerId ? summary.workers.find(w => w.id === workerId) : null) || planWorker(summary) || summary.workers[0];
+}
+/** @param {string} notice @param {number} width @returns {string} */
+const clampNotice = (notice, width) => truncateToWidth(notice, Math.max(1, width), '…');
+
+/**
+ * What the dashboard shows. A pure function of the summary, the width and the clock, so it can be tested
+ * without Pi: header, the state line, the plan with its current step, the last checkpoint, and the keys.
+ * @param {PairSummary} summary
+ * @param {number} width
+ * @param {number} [now]
+ * @param {{workerId?: string, notice?: string | null, more?: boolean, help?: boolean, theme?: {fg(color: IndicatorColor | 'mdHeading', text: string): string, bold?(text: string): string} | null}} [options]
+ * @returns {string[]}
+ */
+export function dashboardLines(summary, width, now = Date.now(), options = {}) {
+  if (!(width > 0)) return [];
+  const theme = options.theme ?? null, fg = painter(theme), bold = (/** @type {string} */ text) => (theme?.bold ? theme.bold(text) : text);
+  const worker = dashboardWorker(summary, options.workerId);
+  const room = Math.max(20, Math.min(width, DASHBOARD_MAX_WIDTH));
+  /** @type {string[]} */
+  const lines = [];
+  const keys = options.help ? [...dashboardKeys(summary, worker?.id), ...dashboardMoreKeys().filter(item => item.key !== '?')]
+    : options.more ? dashboardMoreKeys() : dashboardKeys(summary, worker?.id);
+  // The hint row wraps rather than truncating, so help can always list every key.
+  const hints = keys.map(item => `${fg('accent', item.key)} ${item.label}`);
+  const waiting = summary.waitingReports || 0;
+  const head = waiting ? `◐ ${waiting} report${waiting === 1 ? '' : 's'} waiting for Main` : 'live';
+  const title = `Pair${worker && summary.workers.length > 1 ? ` · ${worker.id}` : ''}`;
+  lines.push(truncateToWidth(`${fg('mdHeading', bold(title))}  ${fg(waiting ? 'warning' : 'dim', head)}`, room, '…'));
+  if (!summary.enabled) lines.push(truncateToWidth(fg('warning', 'Pair is off. It accepts no new work until you turn it on.'), room, '…'));
+  if (!worker) {
+    lines.push(truncateToWidth(fg('dim', 'No worker is configured. Open settings to add one.'), room, '…'));
+    if (options.notice) lines.push(fg('warning', clampNotice(options.notice, room)));
+    lines.push(...wrapTextWithAnsi('  ' + hints.join('  '), room).map(line => fg('muted', line)));
+    return lines;
+  }
+  const state = workerState(summary, worker, !!summary.main?.busy, now);
+  const task = worker.task && !['completed', 'cancelled'].includes(worker.task.status) ? worker.task : null;
+  const model = worker.model.split('/').pop() || worker.model;
+  // One identity line: which model, what state, and the live numbers. The state word comes from the
+  // shared classifier, so the dashboard can never disagree with the badge or the live line.
+  const meta = [model, worker.effort].filter(Boolean).join(' · ');
+  const measure = [
+    task?.startedAt ? elapsedLabel(now - task.startedAt) : '',
+    typeof task?.reportedCost === 'number' && task.reportedCost > 0 ? costLabel(task.reportedCost) : '',
+    worker.observation?.context?.percent != null ? `ctx ${Math.round(worker.observation.context.percent)}%` : '',
+    state.step ? `step ${state.step}/${state.steps}` : ''
+  ].filter(Boolean).join(' · ');
+  // A working state's label is a verb ('working on'); the dashboard names the state plainly instead.
+  const stateWord = state.kind === 'working' ? 'working' : state.label;
+  lines.push(truncateToWidth(`${fg('muted', meta)}   ${fg(state.color, `${state.icon} ${stateWord}`)}${measure ? '  ' + fg('muted', measure) : ''}`, room, '…'));
+  // The state sentence is the header's job; here only what the human or Main must resolve is repeated.
+  const pending = state.details.filter(detail => (detail.color === 'warning' || detail.color === 'error') && !detail.text.startsWith('/pair'));
+  for (const detail of pending.slice(0, 2)) lines.push(truncateToWidth(fg(detail.color, detail.text), room, '…'));
+  lines.push('');
+  if (!task) {
+    // Without a task the dashboard is a readiness screen: what is true now and what to do next.
+    const readiness = !summary.enabled ? 'Pair is off: it accepts no new work until you turn it on.'
+      : !hasModel(worker) ? 'No worker model is chosen yet.'
+      : worker.pid ? `${model} is ready for the next task.`
+      : 'The worker is not running.';
+    lines.push(truncateToWidth(fg('muted', readiness), room, '…'));
+    const next = nextAction(worker);
+    if (next) lines.push(truncateToWidth(fg('accent', next === '/pair to set up' ? 'Press s to choose the worker model.' : next === '/pair start' ? 'Press n to start the worker.' : next), room, '…'));
+    if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) lines.push(truncateToWidth(fg('warning', 'The previous worker process may still be running: press ! to reconcile.'), room, '…'));
+    if (!summary.enabled) lines.push(truncateToWidth(fg('accent', 'Open settings (s) to turn Pair on.'), room, '…'));
+  } else {
+    lines.push(truncateToWidth(fg('text', bold(inline(task.objective, 300))), room, '…'));
+    // Align the right-hand column to the widest left cell that still leaves room.
+    /** @type {{left: string, right: string, color: IndicatorColor}[]} */
+    const rows = task.stepList.map((step, index) => ({
+      left: `${stepSymbol(step.state)} ${index + 1} ${inline(step.title, 200)}`,
+      right: step.state === 'active' ? [activityText(worker, true), (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? `rev ${task.stepRevisions}/${task.limits.maxRevisionsPerStep}` : ''].filter(Boolean).join(' · ')
+        : step.state === 'review' ? 'for Main' : step.state === 'held' ? 'held' : step.state === 'done' ? 'approved' : '',
+      color: stepColor(step.state) }));
+    const widest = Math.max(...rows.map(row => visibleWidth(row.left)));
+    // Two clear columns of space between the step and its detail, shrinking only when the width demands it.
+    const column = Math.min(widest + 2, Math.max(18, room - 24));
+    for (const [index, row] of rows.entries()) {
+      const right = row.right ? '  ' + row.right : '';
+      if (!right) lines.push(truncateToWidth(fg(row.color, row.left), room, '…'));
+      else if (room - visibleWidth(right) < 18) lines.push(truncateToWidth(fg(row.color, row.left), room, '…'));
+      else {
+        const pad = ' '.repeat(Math.max(1, column - visibleWidth(row.left)));
+        lines.push(truncateToWidth(fg(row.color, row.left) + pad + fg('muted', row.right), room, '…'));
+      }
+      // What happened to this step's reports: a revise with its feedback excerpt, an approval, a failed check.
+      for (const history of stepHistory(task.timeline, index + 1)) lines.push(truncateToWidth(`    ${fg(history.color, history.text)}`, room, '…'));
+    }
+    const verification = Array.isArray(task.lastVerification) ? task.lastVerification : [];
+    if (verification.length) {
+      const rendered = verification.map(check => `${check.passed ? fg('success', '✔') : fg('warning', '✖')} ${inline(check.name, 40)}`).join('  ');
+      lines.push(truncateToWidth(`  ${fg('muted', 'Last checkpoint')}  ${fg('muted', 'Pair verified')}  ${rendered}`, room, '…'));
+    } else if (task.checkpointHash) lines.push(truncateToWidth(`  ${fg('muted', 'Last checkpoint')}  ${fg('muted', 'no Pair checks configured')}`, room, '…'));
+  }
+  // Recent activity: the worker's own last tool events, oldest first, bounded by the ring buffer.
+  const activity = Array.isArray(worker.recentActivity) ? worker.recentActivity : [];
+  if (activity.length) {
+    lines.push('');
+    lines.push(truncateToWidth(fg('muted', 'Recent activity'), room, '…'));
+    for (const event of activity.slice(-4)) {
+      const when = event.at > 0 ? elapsedLabel(Math.max(0, now - event.at)) : '';
+      lines.push(truncateToWidth(`  ${fg('dim', when.padStart(5))}  ${fg('muted', inline(event.tool.replace(/^extensions\./, ''), 40))}${event.target ? ' ' + fg('dim', inline(event.target, 160)) : ''}`, room, '…'));
+    }
+  }
+  if (options.notice) lines.push(truncateToWidth(fg('warning', clampNotice(options.notice, room)), room, '…'));
+  lines.push('');
+  lines.push(...wrapTextWithAnsi('  ' + hints.join('  '), room));
+  return lines;
+}
+const DASHBOARD_TICK_MS = 2000;
+/**
+ * What the open dashboard needs from the controller: a live summary, a change subscription, and a way to
+ * stop listening. Narrow on purpose, so the component can be tested with a fake controller.
+ * @typedef {{summary(): PairSummary, on(event: 'change', listener: (summary: PairSummary) => void): unknown, off(event: 'change', listener: (summary: PairSummary) => void): unknown}} LiveSource */
+/**
+ * The thin overlay around dashboardLines: it subscribes to the controller while open and on a timer, so the
+ * screen updates in place; both are released on dispose and on close.
+ * @param {LiveSource} source
+ * @param {{workerId?: string, initial?: string | null, theme?: {fg(color: IndicatorColor | 'mdHeading', text: string): string, bold?(text: string): string} | null, now?: () => number, tickMs?: number}} [options]
+ * @returns {{render(width: number): string[], handleInput(data: string): DashboardAction[], invalidate(): void, dispose(): void, attach(finish: (value?: unknown) => void): void, readonly closed: boolean, readonly subscribed: boolean, readonly notice: string | null, readonly more: boolean, readonly help: boolean}}
+ */
+export function createDashboard(source, options = {}) {
+  const clock = options.now ?? Date.now;
+  let notice = options.initial ?? null;
+  let more = false, help = false, closed = false, disposed = false;
+  let width = 80;
+  let summary = source.summary();
+  /** @type {(() => void) | null} */
+  let done = null;
+  /** @param {PairSummary} next */
+  const listener = next => { summary = next; };
+  source.on('change', listener);
+  const timer = setInterval(() => { if (!closed) summary = source.summary(); }, options.tickMs ?? DASHBOARD_TICK_MS);
+  timer.unref?.();
+  const release = () => {
+    if (disposed) return;
+    disposed = true;
+    source.off('change', listener);
+    clearInterval(timer);
+  };
+  return {
+    get closed() { return closed; },
+    get subscribed() { return !disposed; },
+    get notice() { return notice; },
+    get more() { return more; },
+    get help() { return help; },
+    /** @param {(value?: unknown) => void} finish */
+    attach(finish) { done = finish; },
+    render(w) {
+      width = w;
+      return dashboardLines(summary, w, clock(), { theme: options.theme ?? null, workerId: options.workerId, notice, more, help });
+    },
+    /**
+     * One keypress. Navigation keys are handled here; everything else is returned for main.js to run. Keys
+     * that do not apply to this state do nothing at all.
+     * @param {string} data
+     * @returns {DashboardAction[]}
+     */
+    handleInput(data) {
+      if (closed) return [];
+      if (more || help) {
+        if (data === '\u001b' || data === 'q' || data === '?' || data === 'm') { more = false; help = false; return []; }
+        if (more) {
+          const action = dashboardMoreKeys().find(item => item.key === data)?.action;
+          if (action) { more = false; return [action]; }
+          return [];
+        }
+        return [];
+      }
+      const action = dashboardAction(data, summary, options.workerId);
+      if (!action) return [];
+      if (action === 'more') { more = true; return []; }
+      if (action === 'help') { help = true; return []; }
+      if (action === 'close') { closed = true; release(); done?.(); return []; }
+      // A read-only view reopens the dashboard when it closes, so two custom views never stack.
+      return [action];
+    },
+    invalidate() {},
+    dispose() { release(); },
+  };
+}
+/**
+ * The dashboard overlay for a TUI context. Resolves with the action the human chose, or undefined on close.
+ * @param {UIContext} ctx
+ * @param {LiveSource} source
+ * @param {{workerId?: string, notice?: string | null, overlay?: boolean}} [options]
+ * @returns {Promise<DashboardAction | undefined>}
+ */
+export async function dashboardView(ctx, source, options = {}) {
+  if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') return undefined;
+  return ctx.ui.custom((tui, theme, _keys, done) => {
+    const view = createDashboard(source, { workerId: options.workerId, initial: options.notice ?? null, theme });
+    /** @type {DashboardAction | null} */
+    let pending = null;
+    const component = {
+      /** @param {number} w */
+      render(w) { return view.render(w); },
+      invalidate() {},
+      /** Pi calls this when the view is discarded without picking anything, so release here too. */
+      dispose() { view.dispose(); },
+      handleInput(/** @type {string} */ data) {
+        const actions = view.handleInput(data);
+        if (!actions.length) { tui.requestRender(); return; }
+        pending = actions[0];
+        view.dispose();
+        done(pending);
+      },
+    };
+    return component;
+  }, { overlay: options.overlay !== false, overlayOptions: () => ({ width: '90%', minWidth: 40, maxHeight: '80%', anchor: 'center', margin: 1 }) });
+}
+/**
+ * Follow mode for the transcript: refresh while open, stay pinned to the bottom unless the human scrolls up.
+ * @typedef {{read(): Promise<string>}} FollowSource
+ * @param {FollowSource} source
+ * @param {{now?: () => number, tickMs?: number}} [options]
+ * @returns {{render(width: number): string[], handleInput(data: string): void, invalidate(): void, dispose(): void, pinned: boolean}}
+ */
+export function createFollowView(source, options = {}) {
+  const clock = options.now ?? Date.now;
+  let text = 'loading…', pinned = true, disposed = false, pageRows = 20;
+  let offset = 0;
+  /** @param {string} next */
+  const load = next => { text = next; if (pinned) offset = Number.MAX_SAFE_INTEGER; };
+  void clock;
+  const refresh = () => { source.read().then(load, error => load(`Could not read the transcript: ${briefError(error)}`)); };
+  refresh();
+  const timer = setInterval(refresh, options.tickMs ?? 2000);
+  timer.unref?.();
+  return {
+    get pinned() { return pinned; },
+    render(width) {
+      const lines = cleanText(text, 100000).replace(/\t/g, '    ').split('\n');
+      pageRows = Math.max(6, 18);
+      offset = Math.min(offset, Math.max(0, lines.length - pageRows));
+      return lines.slice(offset, offset + pageRows).map(line => truncateToWidth(line, Math.max(1, width), '…'));
+    },
+    handleInput(data) {
+      if (data === '\u001b' || data === 'q') { this.dispose(); return; }
+      if (data === '\u001b[A' || data === 'k') { offset = Math.max(0, offset - 1); pinned = false; }
+      else if (data === '\u001b[B' || data === 'j') { offset += 1; pinned = false; }
+      else if (data === 'g' || data === '\u001b[H') { offset = 0; pinned = false; }
+      else if (data === 'G' || data === '\u001b[F') { offset = Number.MAX_SAFE_INTEGER; pinned = true; }
+    },
+    invalidate() {},
+    dispose() { if (disposed) return; disposed = true; clearInterval(timer); },
+  };
+}
+/**
+ * The follow-mode transcript overlay. `onClose` runs however the view is left, so the caller can reopen the
+ * dashboard without leaving a timer behind.
+ * @param {UIContext} ctx
+ * @param {FollowSource} source
+ * @param {{title?: string, onClose?: () => void | Promise<void>}} [options]
+ * @returns {Promise<void>}
+ */
+export async function followView(ctx, source, options = {}) {
+  if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') return undefined;
+  try {
+    await ctx.ui.custom((tui, theme, _keys, done) => {
+      const view = createFollowView(source);
+      let tick = 0;
+      const timer = setInterval(() => { if (tick++ % 2 === 0) tui.requestRender(); }, 1000);
+      timer.unref?.();
+      return {
+        render(w) { return view.render(w); },
+        invalidate() {},
+        handleInput(/** @type {string} */ data) {
+          if (data === '\u001b' || data === 'q') { view.dispose(); clearInterval(timer); done(undefined); return; }
+          view.handleInput(data);
+          tui.requestRender();
+        },
+      };
+    }, { overlay: true, overlayOptions: () => ({ width: '90%', minWidth: 40, maxHeight: '80%', anchor: 'center', margin: 1 }) });
+  } finally { if (options.onClose) await options.onClose(); }
 }
 /** @param {unknown} value @returns {string} */
 function lastCacheRead(value) {
   const usage = validateUsageObservation(value, 'Last cache-read usage');
   if (!usage) return 'unknown';
   return usage.cacheRatio === null ? 'unknown' : `${(100 * usage.cacheRatio).toFixed(1)}%`;
-}
-/**
- * @param {() => PairSummary | null} current
- * @param {{fg(color: IndicatorColor, text: string): string}} theme
- * @returns {import('@earendil-works/pi-tui').Component}
- */
-export function planWidget(current, theme) {
-  return {
-    render(width) {
-      const summary = current();
-      const line = summary && width > 0 ? planLine(summary, theme) : null;
-      return line ? [' ' + truncateToWidth(line, Math.max(0, width - 2))] : [];
-    },
-    invalidate() {},
-  };
 }
 /**
  * @param {PairSummary} summary
@@ -346,7 +1112,7 @@ export function statusText(summary, native = null, now = Date.now()) {
     '## Legend',
     '> ● ready  ◉ working  ◐ waiting on Main  ○ stopped  ! needs attention',
     '> Plan: ✔ approved  ▶ in progress  ◐ in review  ⏸ held  ○ not started',
-    '> Heartbeat: the worker dot blinks while it is active; "stale" after 5 minutes of silence.',
+    '> Heartbeat: the live line above the editor shows the current step; the worker counts as stale after 5 minutes of silence.',
     '> Cache: cacheRead ÷ (input + cacheRead + cacheWrite) of the last measured request, not task totals.',
     '> Speed: weighted streaming output tokens per second, excluding request latency and tool time.',
     `> ${summary.cacheNote}`);
@@ -727,7 +1493,7 @@ async function chooseValue(ctx, title, options, current) {
 /** @param {boolean} value @returns {string} */
 function onOff(value) { return value ? 'On' : 'Off'; }
 /** @type {Readonly<Record<import('./config.js').Indicator, string>>} */
-const INDICATOR_LABEL = { minimal: 'status line + current plan step', compact: 'status line only', off: 'hidden' };
+const INDICATOR_LABEL = { minimal: 'badge + one live line above the editor', compact: 'badge only', board: 'badge + plan board above the editor', off: 'hidden' };
 
 /** @typedef {Readonly<{optional?: boolean, scale?: number, accepts: (value: number) => boolean, expected: string}>} NumberInputOptions */
 /**
@@ -907,6 +1673,7 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
       { id: '1', label: 'Enabled for new work', value: onOff(draft.enabled), tone: draft.enabled ? undefined : 'warning', hint: draft.enabled ? 'Main can delegate implementation to the worker.' : 'Pair accepts no new work while this is off.' },
       { id: '2', label: 'Autostart next session', value: onOff(draft.autoStart), hint: 'Start the worker when a session opens. No model turn is requested.' },
       { id: '14', label: 'Indicator', value: draft.indicator, hint: `${INDICATOR_LABEL[draft.indicator]}. Display only; never affects work.` },
+      { id: '23', label: 'Attention cue', value: onOff(draft.attentionCue), hint: draft.attentionCue ? 'Terminal title gains "! pair · <reason>" and one bell when a worker needs you.' : 'Off: the terminal title and bell are never changed by Pair.' },
       { id: '18', label: 'Save scope', value: scope, hint: scope === 'global' ? 'Global defaults for every project; project overrides are excluded.' : 'This project: its overrides plus inherited global defaults.' },
       { section: 'More' },
       { id: '20', label: 'Advanced settings…', hint: 'Worker workspace, read-only mode, revision limit, verification commands, extra workers.' }
@@ -971,6 +1738,7 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
       else if (index === 14) {
         draft.indicator = await chooseValue(ctx, 'Indicator · display only', INDICATORS.map(mode => ({ value: mode, hint: `${INDICATOR_LABEL[mode][0].toUpperCase()}${INDICATOR_LABEL[mode].slice(1)}.` })), draft.indicator) || draft.indicator;
       }
+      else if (index === 23) draft.attentionCue = !draft.attentionCue;
       else if (index === 16) {
         const id = await ctx.ui.input('New worker ID (letters, digits, hyphens, underscores)');
         if (id) { draft.workers.push({ id, provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }); selected = id; }
@@ -996,35 +1764,139 @@ function messageText(content) {
   if (typeof content === 'string') return content;
   return Array.isArray(content) ? content.map(part => (part && typeof part === 'object' && 'text' in part && typeof part.text === 'string' ? part.text : '')).join('\n') : '';
 }
+/** @typedef {'accent' | 'success' | 'warning' | 'error' | 'muted' | 'dim' | null} CardColor */
+/** @typedef {{color: CardColor, text: string}} CardLine */
+/** @typedef {{kind: 'report' | 'notice' | 'supervision' | 'check', report: Record<string, any> | null, lines: string[]}} CardParse */
+
 /**
- * Transcript lines for a Pair message (report, notice, supervision, check): a short card instead of
- * the raw text. The model still reads the full content. `null` leaves Pi's default rendering.
- * @param {string} text @param {boolean} expanded @returns {[string | null, string][] | null}
+ * Parses a Pair message into the card it should render. Reports carry JSON after a first header line;
+ * anything unparsable returns null so Pi keeps its default rendering of the raw text.
+ * @param {string} text
+ * @returns {CardParse | null}
  */
-function pairMessageLines(text, expanded) {
+export function parsePairMessage(text) {
   const kind = /^FABRIC PAIR (REPORT|NOTICE|SUPERVISION|CHECK)\b/.exec(text)?.[1];
   if (!kind) return null;
-  if (kind !== 'REPORT') {
-    const body = text.replace(/^FABRIC PAIR [A-Z]+\s*[—-]?\s*/, '').split('\n');
-    return [['accent', `Pair ${kind.toLowerCase()}`], ...(expanded ? body : body.slice(0, 2)).map(/** @returns {[string | null, string]} */ line => ['muted', `  ${line}`])];
+  const lower = /** @type {'report' | 'notice' | 'supervision' | 'check'} */ (kind.toLowerCase());
+  if (lower !== 'report') return { kind: lower, report: null, lines: text.replace(/^FABRIC PAIR [A-Z]+\s*[—-]?\s*/, '').split('\n') };
+  try {
+    const report = JSON.parse(text.slice(text.indexOf('\n{') + 1));
+    return report && typeof report === 'object' && !Array.isArray(report) ? { kind: 'report', report, lines: [] } : null;
+  } catch { return null; }
+}
+/** @param {unknown} value @returns {Record<string, any>[]} */
+function objectList(value) { return Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && !Array.isArray(item)) : []; }
+/** @param {unknown} value @returns {number | null} */
+function finiteOrNull(value) { return typeof value === 'number' && Number.isFinite(value) ? value : null; }
+/**
+ * One line describing the checks Pair ran itself. This is the only place a verified result may appear.
+ * @param {unknown} checks
+ * @param {boolean} expanded
+ * @returns {CardLine}
+ */
+function pairVerifiedLine(checks, expanded) {
+  const list = objectList(checks);
+  if (!list.length) return { color: 'muted', text: 'Pair verified  none configured' };
+  /** @param {Record<string, any>} check @returns {string} */
+  const one = check => {
+    const name = inline(check.name, 80) || 'check';
+    const passed = check.passed === true;
+    const suffix = passed ? '' : check.timedOut === true ? ' (timed out)' : ` (exit ${finiteOrNull(check.code) ?? 'unknown'})`;
+    return `${passed ? '✔' : '✖'} ${name}${suffix}`;
+  };
+  const shown = expanded ? list : list.slice(0, 3);
+  const failed = list.filter(check => check.passed !== true).length;
+  return { color: failed ? 'warning' : 'success', text: `Pair verified  ${shown.map(one).join('  ')}${shown.length < list.length ? '  …' : ''}` };
+}
+/**
+ * One line describing the worker's own claims. It is never presented as verification.
+ * @param {unknown} checks
+ * @param {boolean} expanded
+ * @returns {CardLine}
+ */
+function workerClaimsLine(checks, expanded) {
+  const list = objectList(checks);
+  if (!list.length) return { color: 'dim', text: 'Worker claims  none reported' };
+  /** @param {Record<string, any>} check @returns {string} */
+  const icon = check => (check.result === 'pass' ? '✔' : check.result === 'fail' ? '✖' : '○');
+  const passed = list.filter(check => check.result === 'pass').length, failed = list.filter(check => check.result === 'fail').length;
+  const phrase = failed ? `${list.length} reported, ${passed} pass ${failed} fail` : `${list.length} reported pass`;
+  const shown = expanded ? ` (${list.map(check => `${icon(check)} ${inline(check.name, 60) || 'check'}`).join('; ')})` : '';
+  return { color: failed ? 'warning' : 'muted', text: `Worker claims  ${phrase}, not verified${shown}` };
+}
+/** @param {Record<string, any>} report @param {boolean} expanded @returns {CardLine[]} */
+function reportCard(report, expanded) {
+  const summary = typeof report.summary === 'string' ? report.summary.split('\n').filter(line => line.trim()) : [];
+  const files = Array.isArray(report.actualChangedFiles) ? report.actualChangedFiles : Array.isArray(report.changedFiles) ? report.changedFiles : [];
+  const fileCount = finiteOrNull(report.changedFileCount) ?? files.length;
+  const peer = report.peerReview && typeof report.peerReview === 'object' ? report.peerReview : null;
+  const peerVerdict = peer && typeof peer.verdict === 'string' ? peer.verdict : null;
+  const step = typeof report.stepId === 'string' ? report.stepId.replace(/^step[-_ ]/i, '') : null;
+  // A question or a blocker exists for its question: show it even collapsed, so the card is actionable.
+  const kind = String(report.kind || 'report');
+  const question = typeof report.question === 'string' && report.question.trim() ? report.question : '';
+  const asksSomething = (kind === 'question' || kind === 'blocked') && question.length > 0;
+  /** @type {CardLine[]} */
+  const lines = [];
+  // Header: what kind of report, which step, and the peer verdict when one exists.
+  const head = ['◐', kindLabel(String(report.kind || 'report')), step ? `· step ${step}` : '', peerVerdict ? `· peer review: ${peerVerdict}` : ''].filter(Boolean).join(' ');
+  lines.push({ color: peerVerdict === 'fail' ? 'warning' : 'accent', text: head });
+  // The first summary line, so the card is useful before expanding. A question report leads with its
+  // question instead: that is the reason it was sent.
+  const summaryLines = summary.flatMap(line => line.split('\n')).filter(line => line.trim());
+  if (expanded) for (const line of summaryLines) lines.push({ color: null, text: `  ${inline(line, 2000)}` });
+  else lines.push({ color: null, text: `  ${inline(asksSomething ? question : summaryLines[0] ?? '(no summary)', 400)}` });
+  lines.push(pairVerifiedLine(report.independentlyRunChecks, expanded));
+  lines.push(workerClaimsLine(report.checks, expanded));
+  // Files: count plus the first few names. A collapsed question drops this row to stay within six lines.
+  const shownFiles = expanded ? files : files.slice(0, 3);
+  if (expanded || !asksSomething) lines.push({ color: 'muted', text: `  ${fileCount} file${fileCount === 1 ? '' : 's'}${shownFiles.length ? ` · ${shownFiles.map(file => inline(String(file), 120)).join(', ')}` : ''}${shownFiles.length < files.length ? ', …' : ''}` });
+  // Warnings only when the controller set them; a collapsed card keeps them on one row.
+  const notices = [report.stepSizeNotice, report.workerBudgetNotice].filter(notice => typeof notice === 'string' && notice.trim()).map(notice => inline(String(notice), 300));
+  if (notices.length) lines.push({ color: 'warning', text: `⚠ ${notices.join(' · ')}` });
+  if (!expanded) return lines;
+  // Waiting for Main is calm (accent), not a warning: Main answers it.
+  if (question) {
+    lines.push({ color: 'accent', text: kind === 'blocked' ? '  Blocker for Main' : '  Question for Main' });
+    for (const line of question.split('\n').filter(part => part.trim())) lines.push({ color: null, text: `    ${inline(line, 2000)}` });
   }
-  /** @type {Record<string, any>} */ let r;
-  try { r = JSON.parse(text.slice(text.indexOf('\n{') + 1)); } catch { return null; }
-  if (!r || typeof r !== 'object') return null;
-  const summary = typeof r.summary === 'string' ? r.summary.split('\n') : [];
-  const files = Array.isArray(r.actualChangedFiles) ? r.actualChangedFiles : Array.isArray(r.changedFiles) ? r.changedFiles : [];
-  const checks = Array.isArray(r.checks) ? r.checks : [];
-  const failed = checks.filter(c => c && c.result === 'fail').length;
-  const peer = r.peerReview && typeof r.peerReview.verdict === 'string' ? ` · peer review ${r.peerReview.verdict}` : '';
-  /** @type {[string | null, string][]} */
-  const lines = [['accent', `Pair report · ${r.workerId} · ${r.kind} · step ${r.stepId}${peer}`]];
-  lines.push(...(expanded ? summary : summary.slice(0, 1)).map(/** @returns {[string | null, string]} */ line => [null, `  ${line}`]));
-  if (typeof r.question === 'string') lines.push(['warning', `  Question: ${expanded ? r.question : inline(r.question, 200)}`]);
-  const shown = expanded ? files : files.slice(0, 5);
-  lines.push(['muted', `  ${r.changedFileCount ?? files.length} changed${shown.length ? `: ${shown.join(', ')}` : ''}${shown.length < files.length ? ', …' : ''}`]);
-  if (checks.length) lines.push([failed ? 'error' : 'muted', `  checks: ${checks.length - failed} pass${failed ? `, ${failed} fail` : ''}${expanded ? ` (${checks.map(c => `${c.name}: ${c.result}`).join('; ')})` : ''}`]);
-  if (expanded) lines.push(['dim', `  report ${r.reportId} · checkpoint ${String(r.checkpointHash || '').slice(0, 12)}`]);
+  if (files.length > shownFiles.length) for (const file of files.slice(shownFiles.length)) lines.push({ color: 'dim', text: `    ${inline(String(file), 200)}` });
+  if (Array.isArray(report.decisions) && report.decisions.length) {
+    lines.push({ color: 'muted', text: '  Worker decisions' });
+    for (const decision of report.decisions) lines.push({ color: null, text: `    • ${inline(String(decision), 500)}` });
+  }
+  if (peer) {
+    lines.push({ color: peerVerdict === 'fail' ? 'warning' : 'muted', text: `  Peer review  ${[peer.reviewer, peer.status, peerVerdict].filter(Boolean).join(' · ')}` });
+    if (typeof peer.error === 'string' && peer.error.trim()) lines.push({ color: 'warning', text: `    error: ${inline(peer.error, 400)}` });
+    if (typeof peer.findings === 'string') for (const line of peer.findings.split('\n').filter((/** @type {string} */ part) => part.trim()).slice(0, 12)) lines.push({ color: 'dim', text: `    ${inline(line, 500)}` });
+  }
+  lines.push({ color: 'dim', text: `  report ${inline(String(report.reportId || 'unknown'), 120)} · checkpoint ${inline(String(report.checkpointHash || 'unknown'), 64)}` });
   return lines;
+}
+/**
+ * The card for one Pair message: a short, trustworthy summary that keeps Pair's own checks apart from
+ * the worker's claims. Returns null when the text is not a Pair message (Pi then renders it normally).
+ * @param {string} text
+ * @param {boolean} expanded
+ * @returns {CardLine[] | null}
+ */
+export function pairMessageLines(text, expanded) {
+  const parsed = parsePairMessage(text);
+  if (!parsed) return null;
+  if (parsed.kind === 'report' && parsed.report) return reportCard(parsed.report, expanded);
+  // One vocabulary, decided by message kind and never by guessing at the words:
+  //   ◐ accent  — Pair is telling Main something it must handle (notice and check);
+  //   ⚠ warning — supervision reports a worker problem;
+  //   ✔ success is reserved for a finished task, so it never labels a notice.
+  const body = parsed.lines.map(line => line.trim()).filter(Boolean);
+  const supervision = parsed.kind === 'supervision';
+  const tone = supervision ? 'warning' : 'accent';
+  const icon = supervision ? '⚠' : '◐';
+  const label = parsed.kind === 'notice' ? 'Pair notice' : supervision ? 'Pair supervision' : 'Pair check';
+  const shown = expanded ? body : body.slice(0, 2);
+  /** @type {CardLine[]} */
+  const card = [{ color: tone, text: `${icon} ${label}` }, ...shown.map(line => ({ color: /** @type {CardColor} */ (supervision ? 'warning' : 'muted'), text: `  ${inline(line, expanded ? 2000 : 400)}` }))];
+  return card;
 }
 /**
  * @param {{content: unknown}} message @param {{expanded: boolean, outputPad?: number}} options
@@ -1035,12 +1907,14 @@ export function pairMessageComponent(message, options, theme) {
   const lines = pairMessageLines(messageText(message.content), options.expanded);
   if (!lines) return undefined;
   const pad = ' '.repeat(Math.max(0, options.outputPad ?? 1));
+  /** @type {{color: CardColor, text: string}[]} */
+  const card = lines;
   return {
     invalidate() {},
     /** @param {number} width */
     render(width) {
       const inner = Math.max(10, width - pad.length * 2);
-      return lines.flatMap(([color, line]) => wrapTextWithAnsi(color && theme ? theme.fg(color, line) : line, inner).map(part => pad + part));
+      return card.flatMap(({ color, text }) => wrapTextWithAnsi(color && theme ? theme.fg(color, text) : text, inner).map(part => pad + part));
     },
   };
 }

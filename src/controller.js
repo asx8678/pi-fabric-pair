@@ -12,6 +12,7 @@ import { excludedExtension, liveResidentHosts, meshRootFor, preflightNativeProfi
 import { assertReportSize, validateDecision, validateDispatch } from './schema.js';
 import { incrementCounter, migrateStoredState, STATE_VERSION, TASK_NOTE_LIMIT, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateReportPayload, validateStoredState } from './contracts.js';
 import { addUsage, limitExceeded, normalizedUsage } from './metrics.js';
+import { decisionEntry, normalizeActivity, normalizeTimeline, reportEntry } from './timeline.js';
 import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, digest, inside, mkdirPrivate, processStartedAt, processState, PROTOCOL, signalGroup, signallablePid, readJSON, readJsonlTail, safeId, Serial, stableDigest, uid } from './util.js';
 
 /**
@@ -75,6 +76,65 @@ function stepState(task, index) {
   if (['paused', 'interrupted', 'cancelled'].includes(task.status)) return 'held';
   return 'active';
 }
+/** @typedef {{maxRevisions: number | null, maxRevisionsPerStep: number | null, maxReportedCostUsd: number | null, maxOutputTokens: number | null}} TaskLimitsSummary */
+/** @typedef {{name: string, passed: boolean, timedOut: boolean, code: number | null}} TaskVerificationSummary */
+/**
+ * The task projection the UI sees. Every field is derived from a stored task, so an older task object
+ * (one persisted before a field existed) still projects: absent sources become null, 0 or [].
+ * @typedef {object} TaskSummary
+ * @property {string} id
+ * @property {string} attemptId
+ * @property {number} attemptNumber
+ * @property {string} objective
+ * @property {string} status
+ * @property {number} step 1-based current step
+ * @property {number} steps
+ * @property {number} revisions
+ * @property {string | null} reportId
+ * @property {string | null} reportKind
+ * @property {'answer' | 'approve' | 'revise' | null} lastDecision
+ * @property {string | null} checkpointHash
+ * @property {number | null} reportedCost
+ * @property {number} startedAt
+ * @property {number} turns
+ * @property {{id: string, title: string, state: 'done' | 'active' | 'review' | 'held' | 'todo'}[]} stepList
+ * @property {number} stepRevisions
+ * @property {TaskLimitsSummary} limits
+ * @property {string | null} limitNotice
+ * @property {number | null} updatedAt
+ * @property {TaskVerificationSummary[]} lastVerification
+ * @property {import('./timeline.js').TimelineEntry[]} timeline bounded report/decision history for the dashboard
+ */
+/**
+ * Pure projection of a stored task for the UI: no I/O, no clock, so identical input gives identical output.
+ * Every source field is read defensively, so a task persisted before a field existed still projects.
+ * @param {Partial<import('./contracts.js').StoredTaskV1>} task
+ * @returns {TaskSummary}
+ */
+export function taskSummary(task) {
+  /** @param {unknown} value @returns {number | null} */
+  const count = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
+  const steps = Array.isArray(task.steps) ? task.steps : [];
+  const stepIndex = count(task.stepIndex) ?? 0;
+  const status = String(task.status ?? '');
+  const policy = /** @type {{mode?: unknown, maxRevisions?: unknown, maxRevisionsPerStep?: unknown, maxStepFiles?: unknown} | null | undefined} */ (task.policy);
+  const source = /** @type {Partial<import('./contracts.js').BaseTaskLimits> | null | undefined} */ (task.limits);
+  /** @type {TaskLimitsSummary} */
+  const limits = { maxRevisions: count(policy?.maxRevisions), maxRevisionsPerStep: count(policy?.maxRevisionsPerStep), maxReportedCostUsd: count(source?.maxReportedCostUsd), maxOutputTokens: count(source?.maxOutputTokens) };
+  const report = task.report, verification = report?.checkpoint?.verification, usage = task.usage;
+  /** @type {import('./contracts.js').BaseTaskLimits} */
+  const budget = { maxReportedCostUsd: limits.maxReportedCostUsd, maxOutputTokens: limits.maxOutputTokens };
+  // limitExceeded only compares usage totals against these budgets, so it is handed the projected figures.
+  const budgetTask = { usage };
+  const projected = { id: task.id, attemptId: task.attemptId, attemptNumber: task.attemptNumber, objective: task.objective, status, step: stepIndex + 1, steps: steps.length, revisions: task.revisions, reportId: report?.reportId || null, reportKind: report?.payload?.kind || null, lastDecision: task.lastDecision?.action || null, checkpointHash: report?.checkpoint?.checkpointHash || null, reportedCost: usage?.reportedCost ?? null, startedAt: task.startedAt, turns: task.turns, stepList: steps.map((s, i) => ({ id: s.id, title: s.title, state: stepState({ steps, stepIndex, status }, i) })) };
+  return { .../** @type {Omit<TaskSummary, 'stepRevisions' | 'limits' | 'limitNotice' | 'updatedAt' | 'lastVerification' | 'timeline'>} */ (projected),
+    stepRevisions: count(task.stepRevisions) ?? 0, limits, limitNotice: limitExceeded(budgetTask, budget),
+    updatedAt: task.updatedAt ?? null,
+    // Check names and outcomes only: check output and artifact paths stay in the evidence directory.
+    lastVerification: Array.isArray(verification) ? verification.map(v => ({ name: v.name, passed: v.passed, timedOut: v.timedOut, code: v.code })) : [],
+    // History is optional: a task written before it existed simply has none.
+    timeline: normalizeTimeline(task.timeline) };
+}
 /**
  * @param {import('./contracts.js').StoredWorkerV1 | null | undefined} record
  * @returns {record is import('./contracts.js').StoredWorkerV1 & {task: import('./contracts.js').StoredTaskV1}}
@@ -103,6 +163,8 @@ export class PairController extends EventEmitter {
     this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory;
     /** @type {Map<string, boolean>} */
     this.workspaceGit = new Map();
+    /** Worker tool activity, refreshed from each worker's activity.json. Missing means none yet. @type {Map<string, import('./timeline.js').ActivityEvent[]>} */
+    this.recentActivity = new Map();
     /** @type {Set<string>} reports already announced as held by the automatic-delivery cap */ this.capWarned = new Set();
     this.storageDir = storageDir; this.dir = storageDir || '';
     this.scanIntervalMs = Number.isFinite(scanIntervalMs) && scanIntervalMs > 0 ? scanIntervalMs : 2000;
@@ -165,7 +227,21 @@ export class PairController extends EventEmitter {
     const paths = [...new Set(this.config.workers.map(spec => this.workspaceFor(spec)))];
     const results = await Promise.all(paths.map(async cwd => /** @type {[string, boolean]} */ ([cwd, await repositoryRoot(cwd).then(() => true, () => false)])));
     this.workspaceGit = new Map(results);
+    await this.refreshActivity();
     if (!this.closing) this.emit('change', this.summary());
+  }
+  /**
+   * Reads each worker's activity ring buffer. It is a separate file from telemetry.json (which an older Main
+   * validates strictly), so reading it tolerantly never affects the protocol: a missing or corrupt file is [].
+   * @param {string} [only] one worker, for the faster per-tick refresh
+   */
+  async refreshActivity(only) {
+    const ids = only ? [only] : Object.keys(this.state?.workers || {});
+    await Promise.all(ids.map(async id => {
+      const raw = await readJSON(path.join(this.workerDir(id), 'activity.json'), null, 64 * 1024).catch(() => null);
+      const events = normalizeActivity(raw);
+      if (events.length || this.recentActivity.has(id)) this.recentActivity.set(id, events);
+    }));
   }
   /** @template T @param {() => T | Promise<T>} action @returns {Promise<T>} */
   transaction(action) {
@@ -198,9 +274,11 @@ export class PairController extends EventEmitter {
           status: h?.permission ? 'permission' : r?.status || 'not_started', pid: h?.pid || null,
           sessionId: r?.sessionId || null, sessionFile: r?.sessionFile || null, workerGeneration: r?.workerGeneration || null, cwd: r?.cwd || spec.cwd || this.cwd,
           workspaceGit: this.workspaceGit.get(this.workspaceFor(spec)) ?? null,
-          task: task ? { id: task.id, attemptId: task.attemptId, attemptNumber: task.attemptNumber, objective: task.objective, status: task.status, step: task.stepIndex + 1, steps: task.steps.length, revisions: task.revisions, reportId: task.report?.reportId || null, reportKind: task.report?.payload?.kind || null, lastDecision: task.lastDecision?.action || null, checkpointHash: task.report?.checkpoint?.checkpointHash || null, reportedCost: task.usage?.reportedCost ?? null, startedAt: task.startedAt, turns: task.turns, stepList: task.steps.map((s, i) => ({ id: s.id, title: s.title, state: stepState(task, i) })) } : null,
+          task: task ? taskSummary(task) : null,
           observation: (h && this.runtimeData.get(h)?.telemetry) || r?.lastObservation || null, usage: r?.usage || null,
           lastExchange: r?.lastExchange || null, error: r?.error || null,
+          // The worker writes this ring buffer beside telemetry.json; a missing or unreadable file means none.
+          recentActivity: this.recentActivity.get(spec.id) ?? [],
           pendingConfiguration: r?.bound ? digest(r.bound) !== digest(spec) : false
         };
       }), cacheNote: 'Cache observations describe past requests. Pair does not guarantee retained provider cache. Prompt-cache warming belongs to Fabric (cache.status/hold); its costs are not included in Pair inference-only counters.' };
@@ -741,6 +819,8 @@ export class PairController extends EventEmitter {
     for (const [id, h] of this.handles) {
       if (this.closing) break;
       changed = (await this.#scanWorker(id, h, jobs)) || changed;
+      // Display-only: the dashboard's activity section follows the worker's own ring buffer.
+      await this.refreshActivity(id);
     }
     if (changed) await this.persist();
   }
@@ -979,6 +1059,8 @@ export class PairController extends EventEmitter {
         check(); assert(h.snapshot().idle, 'Runtime left idle while queuing checkpoint commit');
         this.consumeObservations(id, r, h); check();
         t.report = { ...incoming, checkpoint, snapshotRef }; t.pendingReport = null;
+        // History for the dashboard: bounded, additive, and never used for authority.
+        t.timeline = normalizeTimeline([...(t.timeline ?? []), reportEntry({ reportId: incoming.reportId, kind: incoming.payload.kind, step: t.stepIndex + 1, at: Date.now(), verification: checkpoint.verification })]);
         t.status = incoming.payload.kind === 'question' ? 'question' : incoming.payload.kind === 'blocked' ? 'blocked' : 'review';
         r.status = t.status; r.lastExchange = { direction: 'worker→main', kind: incoming.payload.kind, at: Date.now() };
         /** @type {import('./contracts.js').StoredNoticeV1} */
@@ -1347,6 +1429,7 @@ export class PairController extends EventEmitter {
       const decision = { hash, feedback: input.feedback, ownerEpoch: this.state.ownerEpoch, workerGeneration: r.workerGeneration, attemptId: t.attemptId, deliveryOperationId: uid('decision-delivery'), at: Date.now(), reviewerModel: this.mainObservation?.model || null, delivery: 'pending',
         ...(input.action === 'approve' ? { action: input.action, checkpointHash: input.checkpointHash } : { action: input.action, checkpointHash: input.checkpointHash || null }) };
       t.decisions[input.reportId] = decision; t.lastDecision = { action: input.action, feedback: input.feedback, reportId: input.reportId };
+      t.timeline = normalizeTimeline([...(t.timeline ?? []), decisionEntry({ reportId: input.reportId, step: t.stepIndex + 1, action: input.action, at: decision.at, feedback: input.feedback })]);
       if (this.state.notices[input.reportId]) this.state.notices[input.reportId].status = 'resolved';
       if (this.state.mainPhase) this.setPhase('open');
       if (input.action === 'revise') { t.revisions++; t.stepRevisions = (t.stepRevisions ?? 0) + 1; }

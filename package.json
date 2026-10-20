@@ -33,6 +33,7 @@
     "fabric-pair.example.json"
   ],
   "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
     "typecheck": "tsc -p tsconfig.json",
     "prepack": "npm run typecheck",
     "pack:check": "npm pack --dry-run --ignore-scripts"

@@ -6,7 +6,9 @@ import { applyNativeProfileRepairs, excludedExtension, signedIn, loadedCapabilit
 import { selectLastMeasuredUsage } from './metrics.js';
 import { gitIgnores } from './evidence.js';
 import { assert, briefError, canonical, cleanText, digest, Serial } from './util.js';
-import { ageLabel, chooseWorkerEffort, chooseWorkerModel, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, diffLineColor, doctorText, humanPatch, inboxText, indicator, kindLabel, menu, pairMessageComponent, planLine, workerModel, planWidget, reportCardLines, settingsUI, staleWorkers, statusText, textView } from './ui.js';
+import { pairCommandDescription, pairCompletions, unknownCommandMessage } from './commands.js';
+import { createAttentionCue } from './cue.js';
+import { ageLabel, chooseWorkerEffort, chooseWorkerModel, createIndicatorSurface, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, dashboardView, diffLineColor, doctorText, followView, humanPatch, inboxText, kindLabel, menu, pairMessageComponent, planWorker, reportCardLines, settingsUI, staleWorkers, statusText, textView, workerModel } from './ui.js';
 
 /** How Main calls Pair's tools, by route (see pairToolRoute in native.js). */
 const MAIN_CALLS = {
@@ -240,17 +242,24 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   let pulseTimer;
   /** @type {Set<PairController>} */
   const heldBindings = new Set();
-  /** @type {{ui: BoundMainContext['ui'], tui: import('@earendil-works/pi-tui').TUI, plan: string | null} | null} */
-  let widget = null;
+  /** @type {ReturnType<typeof createIndicatorSurface> | null} */
+  let surface = null;
+  /** @type {ReturnType<typeof createAttentionCue> | null} */
+  let cue = null;
   /** @type {ReturnType<PairController['summary']> | null} */
   let snapshot = null;
-  /** @type {{ui: BoundMainContext['ui'] | null, text: string | undefined}} */
-  let shownStatus = { ui: null, text: undefined };
-  function forgetIndicator() { widget = null; snapshot = null; shownStatus = { ui: null, text: undefined }; }
-  /** @param {BoundMainContext['ui']} ui @param {string | undefined} text */
-  function showStatus(ui, text) {
-    if (shownStatus.ui === ui && shownStatus.text === text) return;
-    shownStatus = { ui, text }; ui.setStatus('fabric-pair', text);
+  function forgetIndicator() { surface = null; snapshot = null; cue = null; }
+  /** @param {BoundMainContext} ctx @returns {string | undefined} Pi's own session name, when it has one. */
+  function sessionName(ctx) { try { return ctx.sessionManager.getSessionName?.(); } catch { return undefined; } }
+  /**
+   * The badge and widget for one ui. createIndicatorSurface owns the widget bookkeeping, so a mode switch
+   * replaces the component instead of leaving the old one drawing.
+   * @param {BoundMainContext['ui']} ui
+   * @returns {ReturnType<typeof createIndicatorSurface>}
+   */
+  function indicatorSurface(ui) {
+    if (!surface || surface.ui !== ui) surface = createIndicatorSurface(ui);
+    return surface;
   }
   /** Display only: it runs inside the controller's change event, so an error here must not fail a state change. */
   /** @param {ReturnType<PairController['summary']>} [summary] the controller's own, when it just emitted one */
@@ -261,21 +270,20 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   function renderNow(summary) {
     if (!ctxRef || ctxRef.mode !== 'tui') return;
     const ui = ctxRef.ui, current = controller, mode = config?.indicator ?? 'minimal';
-    if (widget && widget.ui !== ui) widget = null;
     if (!current || mode === 'off') {
-      snapshot = null; showStatus(ui, undefined);
-      if (widget) { ui.setWidget('fabric-pair', undefined); widget = null; }
+      snapshot = null; surface?.clear();
       return;
     }
     snapshot = summary ?? current.summary();
-    showStatus(ui, indicator(snapshot, busy, ui.theme));
-    if (mode !== 'minimal') {
-      if (widget) { ui.setWidget('fabric-pair', undefined); widget = null; }
-      return;
-    }
-    const plan = planLine(snapshot);
-    if (!widget) ui.setWidget('fabric-pair', (tui, theme) => { widget = { ui, tui, plan }; return planWidget(() => snapshot, theme); });
-    else if (widget.plan !== plan) { widget.plan = plan; widget.tui.requestRender(); }
+    // The surface paints the badge, and keeps the live line or board above the editor in step with the mode.
+    indicatorSurface(ui).update(snapshot, mode, busy);
+    // The opt-in attention cue: a title prefix and one bell per new attention event, then Pi's title back.
+    // Rebuild when the setting changes, so toggling it in settings takes effect without a restart.
+    if (cue?.cwd !== ctxRef.cwd || cue.attentionEnabled !== (config?.attentionCue === true)) cue = null;
+    // The bell is only rung when Pi's UI can set a title at all (it has no raw terminal writer), and
+    // createAttentionCue's default writer confines it to a real TTY.
+    if (!cue) cue = createAttentionCue({ setTitle: title => ctxRef?.ui.setTitle?.(title) }, { cwd: ctxRef.cwd, sessionName: sessionName(ctxRef), enabled: config?.attentionCue === true });
+    cue.update(snapshot);
   }
   /** @type {Set<string>} */
   const staleWarned = new Set();
@@ -561,13 +569,79 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     if (!running.length) return true;
     return ctx.ui.confirm('Stop worker', `${running.join(', ')} ${running.length === 1 ? 'is' : 'are'} running a task. Stopping interrupts it; the conversation and file changes are kept. Inspect the changes, then /pair resume to continue. Stop now?`);
   }
+  /**
+   * Follow mode for a worker transcript: refresh while open and stay pinned to the bottom unless the human
+   * scrolls up. Used by /pair transcript, the menu item and the dashboard's t key.
+   * @param {import('@earendil-works/pi-coding-agent').ExtensionContext} uiCtx
+   * @param {string} workerId
+   */
+  async function followTranscript(uiCtx, workerId) {
+    assert(controller, 'Pair is not bound');
+    const bound = controller;
+    await followView(uiCtx, { read: () => bound.transcript(workerId) }, { title: `Worker ${workerId}: recent text` });
+  }
+  /**
+   * The live dashboard loop: open the overlay, run the chosen action, then reopen it. Shared by bare /pair
+   * and alt+w, so both always show the same screen.
+   * @param {import('@earendil-works/pi-coding-agent').ExtensionContext} ctx
+   * @param {PairController} bound
+   * @param {(action: string) => Promise<{reopen: boolean, notice?: string}>} runAction
+   */
+  async function runDashboardLoop(ctx, bound, runAction) {
+    /** @type {string | null} */
+    let notice = null;
+    for (;;) {
+      if (stopped || controller !== bound) return;
+      const action = await dashboardView(ctx, bound, { notice });
+      if (!action) return;
+      notice = null;
+      try {
+        const outcome = await runAction(action);
+        notice = outcome.notice ?? null;
+        if (!outcome.reopen) return;
+      } catch (error) { notice = `Pair: ${briefError(error)}`; }
+    }
+  }
+  pi.registerShortcut('alt+w', {
+    description: 'Open the Pair dashboard',
+    /** @param {import('@earendil-works/pi-coding-agent').ExtensionContext} ctx */
+    async handler(ctx) {
+      // A shortcut must never throw at Pi: every "not now" case becomes a short notify.
+      try {
+        if (ctx.mode !== 'tui' || typeof ctx.ui.custom !== 'function') { ctx.ui.notify('The Pair dashboard needs Pi\'s interactive terminal mode.', 'info'); return; }
+        if (stopped) { ctx.ui.notify('Pair is shutting down.', 'info'); return; }
+        ctxRef = ctx;
+        if (!controller) {
+          if (!initialized) { ctx.ui.notify('Pair is still initializing; try again in a moment.', 'info'); return; }
+          await lifecycle.run(() => bind(ctx));
+        }
+        const bound = controller;
+        if (!bound || stopped) { ctx.ui.notify('Pair is not bound to this session yet; open /pair.', 'info'); return; }
+        if (bound.ownerSession !== String(ctx.sessionManager.getSessionId())) { ctx.ui.notify('Pair is owned by another Main session.', 'info'); return; }
+        assert(config, 'Pair configuration is not loaded');
+        // One dashboard, two doors: the same command handler, with no arguments. A shortcut's context has the
+        // same ui/session surface a command view needs, but Pi types it more narrowly.
+        await pairCommand('', /** @type {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} */ (/** @type {unknown} */ (ctx)));
+      } catch (error) { ctx.ui.notify(`Pair dashboard: ${briefError(error)}`, 'error'); }
+    },
+  });
   pi.registerCommand('pair', {
-    description: 'Pair settings/status/report/diff/start/restart/reload/stop/pause/resume/cancel/yield/reconcile/indicator/inbox/transcript/doctor/reset-worker/import-backup',
+    description: pairCommandDescription(),
     getArgumentCompletions(prefix) {
-      return ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'yield', 'reconcile', ...INDICATORS.map(mode => `indicator ${mode}`), 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup global ', 'import-backup project '].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }));
+      // Configured worker IDs complete as the second token; every item carries a short description.
+      const ids = config?.workers.map(worker => worker.id) ?? [];
+      return pairCompletions(prefix, ids);
     },
     /** @param {string} args @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx @returns {Promise<void>} */
-    async handler(args, ctx) {
+    async handler(args, ctx) { return pairCommand(args, ctx); },
+  });
+  /**
+   * The /pair command: settings, status, views and the dashboard.
+   * @param {string} args
+   * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx
+   * @returns {Promise<void>}
+   */
+  async function pairCommand(args, ctx) {
       try {
         await lifecycle.drain(); assert(!stopped, 'Pair is shutting down'); if (!controller) await lifecycle.run(() => bind(ctx)); ctxRef = ctx;
         assert(controller && controller.ownerSession === String(ctx.sessionManager.getSessionId()), 'Pair is bound to another Main session');
@@ -679,16 +753,52 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
         };
         if (command === 'report') return await showReport(id);
         if (command === 'diff') return await showDiff(id);
-        if (command === 'transcript') return textView(ctx, `Worker ${id}: recent text (read-only)`, await c.transcript(id));
+        // Follow mode: refresh while open, pinned to the bottom unless the human scrolls up.
+        if (command === 'transcript') return await followTranscript(ctx, id);
         if (command === 'inbox') return await showInbox();
         if (command === 'yield') {
           assert(!idArg && !rest.length, 'Use /pair yield to deliver ready reports to this Main session');
           return await showYield();
         }
         if (command === 'doctor') return await showDoctor(config.requirements);
-        if (command && command !== 'status') throw new Error('Unknown Pair command. Use /pair for the dashboard.');
+        if (command && command !== 'status') throw new Error(unknownCommandMessage(command));
         const showStatus = async () => textView(ctx, 'Pair · Status', statusText(c.summary(), await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true)), { panel: true });
         if (command === 'status') return await showStatus();
+        /**
+         * One press of a dashboard key. Read-only views resolve and then the dashboard reopens, so two custom
+         * views are never stacked; actions that need Main's attention end the dashboard first.
+         * @param {string} action
+         * @returns {Promise<{reopen: boolean, notice?: string}>}
+         */
+        const dashboardActionRun = async action => {
+          const summary = c.summary();
+          const target = (planWorker(summary) || summary.workers[0])?.id || id;
+          if (action === 'report') { await showReport(target); return { reopen: true }; }
+          if (action === 'diff') { await showDiff(target); return { reopen: true }; }
+          if (action === 'transcript') { await followTranscript(ctx, target); return { reopen: true }; }
+          if (action === 'yield') { await showYield(); return { reopen: !deliveredToMain }; }
+          if (action === 'pause') { await c.pause(target); informMain(`the human paused worker ${target}. Do not resume it yourself.`); return { reopen: true, notice: `Paused worker ${target}.` }; }
+          if (action === 'resume') {
+            if (!await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) return { reopen: true };
+            await offerProfileRepair(c, target); await c.resume(target); return { reopen: true, notice: `Resumed worker ${target}.` };
+          }
+          if (action === 'cancel') {
+            const reason = await ctx.ui.input('Cancel reason (the worker conversation is kept; file changes are not undone)', 'Cancelled by the user');
+            if (reason === undefined) return { reopen: true };
+            await c.cancel(target, reason.trim() || 'Cancelled by the user');
+            informMain(`the human cancelled the task on worker ${target}. Do not re-dispatch it unless the user asks.`);
+            return { reopen: true, notice: `Cancelled the task on worker ${target}.` };
+          }
+          if (action === 'reconcile') { await reconcileWorker(target); return { reopen: !deliveredToMain, ...(deliveredToMain ? { notice: `Worker ${target} reconciled.` } : {}) }; }
+          if (action === 'start') { await startWorker(target); return { reopen: true }; }
+          if (action === 'settings') { await openSettings(ctx); return { reopen: true }; }
+          if (action === 'restart') { await restartWorker(ctx, c.config.workers.length > 1 ? target : undefined); return { reopen: !deliveredToMain, ...(deliveredToMain ? { notice: 'Worker restarted.' } : {}) }; }
+          if (action === 'reload') { await reloadConfiguration(ctx, true); return { reopen: true, notice: 'Pair settings reloaded.' }; }
+          if (action === 'doctor') { await showDoctor(c.config.requirements); return { reopen: true }; }
+          return { reopen: true };
+        };
+        /** @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} uiCtx */
+        const runDashboard = async uiCtx => runDashboardLoop(uiCtx, c, dashboardActionRun);
         /** @param {import('./ui.js').DashboardItem} item @returns {Promise<void>} */
         const runItem = async item => {
           const current = config; assert(current, 'Pair configuration is not loaded');
@@ -696,7 +806,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           if (item.action === 'report') return await showReport(target);
           if (item.action === 'diff') return await showDiff(target);
           if (item.action === 'yield') return await showYield();
-          if (item.action === 'transcript') return textView(ctx, `Worker ${target}: recent text (read-only)`, await c.transcript(target));
+          if (item.action === 'transcript') return await followTranscript(ctx, target);
           if (item.action === 'start') return await startWorker(target);
           if (item.action === 'reconcile') return await reconcileWorker(target);
           if (item.action === 'model' || item.action === 'effort') {
@@ -720,6 +830,8 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           if (item.action === 'reload') { await reloadConfiguration(ctx, true); return; }
           if (item.action === 'doctor') return await showDoctor(current.requirements);
         };
+        // TUI: the live dashboard overlay. Outside a TUI the select-based menu stays the fallback.
+        if (ctx.mode === 'tui' && typeof ctx.ui.custom === 'function') return await runDashboard(ctx);
         for (;;) {
           const summary = c.summary(), items = dashboardItems(summary);
           let item = items[Number(await menu(ctx, dashboardMenu(items), { title: 'Fabric Pair', subtitle: dashboardHeader(summary), }) ?? NaN)];
@@ -733,8 +845,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           if (stopped || controller !== c || deliveredToMain) return;
         }
       } catch (error) { ctx.ui.notify(`Pair: ${briefError(error)}`, 'error'); }
-    }
-  });
+  }
   pi.on('session_start', async (_event, ctx) => {
     compacting = false; forgetIndicator(); mainGuide = null; runOutcome = null; clearInput(); idleWake = false; rescued = null; rejectReceipts('Main session changed');
     const epoch = ++bindingEpoch; stopped = false;
@@ -893,7 +1004,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     await lifecycle.drain();
     const outcomes = [...await early, ...await Promise.allSettled([...heldBindings].map(bound => bound.close()))];
     assert(outcomes.every(outcome => outcome.status === 'fulfilled'), 'Pair shutdown failed; runtime ownership locks remain held');
-    controller = null; ctxRef?.ui.setWidget('fabric-pair', undefined); ctxRef?.ui.setStatus('fabric-pair', undefined); forgetIndicator();
+    controller = null; surface?.clear(); cue?.restore(); forgetIndicator();
   });
   return { getController: () => controller, initialized: () => initialized };
 }

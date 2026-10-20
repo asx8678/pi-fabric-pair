@@ -7,16 +7,16 @@ import { EFFORT_LEVELS } from './contracts.js';
 const readJSON = readUntypedJSON;
 
 /** @typedef {'global' | 'project'} ConfigScope */
-/** @typedef {'minimal' | 'compact' | 'off'} Indicator */
+/** @typedef {'minimal' | 'compact' | 'board' | 'off'} Indicator */
 /** @type {readonly Indicator[]} */
-export const INDICATORS = ['minimal', 'compact', 'off'];
+export const INDICATORS = ['minimal', 'compact', 'board', 'off'];
 /** @param {unknown} value @returns {value is Indicator} */
 export function isIndicator(value) { return INDICATORS.some(mode => mode === value); }
 /** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], excludeExtensions: string[], extraSkills: string[], inheritExtensions: boolean, mcp: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
 /** @typedef {{enabled: boolean, provider: string, model: string, on: 'final' | 'checkpoints', timeoutMs: number}} PeerReviewConfig */
-/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, peerReview: PeerReviewConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean, autoCheckIdle: boolean, mainSupervision: boolean, maxMainRecoveries: number}} PairConfig */
+/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, peerReview: PeerReviewConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean, autoCheckIdle: boolean, mainSupervision: boolean, attentionCue: boolean, maxMainRecoveries: number}} PairConfig */
 /** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence' | 'peerReview'} NestedConfigKey */
 /** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>, peerReview?: Partial<PeerReviewConfig>}} ConfigLayer */
 /** @typedef {{scope: ConfigScope, kind: 'fabric-pair-v1' | 'handoff-v1', sourceFile: string, targetFile: string, fromVersion: 1, toVersion: 2, warnings: string[]}} ConfigMigration */
@@ -51,6 +51,8 @@ const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   autoDeliverReports: true,
   autoCheckIdle: true,
   mainSupervision: false,
+  // Opt-in terminal attention cue: a title prefix and one bell when a worker needs the human.
+  attentionCue: false,
   maxMainRecoveries: 3
 }));
 /** @type {NestedConfigKey[]} */
@@ -102,7 +104,7 @@ function assertMergedConfig(c) {
   assert(plain(c), 'Pair configuration must be an object');
   assert(plain(c.supervision) && plain(c.runtime) && plain(c.requirements) && plain(c.limits) && plain(c.verification) && plain(c.evidence) && plain(c.peerReview), 'Pair configuration sections must be objects');
   assert(c.version === CONFIG_VERSION, `Unsupported Pair config version ${c.version}; expected ${CONFIG_VERSION}`);
-  for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks', 'autoDeliverReports', 'autoCheckIdle', 'mainSupervision']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
+  for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks', 'autoDeliverReports', 'autoCheckIdle', 'mainSupervision', 'attentionCue']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
   assert(typeof c.maxMainRecoveries === 'number' && Number.isSafeInteger(c.maxMainRecoveries) && c.maxMainRecoveries >= 0 && c.maxMainRecoveries <= 20, 'maxMainRecoveries must be 0–20');
   assert(typeof c.peerReview.enabled === 'boolean', 'peerReview.enabled must be boolean');
   for (const key of ['provider', 'model']) assert(typeof c.peerReview[key] === 'string' && c.peerReview[key].length < 1000 && !c.peerReview[key].includes('\0'), `peerReview.${key} must be a string`);

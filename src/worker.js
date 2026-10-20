@@ -5,6 +5,7 @@ import { assertReportSize, reportSchema } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope, validateReportPayload } from './contracts.js';
 import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, pairToolRoute, isDirectMutation, nativeSettings, probeNative, providerFileWrite, refusedProgramReason, requestsDetachedEffect, reviewWarmingAction, signedIn, toolName, toolPlacement } from './native.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
+import { pushActivity } from './timeline.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionAPI} ExtensionAPI */
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} ExtensionContext */
@@ -382,7 +383,20 @@ export function registerWorker(pi, env = process.env) {
     setTimeout(() => ctx.shutdown(), 0);
     return { isError: true, content: [{ type: 'text', text }], details: event.details };
   });
-  pi.on('tool_execution_start', async (event, ctx) => { currentTool = event.toolName; currentTarget = toolTarget(event.toolName, event.args, ctx.cwd); await telemetry(ctx); });
+  /**
+   * Recent worker activity lives in its own small file next to telemetry.json: the older Main validates
+   * telemetry.json strictly, so its shape must not change. A failure here is never fatal.
+   * @param {string} tool @param {string | null} target @param {string} cwd
+   */
+  async function recordActivity(tool, target, cwd) {
+    try {
+      const file = path.join(dir, 'activity.json');
+      const existing = await readJSON(file, null, 64 * 1024).catch(() => null);
+      const events = pushActivity(existing && typeof existing === 'object' && 'events' in existing ? /** @type {{events: import('./timeline.js').ActivityEvent[]}} */ (existing).events : null, { tool, target: target ?? '', at: Date.now() });
+      await atomicJSON(file, { version: 1, events });
+    } catch { /* activity is a convenience, never a reason to interrupt a tool call */ }
+  }
+  pi.on('tool_execution_start', async (event, ctx) => { currentTool = event.toolName; currentTarget = toolTarget(event.toolName, event.args, ctx.cwd); await telemetry(ctx); void recordActivity(event.toolName, currentTarget, ctx.cwd); });
   pi.on('tool_execution_end', async (_event, ctx) => { currentTool = null; currentTarget = null; await telemetry(ctx); });
   pi.on('message_start', async event => {
     if (event.message?.role === 'assistant') speedStart = performance.now();
