@@ -1,14 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { agentDir, assert, atomicJSON, digest, exists, merge, plain, readJSON as readUntypedJSON, safeId } from './util.js';
+import { agentDir, assert, atomicJSON, digest, exists, isArray, merge, plain, readJSON as readUntypedJSON, safeId } from './util.js';
 import { EFFORT_LEVELS } from './contracts.js';
 
 /** @type {(file: string, fallback?: unknown, maxBytes?: number) => Promise<unknown>} */
 const readJSON = readUntypedJSON;
-/** @param {unknown} value @returns {value is Record<string, unknown>} */
-function isObject(value) { return plain(value); }
-/** @param {unknown} value @returns {value is unknown[]} */
-function isArray(value) { return Array.isArray(value); }
 
 /** @typedef {'global' | 'project'} ConfigScope */
 /** @typedef {'minimal' | 'compact' | 'off'} Indicator */
@@ -75,12 +71,12 @@ function dropDeprecatedLimits(limits) {
 
 /** @param {unknown} value @param {readonly string[]} allowed @param {string} label @returns {asserts value is Record<string, unknown>} */
 function assertKeys(value, allowed, label) {
-  assert(isObject(value), `${label} must be an object`);
+  assert(plain(value), `${label} must be an object`);
   for (const key of Object.keys(value)) assert(allowed.includes(key), `Unknown ${label} setting: ${key}`);
 }
 /** @param {unknown} [raw] @returns {PairConfig} */
 export function validateConfig(raw = {}) {
-  assert(isObject(raw), 'Pair configuration must be an object');
+  assert(plain(raw), 'Pair configuration must be an object');
   const allowed = [...Object.keys(DEFAULTS), ...DEPRECATED_KEYS];
   for (const key of Object.keys(raw)) assert(allowed.includes(key), `Unknown Pair setting: ${key}`);
   if (Object.hasOwn(raw, 'cacheWarming')) assert(raw.cacheWarming === 'off' || raw.cacheWarming === 'active', 'cacheWarming is a removed setting; delete it (prompt-cache warming is Fabric\'s cache.hold)');
@@ -89,22 +85,22 @@ export function validateConfig(raw = {}) {
     const keys = Object.keys(DEFAULTS[section]);
     assertKeys(raw[section], section === 'limits' ? [...keys, ...DEPRECATED_LIMIT_KEYS] : keys, section);
   }
-  if (isObject(raw.limits)) for (const key of DEPRECATED_LIMIT_KEYS) if (Object.hasOwn(raw.limits, key)) {
+  if (plain(raw.limits)) for (const key of DEPRECATED_LIMIT_KEYS) if (Object.hasOwn(raw.limits, key)) {
     const [minimum, maximum] = DEPRECATED_LIMIT_BOUNDS[key], value = raw.limits[key];
     assert(typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum && value <= maximum, `${key} is a removed limit and no longer enforced; delete it or keep an integer ${minimum}–${maximum}`);
   }
   /** @type {unknown} */
   const c = merge(DEFAULTS, raw);
-  if (isObject(c)) for (const key of DEPRECATED_KEYS) delete c[key];
-  if (isObject(c) && isObject(c.limits)) dropDeprecatedLimits(c.limits);
+  if (plain(c)) for (const key of DEPRECATED_KEYS) delete c[key];
+  if (plain(c) && plain(c.limits)) dropDeprecatedLimits(c.limits);
   assertMergedConfig(c);
   return c;
 }
 
 /** @param {unknown} c @returns {asserts c is PairConfig} */
 function assertMergedConfig(c) {
-  assert(isObject(c), 'Pair configuration must be an object');
-  assert(isObject(c.supervision) && isObject(c.runtime) && isObject(c.requirements) && isObject(c.limits) && isObject(c.verification) && isObject(c.evidence) && isObject(c.peerReview), 'Pair configuration sections must be objects');
+  assert(plain(c), 'Pair configuration must be an object');
+  assert(plain(c.supervision) && plain(c.runtime) && plain(c.requirements) && plain(c.limits) && plain(c.verification) && plain(c.evidence) && plain(c.peerReview), 'Pair configuration sections must be objects');
   assert(c.version === CONFIG_VERSION, `Unsupported Pair config version ${c.version}; expected ${CONFIG_VERSION}`);
   for (const key of ['enabled', 'autoStart', 'mainReadOnlyDuringTasks', 'autoDeliverReports', 'autoCheckIdle', 'mainSupervision']) assert(typeof c[key] === 'boolean', `${key} must be boolean`);
   assert(typeof c.maxMainRecoveries === 'number' && Number.isSafeInteger(c.maxMainRecoveries) && c.maxMainRecoveries >= 0 && c.maxMainRecoveries <= 20, 'maxMainRecoveries must be 0–20');
@@ -119,7 +115,7 @@ function assertMergedConfig(c) {
   /** @type {Set<string>} */
   const ids = new Set();
   for (const w of c.workers) {
-    assert(isObject(w), 'Invalid worker'); const id = safeId(w.id, 'worker ID'); assert(!ids.has(id), 'Duplicate worker ID'); ids.add(id);
+    assert(plain(w), 'Invalid worker'); const id = safeId(w.id, 'worker ID'); assert(!ids.has(id), 'Duplicate worker ID'); ids.add(id);
     for (const key of Object.keys(w)) assert(['id', 'provider', 'model', 'effort', 'cwd', 'readOnly'].includes(key), `Unknown worker setting ${key}`);
     for (const key of ['provider', 'model']) assert(typeof w[key] === 'string' && w[key].length < 1000, `worker.${key} must be a string`);
     assert(EFFORT_LEVELS.some(level => level === w.effort), `Unsupported effort level; use one of ${EFFORT_LEVELS.join(', ')}`);
@@ -149,7 +145,7 @@ function assertMergedConfig(c) {
   for (const key of ['maxReportedCostUsd', 'maxOutputTokens']) assert(c.limits[key] === null || (typeof c.limits[key] === 'number' && Number.isFinite(c.limits[key]) && c.limits[key] > 0), `${key} must be positive or null`);
   assert(isArray(c.verification.commands) && c.verification.commands.length <= 12, 'verification.commands must be an array of at most 12 commands');
   for (const v of c.verification.commands) {
-    assert(isObject(v) && typeof v.name === 'string' && typeof v.command === 'string' && v.command.length > 0 && isArray(v.args) && v.args.every(a => typeof a === 'string'), 'Verification requires {name, command, args}');
+    assert(plain(v) && typeof v.name === 'string' && typeof v.command === 'string' && v.command.length > 0 && isArray(v.args) && v.args.every(a => typeof a === 'string'), 'Verification requires {name, command, args}');
     for (const key of Object.keys(v)) assert(['name', 'command', 'args'].includes(key), `Unknown verification command setting: ${key}`);
     assert(!v.command.includes('\0') && v.args.every(a => !a.includes('\0')), 'Invalid verification command');
   }
@@ -157,7 +153,7 @@ function assertMergedConfig(c) {
 
 /** @param {unknown} raw @returns {asserts raw is ConfigLayer} */
 function assertConfigLayer(raw) {
-  assert(isObject(raw), 'Pair configuration layer must be an object');
+  assert(plain(raw), 'Pair configuration layer must be an object');
   assert(raw.version === CONFIG_VERSION, `Configuration layers must declare version ${CONFIG_VERSION}`);
   validateConfig(raw);
 }
@@ -167,7 +163,7 @@ export function validateConfigLayer(raw) {
   assertConfigLayer(raw);
   const layer = structuredClone(raw);
   for (const key of DEPRECATED_KEYS) delete /** @type {Record<string, unknown>} */ (layer)[key];
-  if (isObject(layer.limits)) {
+  if (plain(layer.limits)) {
     dropDeprecatedLimits(layer.limits);
     if (Object.keys(layer.limits).length === 0) delete layer.limits;
   }
@@ -184,8 +180,8 @@ function applyChangedFields(target, before, after) {
   let changed = false;
   for (const key of Object.keys(after)) {
     if (key === 'version') continue;
-    if (isObject(before[key]) && isObject(after[key])) {
-      const nested = isObject(target[key]) ? structuredClone(target[key]) : {};
+    if (plain(before[key]) && plain(after[key])) {
+      const nested = plain(target[key]) ? structuredClone(target[key]) : {};
       if (applyChangedFields(nested, before[key], after[key])) { target[key] = nested; changed = true; }
     } else if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) { target[key] = structuredClone(after[key]); changed = true; }
   }
@@ -216,9 +212,9 @@ function migrateShippedV1(raw, sourceFile, scope, targetFile) {
   const warnings = [];
   if (raw.enabled === true) warnings.push('Legacy enabled:true was reset to false; re-enable deliberately after reviewing the migrated settings.');
   layer.enabled = false;
-  if (isObject(layer.supervision) && layer.supervision.mode) layer.supervision.mode = migratePolicy(layer.supervision.mode, sourceFile);
-  if (isObject(layer.limits) && dropDeprecatedLimits(layer.limits)) warnings.push('Legacy per-step turn limit and task timeout are no longer enforced; they were dropped from the migrated configuration.');
-  if (isObject(layer.limits) && Object.keys(layer.limits).length === 0) delete layer.limits;
+  if (plain(layer.supervision) && layer.supervision.mode) layer.supervision.mode = migratePolicy(layer.supervision.mode, sourceFile);
+  if (plain(layer.limits) && dropDeprecatedLimits(layer.limits)) warnings.push('Legacy per-step turn limit and task timeout are no longer enforced; they were dropped from the migrated configuration.');
+  if (plain(layer.limits) && Object.keys(layer.limits).length === 0) delete layer.limits;
   assertConfigLayer(layer);
   return { layer, migration: { scope, kind: 'fabric-pair-v1', sourceFile, targetFile, fromVersion: 1, toVersion: CONFIG_VERSION, warnings } };
 }
@@ -271,7 +267,7 @@ async function readLayer(canonical, legacy, scope) {
   if (!hasCanonical && !hasLegacy) return { layer: {}, migration: null };
   const sourceFile = hasCanonical ? canonical : legacy;
   const raw = await readJSON(sourceFile);
-  assert(isObject(raw), `Pair configuration must be an object: ${sourceFile}`);
+  assert(plain(raw), `Pair configuration must be an object: ${sourceFile}`);
   if (hasLegacy || raw.schemaVersion !== undefined) return migrateHandoffV1(raw, sourceFile, scope, canonical);
   if (raw.version === CONFIG_VERSION) return currentLayer(raw, sourceFile);
   if (raw.version === 1 || raw.version === undefined) return migrateShippedV1(raw, sourceFile, scope, canonical);
@@ -279,7 +275,7 @@ async function readLayer(canonical, legacy, scope) {
 }
 /** @param {unknown} value @param {ConfigProvenance[string]} source @param {ConfigProvenance} provenance @param {string} [prefix] */
 function mark(value, source, provenance, prefix = '') {
-  if (isObject(value)) {
+  if (plain(value)) {
     for (const [key, child] of Object.entries(value)) mark(child, source, provenance, prefix ? `${prefix}.${key}` : key);
   } else if (prefix) provenance[prefix] = source;
 }
@@ -293,7 +289,7 @@ function mark(value, source, provenance, prefix = '') {
 function overlay(base, layer, source, provenance, prefix = '') {
   for (const [key, value] of Object.entries(layer)) {
     const name = prefix ? `${prefix}.${key}` : key;
-    if (isObject(value) && isObject(base[key])) overlay(base[key], value, source, provenance, name);
+    if (plain(value) && plain(base[key])) overlay(base[key], value, source, provenance, name);
     else { base[key] = structuredClone(value); mark(value, source, provenance, name); }
   }
 }
@@ -338,16 +334,16 @@ export async function previewBackupImport(cwd, trusted, scope, backupFile, env =
   const stat = await fs.lstat(sourceFile).catch(() => null);
   assert(stat?.isFile() && !stat.isSymbolicLink(), `Backup is missing or is not a regular file: ${sourceFile}`);
   assert(await exists(targetFile), `Current V2 configuration is missing: ${targetFile}`);
-  const raw = await readJSON(sourceFile); assert(isObject(raw) && raw.schemaVersion === 1, 'Selected backup is not a handoff V1 configuration');
+  const raw = await readJSON(sourceFile); assert(plain(raw) && raw.schemaVersion === 1, 'Selected backup is not a handoff V1 configuration');
   const migrated = validateConfig(migrateHandoffV1(raw, sourceFile, scope, targetFile).layer);
   const current = validateConfigLayer(await readJSON(targetFile)), layer = structuredClone(current);
   /** @type {Record<string, number>} */
   const fields = {};
   /** @type {Record<string, string>} */
   const origins = {};
-  for (const key of BACKUP_FIELDS) if (isObject(raw.limits) && raw.limits[key] !== undefined) { layer.limits ||= {}; layer.limits[key] = migrated.limits[key]; fields[`limits.${key}`] = migrated.limits[key]; origins[`limits.${key}`] = `limits.${key}`; }
-  if (isObject(raw.limits) && raw.limits.activeStepTimeoutMs !== undefined) { layer.limits ||= {}; layer.limits.activeStepTimeoutMs = migrated.limits.activeStepTimeoutMs; fields['limits.activeStepTimeoutMs'] = migrated.limits.activeStepTimeoutMs; origins['limits.activeStepTimeoutMs'] = 'limits.activeStepTimeoutMs'; }
-  if (isObject(raw.collaboration) && raw.collaboration.maxRevisionsPerStep !== undefined) { layer.supervision ||= {}; layer.supervision.maxRevisionsPerStep = migrated.supervision.maxRevisionsPerStep; fields['supervision.maxRevisionsPerStep'] = migrated.supervision.maxRevisionsPerStep; origins['supervision.maxRevisionsPerStep'] = 'collaboration.maxRevisionsPerStep'; }
+  for (const key of BACKUP_FIELDS) if (plain(raw.limits) && raw.limits[key] !== undefined) { layer.limits ||= {}; layer.limits[key] = migrated.limits[key]; fields[`limits.${key}`] = migrated.limits[key]; origins[`limits.${key}`] = `limits.${key}`; }
+  if (plain(raw.limits) && raw.limits.activeStepTimeoutMs !== undefined) { layer.limits ||= {}; layer.limits.activeStepTimeoutMs = migrated.limits.activeStepTimeoutMs; fields['limits.activeStepTimeoutMs'] = migrated.limits.activeStepTimeoutMs; origins['limits.activeStepTimeoutMs'] = 'limits.activeStepTimeoutMs'; }
+  if (plain(raw.collaboration) && raw.collaboration.maxRevisionsPerStep !== undefined) { layer.supervision ||= {}; layer.supervision.maxRevisionsPerStep = migrated.supervision.maxRevisionsPerStep; fields['supervision.maxRevisionsPerStep'] = migrated.supervision.maxRevisionsPerStep; origins['supervision.maxRevisionsPerStep'] = 'collaboration.maxRevisionsPerStep'; }
   assert(Object.keys(fields).length > 0, 'Selected backup has no deferred Pair fields to import');
   validateConfigLayer(layer);
   return { kind: 'handoff-v1-backup', scope, sourceFile, targetFile, sourceHash: digest(raw), targetHash: digest(current), layer, fields, origins };

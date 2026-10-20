@@ -1,4 +1,4 @@
-import { assert, plain, safeId } from './util.js';
+import { assert, isArray, plain, safeId } from './util.js';
 /** @typedef {import('./contracts.js').Step} Step */
 /** @typedef {{workerId: string, requestId: string, objective: string, constraints?: string[], context?: string, steps: Step[]}} DispatchPayload */
 /** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel', feedback: string, checkpointHash?: string, steps?: Step[]}} DecisionShape */
@@ -56,16 +56,12 @@ export const decisionSchema = object({
 export const inspectSchema = object({ workerId: string('Worker ID', 80), taskId: string('Optional; must be the current task ID', 80), reportId: string('Report ID; omit for latest', 80), file: string('Optional changed path to read from immutable evidence', 1024) }, ['workerId']);
 export const statusSchema = object({}, []);
 export const yieldSchema = object({}, []);
-/** @param {unknown} value @returns {value is Record<string, unknown>} */
-function isObject(value) { return plain(value); }
-/** @param {unknown} value @returns {value is unknown[]} */
-function isArray(value) { return Array.isArray(value); }
 
 /** @param {Schema} schema @param {unknown} value @param {string} [label] @returns {unknown} */
 export function validate(schema, value, label = 'input') {
   if (schema.enum) { assert(schema.enum.includes(value), `${label}: choose ${schema.enum.join(', ')}`); return value; }
   if (schema.type === 'object') {
-    assert(isObject(value), `${label} must be an object`);
+    assert(plain(value), `${label} must be an object`);
     for (const key of schema.required || []) assert(Object.hasOwn(value, key), `${label}.${key} is required`);
     for (const [key, v] of Object.entries(value)) { assert(Object.hasOwn(schema.properties, key), `${label}.${key} is not allowed`); validate(schema.properties[key], v, `${label}.${key}`); }
     for (const [key, fieldSchema] of Object.entries(schema.properties)) {

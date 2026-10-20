@@ -38,6 +38,8 @@ export function safeId(value, label = 'id') {
 }
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 export function plain(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+/** @param {unknown} value @returns {value is unknown[]} */
+export function isArray(value) { return Array.isArray(value); }
 /** @param {NodeJS.ProcessEnv} [env] */
 export function agentDir(env = process.env) {
   const raw = env.PI_CODING_AGENT_DIR;
