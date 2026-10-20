@@ -295,7 +295,6 @@ export class PiRuntime {
   /** @type {Promise<void> | null} */ #abortPromise = null;
   /** @type {ActivationState | null} */ #activation = null;
   /** @type {RuntimeState | null} */ #state = null;
-  /** @type {Probe | null} */ #probe = null;
   /** @type {string | null} */ #fault = null;
   /** @type {RpcExit | null} */ #exit = null;
   /** @type {Map<string, string>} */ #tools = new Map();
@@ -546,7 +545,7 @@ export class PiRuntime {
       const finalState = await this.#readState(activation); this.#exactState(finalState);
       requireValue(this.#lifecycleIdle() && isDeepStrictEqual(state, finalState), 'State changed while verifying bridge/history');
       checkReadiness(probe, finalState, o.config, o.spec, o.cwd, meshRootFor(o.dir));
-      this.#assertCurrent(activation); this.#probe = freeze(probe); return { state, probe };
+      this.#assertCurrent(activation); return { state, probe: freeze(probe) };
     } finally { this.#bridge = false; }
   }
 
