@@ -64,7 +64,7 @@ const CONTROL_MS = 15000;
 /** What the controller's work order says that a low worker does differently: there is no pair_report tool. */
 export const LOW_WORKER_NOTE = `LOW WORKER PROTOCOL
 You are the Pair worker, driven through low. Ignore any instruction above to use Fabric, Fovea or pair_report: none of them exist here.
-Do only the authorized step. When it is done, end the turn with your report as the final answer: what you changed and why, the affected paths, and which checks you ran with their honest results.
+Do only the authorized step. Later steps are listed by title so you know where the work is going; Main authorizes each one after reviewing this step, so do not start them, however small they look. When the authorized step is done, end the turn with your report as the final answer: what you changed and why, the affected paths, and which checks you ran with their honest results.
 If you need a decision from Main, ask it as a question and stop. Do not commit, push or deploy.`;
 
 /** @param {unknown} condition @param {string} message @returns {asserts condition} */

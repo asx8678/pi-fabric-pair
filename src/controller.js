@@ -1032,6 +1032,17 @@ export class PairController extends EventEmitter {
     const bound = pi && typeof limit === 'number' && limit > 0 ? ` Pair caps shell timeouts at ${limit}s; ask for no more.` : '';
     return `\nCOMMANDS\nKeep every command bounded.${bound} Give test runners a per-test timeout (node --test --test-timeout=60000 --test-force-exit). Never run servers, watch modes or interactive prompts in the foreground. A command that timed out is hung: do not rerun it unchanged; narrow it down first.`;
   }
+  /**
+   * The plan as the worker sees it. A low worker has no pair_report to stop it at the end of a step, and given the
+   * later steps' instructions it does them in the same turn (seen live: step 2 done during step 1), which leaves Main
+   * nothing to review per step. So under step-by-step supervision it gets the later steps by title only.
+   * @param {TaskRecord} task
+   */
+  visiblePlan(task) {
+    const low = workerBackend(this.effectiveSpec(task.workerId), this.config.runtime ?? { backend: 'pi' }) === 'low';
+    if (!low || task.policy.mode === 'final-only') return task.steps;
+    return task.steps.map((step, index) => index === task.stepIndex ? step : { id: step.id, title: step.title, authorized: index < task.stepIndex ? 'done' : false });
+  }
   /** @param {TaskRecord} task @param {boolean} [first] */
   workMessage(task, first = false) {
     const step = task.steps[task.stepIndex];
@@ -1043,7 +1054,7 @@ export class PairController extends EventEmitter {
       ...(Array.isArray(step?.acceptance) && step.acceptance.length ? [`Acceptance criteria (report each with pair_report's acceptance: {criterion, met, evidence}):\n${step.acceptance.map((line, index) => `  ${index + 1}. ${line}`).join('\n')}`] : [])
     ].join('\n');
     return `FABRIC PAIR WORK ORDER\n${JSON.stringify({ ownerEpoch: this.state.ownerEpoch, workerGeneration: this.record(task.workerId).workerGeneration, taskId: task.id, planRevision: task.planRevision, attemptId: task.attemptId, attemptNumber: task.attemptNumber, objective: task.objective, constraints: task.constraints,
-      authorizedStep: task.steps[task.stepIndex], ...(first ? { plan: task.steps, context: task.context } : {}),
+      authorizedStep: task.steps[task.stepIndex], ...(first ? { plan: this.visiblePlan(task), context: task.context } : {}),
       supervision: task.policy.mode, ...(task.policy.mode === 'every-step' && 'maxStepFiles' in task.policy ? { maxStepFiles: task.policy.maxStepFiles } : {}), summaryDetail: task.policy.summaryDetail, finalStep: task.policy.mode === 'final-only' || task.stepIndex === task.steps.length - 1,
       lastDecision: task.lastDecision || null })}${stepControls ? `\nSTEP CONTROLS\n${stepControls}` : ''}${this.commandRule(task.workerId)}\nUse Fabric/Fovea and finish by calling pair_report. ${task.policy.mode === 'final-only' ? 'All listed steps are authorized; request review after the complete plan, and ask questions whenever needed.' : `Only the current step is authorized. Report a checkpoint before advancing.`}`;
   }
@@ -1052,7 +1063,7 @@ export class PairController extends EventEmitter {
    * @param {string[] | null} [changedSince] files changed after the report, when an answer or revise accepted them
    */
   decisionMessage(task, input, changedSince = null) {
-    const revised = input.steps ? { revisedPlan: task.steps, planRevision: task.planRevision } : {};
+    const revised = input.steps ? { revisedPlan: this.visiblePlan(task), planRevision: task.planRevision } : {};
     const changed = changedSince ? { workspaceChanged: changedSince.slice(0, 200), ...(changedSince.length > 200 ? { workspaceChangedTotal: changedSince.length } : {}) } : {};
     const note = !changedSince ? ''
       : changedSince.length ? '\nThe workspace changed after your report: workspaceChanged lists the files Main or the human edited. Read them before continuing, build on them, and do not revert them unless the feedback says so.'

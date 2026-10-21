@@ -144,6 +144,21 @@ test('a dispatched step runs as one low task and comes back as a checkpoint repo
   } finally { await cleanup(f); }
 });
 
+test('a low worker sees later steps by title only, so it cannot run ahead of Main\'s step review', async () => {
+  // Seen live with the real low: given step 2's instructions in the plan, it did step 2 during step 1.
+  const f = await fixture([{ result: done, delayMs: 200 }]);
+  try {
+    await f.controller.dispatch(dispatch);
+    await until(() => f.controller.state.workers.worker.task?.status === 'review', 'the checkpoint');
+    const order = (await f.log()).find(e => e.kind === 'task').task;
+    const packet = JSON.parse(order.split('\n')[1]);
+    assert.deepEqual(packet.authorizedStep, steps[0]);
+    assert.deepEqual(packet.plan, [steps[0], { id: 's2', title: 'Second', authorized: false }], 'the later step has no instructions');
+    assert.equal(order.includes(steps[1].instructions), false);
+    assert.match(order, /Later steps are listed by title/);
+  } finally { await cleanup(f); }
+});
+
 test('a steer reaches the running low task, and cancelling aborts it without a report', async () => {
   const f = await fixture([{ result: done, delayMs: 20000 }]);
   try {

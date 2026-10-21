@@ -53,6 +53,10 @@ starts in a project that configures them.
 - **A step.** Each work order (and each answer or revision from Main) is one `low --send --json` task in that
   session. low's JSON result becomes the worker's report, written to the same latch and inbox a Pi worker's
   `pair_report` uses, so the controller does not know which backend wrote it.
+- **Later steps by title only.** Under step-by-step supervision a low worker's plan carries the authorized step in
+  full and every other step as `{id, title, authorized}`. low has no `pair_report` to stop it at the end of a step,
+  and given a later step's instructions it did that step in the same turn, leaving Main nothing to review per step.
+  `final-only` keeps the whole plan, since every step is authorized there.
 - **Report mapping.**
 
   | low result | Pair report |
