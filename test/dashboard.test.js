@@ -124,19 +124,22 @@ test('Pair off offers settings, never a start key the controller would refuse', 
   const keys = dashboardKeys(off).map(item => item.key);
   assert.equal(keys.includes('n'), false, 'no start key while Pair is off: ' + keys.join(','));
   assert.equal(dashboardKeys(off).some(item => item.action === 'start'), false);
-  // The settings key that turns Pair on is offered instead.
-  assert.ok(dashboardKeys(off).some(item => item.action === 'settings'), keys.join(','));
+  // The key that turns Pair on is offered here, and the sentence names that same key.
+  const turnOn = dashboardKeys(off).find(item => item.action === 'enable');
+  assert.ok(turnOn, 'a key to turn Pair on: ' + keys.join(','));
+  assert.equal(turnOn.key, 'o');
   for (const width of [20, 40, 60, 100]) {
     const lines = dashboardLines(off, width, NOW).map(strip);
     const text = lines.join('\n');
     assert.equal((text.match(/Pair is off/g) || []).length, 1, width + ': ' + text);
-    // Narrow widths truncate the sentence rather than repeating it; the settings hint survives as far as it can.
+    // Narrow widths truncate the sentence rather than repeating it; the key survives as far as it can.
     assert.ok(text.includes('Pair is off'), width + ': ' + text);
-    if (width >= 40) assert.ok(text.includes('Open settings (s) to turn Pair on.'), width + ': ' + text);
-    else assert.ok(text.includes('Open settings'), width + ': ' + text);
+    if (width >= 40) assert.ok(text.includes('Press o to turn it on'), width + ': ' + text);
     assert.ok(lines[1].includes('claude-opus'), 'the identity line stays: ' + text);
     for (const line of lines) assert.ok(visibleWidth(line) <= width, width + ': ' + JSON.stringify(line));
   }
+  // The hint row offers the same key, so the sentence and the keys cannot disagree.
+  assert.ok(/o turn Pair on/.test(plain(dashboardLines(off, 100, NOW))), plain(dashboardLines(off, 100, NOW)));
   // Turning Pair on brings the key back.
   const on = summary({ workers: [worker({ task: null, status: 'stopped', pid: null, observation: null })] });
   assert.ok(dashboardKeys(on).some(item => item.action === 'start'));
@@ -152,7 +155,7 @@ test('Pair off is still announced on the screens that show a plan or no worker a
       const text = lines.join('\n');
       assert.equal((text.match(/Pair is off/g) || []).length, 1, name + ' at ' + width + ': ' + text);
       assert.ok(text.includes('Pair is off'), name + ' at ' + width + ': ' + text);
-      if (width >= 60) assert.ok(text.includes('Pair is off. It accepts no new work until you turn it on.'), name + ' at ' + width + ': ' + text);
+      if (width >= 60) assert.ok(text.includes('Pair is off. Press o to turn it on.'), name + ' at ' + width + ': ' + text);
       for (const line of lines) assert.ok(visibleWidth(line) <= width, width + ': ' + JSON.stringify(line));
     }
   }
@@ -177,12 +180,16 @@ test('several workers name the worker in the header', () => {
 });
 
 test('the keys follow the state, so a key is only offered when it applies', () => {
+  // A single worker has no roster to manage beyond itself, so no remove/default, but add is always there.
   const running = dashboardKeys(CASES.working).map(item => item.key);
-  assert.deepEqual(running, ['t', 'p', 'c', 's', 'm', '?']);
+  assert.deepEqual(running, ['t', 'p', 'c', 'x', 'a', 's', 'm', '?']);
   const review = dashboardKeys(CASES['review with failed verification']).map(item => item.key);
-  assert.deepEqual(review, ['r', 'd', 't', 'c', 's', 'm', '?']);
-  // Without a worker the settings key stays; more and help are always reachable.
-  assert.deepEqual(dashboardKeys(CASES['no worker']).map(item => item.key), ['s', 'm', '?']);
+  assert.deepEqual(review, ['r', 'd', 't', 'c', 'x', 'a', 's', 'm', '?']);
+  // Without a worker: add a worker is the way out, and the settings key stays; more and help are always reachable.
+  assert.deepEqual(dashboardKeys(CASES['no worker']).map(item => item.key), ['a', 's', 'm', '?']);
+  // Removing is offered only when another worker would remain, because the controller refuses the last one.
+  assert.equal(dashboardKeys(CASES.working).some(item => item.action === 'remove-worker'), false);
+  assert.equal(dashboardKeys(CASES['several workers']).some(item => item.action === 'remove-worker'), true);
   const paused = dashboardKeys(CASES.paused).map(item => item.key);
   assert.ok(paused.includes('p'), paused.join(','));
   assert.equal(dashboardAction('p', CASES.paused), 'resume', 'p resumes a held task');
@@ -636,9 +643,12 @@ test('the open dashboard asks Pi for a frame on every change and on its timer', 
 
 test('w shows the next worker, and the choice names the worker it was made for', async () => {
   const s = CASES['several workers'];
-  assert.deepEqual(dashboardKeys(s).map(item => item.key), ['t', 'p', 'c', 'w', 's', 'm', '?']);
+  assert.deepEqual(dashboardKeys(s).map(item => item.key), ['t', 'p', 'c', 'x', 'a', 'D', 'w', 's', 'm', '?']);
   const view = createDashboard(fakeController(s), { now: () => NOW, tickMs: 1_000_000 });
   assert.equal(view.workerId, 'w1');
+  // The second worker carries 'make default'; the first, which already is the default, does not.
+  assert.equal(dashboardKeys(s, 'w2').some(item => item.action === 'default-worker'), true);
+  assert.equal(dashboardKeys(s, 'w1').some(item => item.action === 'default-worker'), false);
   assert.deepEqual(view.handleInput('w'), []);
   assert.equal(view.workerId, 'w2');
   assert.ok(plain(view.render(100)).includes('Pair · w2'), plain(view.render(100)));
@@ -794,6 +804,139 @@ test('transcript lines are styled by their marker and wrap under their text', as
   assert.equal(colorOf('✖ fabric_exec'), 'warning');
   assert.equal(colorOf('I will run'), undefined, "the worker's own words keep the default color");
   view.dispose();
+});
+
+test('the dashboard lists every worker with its default, model, effort and state, and marks the selected one', () => {
+  const two = summary({ workers: [
+    worker({ id: 'w1', model: 'anthropic/claude-opus', effort: 'high', status: 'working' }),
+    worker({ id: 'w2', model: 'opencode-go/deepseek-v4.1-flash', effort: 'max', status: 'not_started', task: null, pid: null, sessionId: null }),
+  ] });
+  const lines = dashboardLines(two, 100, NOW).map(strip);
+  const text = lines.join('\n');
+  // Both workers are listed, with the default marked and the never-started one labelled as such.
+  assert.match(text, /▸ w1 \(default\)/, text);
+  assert.match(text, /opencode-go\/deepseek-v4\.1-flash/, text);
+  assert.match(text, /not started/, 'a never-started worker says so: ' + text);
+  assert.match(text, / high/, 'the effort is shown');
+  assert.match(text, /step 2\/3/, 'a worker with a task shows its step');
+  // The second row is not selected, so it carries the blank marker and no default tag.
+  const row2 = lines.find(line => line.includes('w2 '));
+  assert.ok(row2 && !row2.startsWith('▸'), row2);
+  // Selecting w2 moves the marker and the detail below it.
+  const selected = dashboardLines(two, 100, NOW, { workerId: 'w2' }).map(strip);
+  const row2b = selected.find(line => line.includes('w2 '));
+  assert.ok(row2b.startsWith('▸'), row2b);
+  // The other worker keeps its row, unmarked, so the list never hides a configured worker.
+  assert.ok(selected.some(line => /^ {2}w1 /.test(line)), selected.join('\n'));
+});
+
+test('a single worker shows no roster: the screen stays the compact plan it was', () => {
+  const text = dashboardLines(CASES.working, 100, NOW).map(strip).join('\n');
+  assert.equal(/▸/.test(text), false, text);
+  assert.equal(text.includes('(default)'), false, text);
+});
+
+test('the roster fits 60 columns and drops the default tag before the state', () => {
+  const two = summary({ workers: [
+    worker({ id: 'w1', model: 'opendesign/deepseek-v4.1-flash', effort: 'high' }),
+    worker({ id: 'worker-with-a-long-id', model: 'opencode-go/deepseek-v4.1-flash', effort: 'max', status: 'not_started', task: null, pid: null, sessionId: null }),
+  ] });
+  for (const width of [40, 60, 100]) {
+    const lines = dashboardLines(two, width, NOW, { workerId: 'worker-with-a-long-id' }).map(strip);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, width + ': ' + JSON.stringify(line));
+  }
+  const narrow = dashboardLines(two, 40, NOW).map(strip).join('\n');
+  assert.match(narrow, /not started/, 'the state survives truncation: ' + narrow);
+});
+
+test('up and down move the selection, and the choice names the worker it acts on', async () => {
+  const two = CASES['several workers'];
+  const view = createDashboard(fakeController(two), { now: () => NOW, tickMs: 1_000_000 });
+  assert.equal(view.workerId, 'w1');
+  view.handleInput('j');
+  assert.equal(view.workerId, 'w2', 'down selects the next worker');
+  view.handleInput('k');
+  assert.equal(view.workerId, 'w1', 'up selects the previous one');
+  view.handleInput('k');
+  assert.equal(view.workerId, 'w1', 'up at the top stays put instead of wrapping');
+  view.handleInput('\u001b[B');
+  assert.equal(view.workerId, 'w2', 'the arrow key works too');
+  view.handleInput('\u001b[A');
+  assert.equal(view.workerId, 'w1');
+  // The arrow keys only move the selection; they never resolve the view.
+  assert.deepEqual(view.handleInput('\u001b[B'), []);
+  // A single worker has nothing to move between.
+  const one = createDashboard(fakeController(CASES.working), { now: () => NOW, tickMs: 1_000_000 });
+  one.handleInput('j');
+  assert.equal(one.workerId, 'w1');
+  one.dispose(); view.dispose();
+  // And the overlay returns the selected worker with the action. Both workers hold a task, so 'c' applies to
+  // either and the assertion is about the selection, not about which keys a ready worker has.
+  const both = summary({ workers: [worker(), worker({ id: 'w2', task: task(), pid: 43, sessionId: 'session-2' })] });
+  const { host, ctx } = overlayHost();
+  await dashboardView(ctx, fakeController(both), {});
+  host.component.handleInput('j');
+  const moved = plain(host.component.render(100));
+  assert.ok(moved.includes('▸ w2'), 'the overlay shows the new selection: ' + moved);
+  host.component.handleInput('c');
+  assert.deepEqual(host.done, [{ action: 'cancel', workerId: 'w2' }]);
+});
+
+test('n, x, a, D, * and o are offered only when they apply, and run on the selected worker', async () => {
+  const ready = summary({ workers: [
+    worker({ task: null, status: 'ready', pid: 42, sessionId: null, observation: null }),
+    worker({ id: 'w2', task: null, status: 'not_started', pid: null, sessionId: null, observation: null }),
+  ] });
+  const keys = dashboardKeys(ready, 'w2').map(item => item.key);
+  assert.ok(keys.includes('n'), 'a stopped worker with a model can be started: ' + keys.join(','));
+  assert.ok(keys.includes('a'), 'a worker can be added');
+  assert.ok(keys.includes('D'), 'a worker can be removed while another remains');
+  assert.ok(keys.includes('*'), 'the non-first worker can be made the default');
+  // The worker with a process gets stop on the main row; the stopped one does not.
+  assert.equal(dashboardKeys(ready, 'w1').some(item => item.action === 'stop'), true);
+  assert.equal(dashboardKeys(ready, 'w2').some(item => item.action === 'stop'), false, 'nothing runs on w2, so nothing to stop');
+  const running = dashboardKeys(CASES.working).map(item => item.key);
+  assert.equal(running.includes('n'), false, 'a running worker offers no start');
+  // Pair off: only the key that turns it on, never a start the controller would refuse.
+  const off = dashboardKeys(CASES.off).map(item => item.key);
+  assert.equal(off.includes('n'), false, off.join(','));
+  assert.ok(off.includes('o'), off.join(','));
+  // Every one of them resolves through dashboardAction, and the overlay returns it with the selected worker.
+  for (const [key, action] of [['a', 'add-worker'], ['D', 'remove-worker'], ['*', 'default-worker']]) {
+    assert.equal(dashboardAction(key, CASES['several workers'], 'w2'), action, key);
+    const { host, ctx } = overlayHost();
+    await dashboardView(ctx, fakeController(CASES['several workers']), {});
+    host.component.handleInput('j');
+    host.component.handleInput(key);
+    assert.deepEqual(host.done, [{ action, workerId: 'w2' }], key + ' acts on the selected worker');
+  }
+});
+
+test('o turns Pair on from the dashboard, and the sentence names that key', async () => {
+  const off = CASES.off;
+  assert.equal(dashboardAction('o', off), 'enable');
+  assert.equal(dashboardAction('o', CASES.working), null, 'nothing to turn on while Pair is on');
+  const text = plain(dashboardLines(off, 100, NOW));
+  assert.ok(text.includes('Press o to turn it on'), text);
+  assert.ok(text.includes('o turn Pair on'), 'the hint row names the same key: ' + text);
+  const { host, ctx } = overlayHost();
+  await dashboardView(ctx, fakeController(off), {});
+  host.component.handleInput('o');
+  // The overlay names the worker it was shown for; 'enable' itself is about Pair, not that worker.
+  assert.deepEqual(host.done, [{ action: 'enable', workerId: 'w1' }]);
+});
+
+test('the non-TUI menu offers Start, Stop, Add, Remove, Make default and Turn Pair on', () => {
+  const two = summary({ workers: [worker({ task: null, status: 'ready', pid: 42 }), worker({ id: 'w2', task: null, status: 'not_started', pid: null, sessionId: null })] });
+  const items = dashboardItems(two), actions = new Set(items.map(item => item.action));
+  for (const action of ['start', 'stop', 'add-worker', 'remove-worker', 'default-worker']) assert.ok(actions.has(action), 'the menu offers ' + action);
+  assert.equal(dashboardItems(summary({ enabled: false, workers: [] })).some(item => item.action === 'enable'), true, 'turn Pair on is in the menu');
+  // The list itself is in the menu, with the default marked, so a reader can see what exists without starting
+  // a worker first. One row states the order; acting on a worker is the per-worker rows above it.
+  const roster = items.find(item => item.action === 'worker');
+  assert.ok(roster, items.map(item => item.label).join(' | '));
+  assert.match(String(roster.value), /w1 \(default\), w2/, String(roster.value));
+  assert.equal(dashboardItems(summary({ workers: [worker()] })).some(item => item.action === 'add-worker'), true);
 });
 
 test('without the TUI, the menu names the worker an action is for, so each choice runs on its own worker', async () => {

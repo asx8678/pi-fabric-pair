@@ -119,6 +119,37 @@ a tool, start a polling loop, or resend an uncertain request under a new ID.
 Reuse the same request ID only for the identical assignment. Main remains
 available for the user while the worker implements.
 
+## Workers
+
+Several workers may be configured; Pair runs one at a time. The first entry is the
+default: a bare `/pair start` and a dispatch both use it, so `/pair worker default
+<id>` is how the human (or you, with their consent) decides which one a bare start
+picks. A dispatch names its worker with `workerId`, and you may dispatch to any
+configured worker: if another worker is live and idle, Pair stops it first (it asks
+the human, in a typed command or on the dashboard); if the live one holds a task, the
+dispatch is refused and names that worker and task. Never try to work around that
+refusal, and never run two workers at once by any other means — a second ad-hoc
+worker or `agents.handoff` is not a substitute.
+
+Only the worker that holds the lease can report, decide or write. Switching workers
+does not move a task, and Pair allows only one unresolved assignment at a time: while
+any task is unfinished, a new dispatch or start — to any worker — is refused with
+"allows one unresolved assignment; finish or cancel it first". Finish or cancel the
+task in the worker that has it, then dispatch again. `/pair worker list` shows the
+roster with each worker's state ("not started" for one that never ran);
+`/pair worker add <id> [provider/model] [effort]`,
+`/pair worker remove <id> [keep|discard]` and `/pair worker default <id>` change the
+configuration, and the last worker cannot be removed. The
+dashboard and the settings screen's Workers page do the same things with keys, and
+duplicating a worker there copies its model and effort under a new id. Adding,
+removing or reordering a worker is a configuration change like any other: it goes
+through the merge path (`/pair settings`) and takes effect for new work.
+
+Because workers, runtime, requirements and evidence settings shape what a process
+starts with, a change to them applies at the next worker restart; saving one while a
+task runs stages it and says so. Reordering the roster (make default, move up,
+move down) is a plain configuration change: it does not restart anything.
+
 ## Reports and review
 
 Reports identify the worker, task, step, plan revision, report ID and checkpoint
@@ -136,7 +167,12 @@ Pair's own configuration is never in a checkpoint: `.pi/fabric-pair.json`,
 `.pi/fabric-pair*` file are excluded from the captured evidence, so the user may
 edit Pair settings while a task runs without making your report stale or adding a
 changed file. While a worker holds the task you are otherwise read-only in the
-workspace — except for those Pair config files, which you may edit directly. Do not
+workspace — except for those Pair config files, which you may edit directly. That
+exception is real and worth using: the human may ask you to change a Pair setting
+mid-task (a limit, a cooldown, a timeout) and the edit neither shows up in the
+checkpoint nor makes a waiting report stale. Prefer the human's own doors
+(`/pair settings`, the dashboard) when they are at the keyboard; when they ask you
+to do it, edit the file and say what you changed. Do not
 use that exception for source: delegate source edits, or take the step with
 `pair_decide` action `"fix"`.
 

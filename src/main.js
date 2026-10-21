@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { DeliveryDeferred, PairController, humanPaused } from './controller.js';
-import { changedLayer, configPaths, configForScope, INDICATORS, isIndicator, layerChangedExternally, loadConfig, previewBackupImport, readScopeLayer, saveBackupImport, saveConfig, saveIndicator } from './config.js';
-import { addWorker, describeWorker, makeDefault, splitModel, workerListText } from './worker-config.js';
+import { changedLayer, configPaths, configForScope, INDICATORS, isIndicator, layerChangedExternally, loadConfig, previewBackupImport, readScopeLayer, saveBackupImport, saveConfig, saveIndicator, validateConfigLayer } from './config.js';
+import { addWorker, describeWorker, duplicateWorker, makeDefault, splitModel, workerListText } from './worker-config.js';
 import { VERSION as PI_VERSION } from '@earendil-works/pi-coding-agent';
 import { decisionSchema, dispatchSchema, inspectSchema, peekSchema, statusSchema, steerSchema, yieldSchema, validate, validateDecision, validateDispatch } from './schema.js';
 import { applyNativeProfileRepairs, excludedExtension, signedIn, loadedCapabilities, pairToolRoute, toolPlacement, FABRIC_CACHE_VERSION, FABRIC_FILE_WRITERS, FABRIC_PROGRAM_RUNNERS, ensureCacheLifetime, fabricHasCache, fabricVersion, isDirectMutation, nativeProfileBlockers, nativeProfileRepairs, nativeSettings, prewalkAutoArms, probeNative, programCalls, providerFileWrite, reviewWarmingAction, scopedCacheWarming, shortWarmReplay, sourcePaths, turnStartingExtensions } from './native.js';
@@ -656,6 +656,35 @@ These reports will not be delivered automatically: call pair_yield to receive th
       migrationPending: target => !!configState?.migrations.some(item => item.scope === target),
       // The screen shows the merge in its own status line; apply() also notifies, for routes with no screen.
       merged: () => lastSaveMerged,
+      // Where each value comes from: default, global or project, straight from the loaded config's provenance.
+      provenance: () => configState?.provenance ?? {},
+      // Reset and JSON editing both edit this scope's layer rather than the effective config, so both go through the
+      // same validated, merged write path as any other save.
+      readLayer: async target => {
+        assert(configState, 'Pair configuration is not loaded');
+        return structuredClone(configState.layers[target]);
+      },
+      saveLayer: async (layer, target) => {
+        const valid = validateConfigLayer(layer), bound = controller, ui = ctxRef;
+        assert(ui && bound && configState, 'Pair configuration is not loaded');
+        const loaded = await saveConfig(configPaths(ui.cwd)[target], valid, { layer: true })
+          .then(async () => loadConfig(ui.cwd, ui.isProjectTrusted?.() === true))
+          .catch(error => { ui.ui.notify(`Pair settings not saved: ${briefError(error)}`, 'error'); throw error; });
+        configState = loaded; config = loaded.config; scope = target;
+        await bound.updateConfig(config); render();
+        ui.ui.notify('Pair settings saved.', 'info');
+        return configForScope(loaded, target);
+      },
+      // The restart-bound rows say a save is staged while work runs; only the controller knows whether it does.
+      taskRunning: () => !!controller && Object.values(controller.state.workers).some(record => record.task && !['completed', 'cancelled'].includes(record.task.status)),
+      // Duplicating a worker is a config edit like adding one, so it saves through the same merge path.
+      duplicateWorker: async (workerId, newId) => {
+        const currentConfig = config; assert(currentConfig, 'Pair configuration is not loaded');
+        const next = duplicateWorker(currentConfig, workerId, newId);
+        await apply(next, scope);
+        ctx.ui.notify(`Copied worker ${workerId} to ${newId}.`, 'info');
+        return config ?? null;
+      },
       // Removing a worker from the settings screen asks about its conversation and needs the controller, so it runs
       // here; the screen reopens with the outcome. Null means it was refused or cancelled and nothing changed.
       removeWorker: async workerId => {
@@ -716,17 +745,33 @@ These reports will not be delivered automatically: call pair_yield to receive th
   }
   /** @param {string} id @param {boolean} [restart] */
   /**
+   * Starting one worker displaces another, because Pair runs one at a time. A typed `/pair start b` names its
+   * target deliberately, so it switches straight away; a dashboard key is one keystroke, so it asks first and
+   * names both the worker that will stop and the one that will run.
+   * @param {import('./ui.js').UIContext} ctx @param {PairController} c @param {string} id
+   * @returns {Promise<boolean>}
+   */
+  async function confirmSwitch(ctx, c, id) {
+    const workers = c.summary().workers;
+    // Only a live process is displaced by switchTo; a stopped worker's record is left alone.
+    const other = workers.find(worker => worker.id !== id && worker.pid);
+    if (!other) return true;
+    return ctx.ui.confirm('Switch worker', `Stop ${other.id} and start ${id}? Pair runs one worker at a time.`);
+  }
+  /**
    * @param {string} id
    * @param {boolean} [restart]
-   * @param {{switchWorker?: boolean}} [options] switchWorker stops an idle live worker first (an explicit /pair start <id>)
+   * @param {{switchWorker?: boolean, confirmSwitch?: boolean}} [options] switchWorker stops an idle live worker first (an explicit /pair start <id>)
    */
-  async function startWorker(id, restart = false, { switchWorker = false } = {}) {
+  async function startWorker(id, restart = false, { switchWorker = false, confirmSwitch: ask = false } = {}) {
     assert(config && controller && ctxRef, 'Pair configuration is not loaded');
     const spec = config.workers.find(worker => worker.id === id);
     assert(spec, `Unknown worker ${id}. Configure it in /pair settings.`);
     if (!spec.provider || !spec.model) {
       ctxRef.ui.notify(`Pair setup: choose a provider/model for ${id} in /pair settings, then run /pair start.`, 'info'); return;
     }
+    // Ask before displacing a running worker, and only then repair or start anything.
+    if (switchWorker && ask && !await confirmSwitch(ctxRef, controller, id)) return;
     await offerProfileRepair(controller, id);
     const bound = controller, ctx = ctxRef, epoch = bindingEpoch;
     const retained = !!bound.state.workers[id]?.sessionFile;
@@ -1093,9 +1138,23 @@ ${detail}`)) return;
           if (action === 'status') { await showStatus(); return { reopen: true }; }
           if (action === 'inbox') { await showInbox(); return { reopen: !deliveredToMain }; }
           if (action === 'reconcile') { await reconcileWorker(target); return { reopen: !deliveredToMain, ...(deliveredToMain ? { notice: `Worker ${target} reconciled.` } : {}) }; }
-          // The dashboard start is an explicit choice of this worker, so it switches like /pair start <id>.
-          if (action === 'start') { await startWorker(target, false, { switchWorker: true }); return { reopen: true }; }
+          // The dashboard start is one keystroke, so it asks before displacing a running worker.
+          if (action === 'start') { await startWorker(target, false, { switchWorker: true, confirmSwitch: true }); return { reopen: true }; }
           if (action === 'settings') { await openSettings(ctx); return { reopen: true }; }
+          if (action === 'enable') { await apply({ ...await readScope(scope), enabled: true }, scope); return { reopen: true, notice: 'Pair is on for new work.' }; }
+          // The roster keys change the configuration, so they run here and the dashboard reopens on the same view.
+          if (action === 'add-worker') {
+            const added = await addWorkerInteractive(ctx);
+            if (added) { await workerCommand(ctx, c, 'add', added); return { reopen: true, notice: `Added worker ${added[0]}.` }; }
+            return { reopen: true };
+          }
+          if (action === 'default-worker') { await workerCommand(ctx, c, 'default', [target]); return { reopen: true, notice: `Worker ${target} is now the default.` }; }
+          if (action === 'remove-worker') {
+            const before = c.summary().workers.length;
+            await workerCommand(ctx, c, 'remove', [target]);
+            const after = c.summary().workers.length;
+            return { reopen: true, ...(after < before ? { notice: `Removed worker ${target}.` } : {}) };
+          }
           if (action === 'restart') {
             if (!await confirmRestart(ctx, c, target)) return { reopen: true };
             await restartWorker(ctx, c.config.workers.length > 1 ? target : undefined);
@@ -1115,7 +1174,7 @@ ${detail}`)) return;
           if (item.action === 'diff') return await showDiff(target);
           if (item.action === 'yield') return await showYield();
           if (item.action === 'transcript') return await followTranscript(ctx, target);
-          if (item.action === 'start') return await startWorker(target, false, { switchWorker: true });
+          if (item.action === 'start') return await startWorker(target, false, { switchWorker: true, confirmSwitch: true });
           if (item.action === 'reconcile') return await reconcileWorker(target);
           if (item.action === 'model' || item.action === 'effort') {
             const edited = await (item.action === 'model' ? chooseWorkerModel : chooseWorkerEffort)(ctx, await readScope(scope), target);
@@ -1141,13 +1200,23 @@ ${detail}`)) return;
           if (item.action === 'settings') return await openSettings(ctx);
           if (item.action === 'reload') { await reloadConfiguration(ctx, true); return; }
           if (item.action === 'doctor') return await showDoctor(current.requirements);
-          if (item.action === 'default-worker') return await workerCommand(ctx, c, 'default', [target]);
+          // The menu names a worker only for the default/remove pickers; both ask which one, so a menu row without
+          // a selected worker still works.
+          if (item.action === 'default-worker') {
+            const chosen = item.workerId || await ctx.ui.select('Make which worker the default?', c.config.workers.map(worker => worker.id));
+            if (chosen) await workerCommand(ctx, c, 'default', [chosen]);
+            return;
+          }
           if (item.action === 'add-worker') {
             const added = await addWorkerInteractive(ctx);
             if (added) await workerCommand(ctx, c, 'add', added);
             return;
           }
-          if (item.action === 'remove-worker') return await workerCommand(ctx, c, 'remove', [target]);
+          if (item.action === 'remove-worker') {
+            const chosen = item.workerId || await ctx.ui.select('Remove which worker?', c.config.workers.map(worker => worker.id));
+            if (chosen) await workerCommand(ctx, c, 'remove', [chosen]);
+            return;
+          }
         };
         // TUI: the live dashboard overlay. Outside a TUI the select-based menu stays the fallback.
         if (ctx.mode === 'tui' && typeof ctx.ui.custom === 'function') return await runDashboard(ctx);

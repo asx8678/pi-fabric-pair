@@ -57,13 +57,57 @@ test('a review frozen before the exclusion still approves after a settings edit'
     // The human edits Pair settings while the report waits for approval.
     await fs.writeFile(path.join(repo, '.pi', 'fabric-pair.json'), JSON.stringify({ version: 2, mainSupervision: true }));
     const live = await evidence.capture(repo);
-    assert.notEqual(live.hash, checkpoint.checkpointHash, 'the hashes differ, because the old report listed the config file');
+    // checkpoint() projected the legacy snapshot through withoutPairOwned, so its hash is the capture's own hash:
+    // the old report and the live workspace describe the same evidence.
+    assert.equal(live.hash, checkpoint.checkpointHash, 'the projected snapshot hash is the live capture hash');
     const report = { checkpoint: { checkpointHash: checkpoint.checkpointHash, changed: checkpoint.changed }, snapshotRef: path.join(base, 'state', 'snapshots', `${legacySnapshot.hash}.json`) };
     assert.equal(await currentWorkspace(live, { ...report, snapshot: legacySnapshot }), true, 'the report is still current: nothing but Pair\'s own file differs');
     // Changing real source still makes it stale.
     await fs.writeFile(path.join(repo, 'step.js'), 'export const step = 3;\n');
     const drifted = await evidence.capture(repo);
     assert.equal(await currentWorkspace(drifted, { ...report, snapshot: legacySnapshot }), false, 'a real source change is still stale');
+  } finally { await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('a base snapshot that still lists Pair\'s config produces no deletion in the checkpoint', async () => {
+  const { base, repo, evidence } = await fixture();
+  try {
+    // The base was frozen before the exclusion: it lists .pi/fabric-pair.json and its backup as real files.
+    await fs.writeFile(path.join(repo, '.pi', 'fabric-pair.json'), JSON.stringify({ version: 2 }));
+    await fs.writeFile(path.join(repo, '.pi', 'fabric-pair.json.v1.bak'), '{"version":2}');
+    await fs.writeFile(path.join(repo, 'real.js'), 'export const real = 1;\n');
+    const captured = await evidence.capture(repo);
+    const blob = async text => (await import('../src/util.js')).digest(text);
+    const configText = JSON.stringify({ version: 2 }), backupText = '{"version":2}';
+    const legacyBase = structuredClone(captured);
+    legacyBase.entries = [...legacyBase.entries,
+      { path: '.pi/fabric-pair.json', kind: /** @type {const} */ ('file'), sha: await blob(configText), size: configText.length, executable: false },
+      { path: '.pi/fabric-pair.json.v1.bak', kind: /** @type {const} */ ('file'), sha: await blob(backupText), size: backupText.length, executable: false }]
+      .sort((left, right) => left.path.localeCompare(right.path));
+    legacyBase.totalBytes += configText.length + backupText.length;
+    legacyBase.hash = (await import('../src/util.js')).digest({ root: legacyBase.root, head: legacyBase.head, entries: legacyBase.entries });
+    // The files are on disk and still in the base; the worker changes only real source.
+    await fs.writeFile(path.join(repo, 'real.js'), 'export const real = 2;\n');
+    const current = await evidence.capture(repo);
+    const checkpoint = await evidence.checkpoint('task-legacy-base', 'report-legacy-base', legacyBase, current);
+    assert.deepEqual(checkpoint.changed, ['real.js'], 'only the real source change is listed');
+    const manifest = JSON.parse(await fs.readFile(path.join(checkpoint.path, 'manifest.json'), 'utf8'));
+    assert.equal(manifest.files.some(entry => entry.path.startsWith('.pi/')), false, 'no Pair-owned before-image is in files');
+    assert.equal(manifest.changed.some(name => name.startsWith('.pi/')), false, 'no Pair-owned path is in changed');
+    const patch = await fs.readFile(path.join(checkpoint.path, 'diff.patch'), 'utf8');
+    assert.equal(/\.pi\/fabric-pair/.test(patch), false, 'the patch never mentions Pair\'s own config');
+    assert.match(patch, /real\.js/, 'the real change is still in the patch');
+    // The projected base is readable under the manifest's own reference, which is what inspect() follows.
+    const inspected = await evidence.inspect(checkpoint.path);
+    assert.deepEqual(inspected.changed, ['real.js']);
+    // A real deletion in the base side still shows up: the projection drops Pair's files, not everything.
+    const deletionBase = structuredClone(legacyBase);
+    deletionBase.entries = deletionBase.entries.filter(entry => entry.path !== 'real.js');
+    // A snapshot's byte total is part of its identity check, so it follows the entries it kept.
+    deletionBase.totalBytes = deletionBase.entries.reduce((sum, entry) => sum + entry.size, 0);
+    deletionBase.hash = (await import('../src/util.js')).digest({ root: deletionBase.root, head: deletionBase.head, entries: deletionBase.entries });
+    const added = await evidence.checkpoint('task-legacy-add', 'report-legacy-add', deletionBase, current);
+    assert.deepEqual(added.changed, ['real.js'], 'a path absent from the base is still an addition');
   } finally { await fs.rm(base, { recursive: true, force: true }); }
 });
 

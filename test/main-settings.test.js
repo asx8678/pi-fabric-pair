@@ -357,7 +357,8 @@ test('/pair settings in a TUI opens the dedicated settings screen, not the selec
   assert.equal(screen.options.overlay, true, 'the screen is an overlay over the chat');
   const shown = screen.component.render(100).map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n');
   assert.match(shown, /Pair settings/, 'the frame names the screen');
-  for (const page of ['Worker', 'Review', 'Display', 'General']) assert.ok(shown.includes(page), `the ${page} page is offered`);
+  // At 100 columns the tab bar scrolls, so the first pages are what it shows; every page is reachable by tabbing.
+  for (const page of ['Workers', 'Review', 'Supervision', 'Limits']) assert.ok(shown.includes(page), `the ${page} page is offered`);
   assert.match(shown, /esc|close/, 'the keys are on screen');
   assert.deepEqual(f.actions, [], 'no select menu replaced the editor');
   screen.component.handleInput('q');
@@ -400,6 +401,33 @@ test('a settings save refuses a file that became invalid instead of overwriting 
   await settings;
 }, { mode: 'tui', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
 
+test('a menu start asks before displacing a running worker, and a declined prompt starts nothing', () => fixture(async f => {
+  // Pair runs one worker at a time, so starting ds2 stops the live worker. A menu item is one keystroke, so it
+  // asks first and names both workers; a typed /pair start ds2 is a deliberate choice and switches without asking.
+  const controller = f.getController(), spec = controller.config.workers[0];
+  // A retained record plus a handle makes that worker read as live, without spawning a process in this fixture.
+  controller.state.workers[spec.id] = { id: spec.id, cwd: f.cwd, repoRoot: f.cwd, status: 'ready', bound: spec, workerGeneration: 1,
+    sessionId: 'fake-worker-session', sessionFile: path.join(f.home, 'fake-session.jsonl'), history: [], usage: null, task: null };
+  controller.handles.set(spec.id, { pid: 4242, permission: null });
+  controller.emit('change', controller.summary());
+  /** @type {string[]} */ const starts = [];
+  controller.start = async id => { starts.push(id); throw Error('RPC spawn forbidden in settings fixture'); };
+  const prompts = () => f.confirmations.filter(([title]) => title === 'Switch worker');
+  f.confirm(false);
+  f.actions.push('Start worker');
+  await f.command('');
+  assert.equal(prompts().length, 1, `the start asks first (${JSON.stringify(f.confirmations)})`);
+  assert.equal(prompts()[0][1], 'Stop worker and start ds2? Pair runs one worker at a time.');
+  assert.deepEqual(starts, [], 'a declined switch starts nothing');
+  assert.ok(controller.handles.has(spec.id), 'declining did not stop the live worker either');
+  // The typed command names its target, so it goes straight to switchTo, which enforces the same rule itself.
+  await f.command('start ds2').catch(() => {});
+  assert.equal(prompts().length, 1, 'a typed start does not ask');
+  delete controller.state.workers[spec.id]; controller.handles.delete(spec.id);
+}, { project: { version: 2, enabled: true, autoStart: false, workers: [
+  { id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false },
+  { id: 'ds2', provider: 'test', model: 'second', effort: 'low', cwd: null, readOnly: false }] } }));
+
 test('the non-TUI settings menu saves through the same merge path', () => fixture(async f => {
   // The select menu is the second settings route; both must merge, not rewrite from the session's copy.
   const onDisk = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
@@ -411,3 +439,144 @@ test('the non-TUI settings menu saves through the same merge path', () => fixtur
   assert.equal(written.mainSupervision, true, 'the key written after the session loaded survives the menu save');
 }, { mode: 'rpc', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
 
+
+test('the non-TUI menu offers Edit as JSON and refuses an invalid layer without writing it', () => fixture(async f => {
+  // The second settings route has the same escape hatch, and the same rule: validate before the file is touched.
+  const before = await fs.readFile(f.files.project, 'utf8');
+  f.ctx.ui.editor = async () => JSON.stringify({ version: 2, limits: { maxReportsPerTask: 'many' } });
+  f.actions.push('Edit as JSON…', undefined);
+  await f.command('settings');
+  assert.equal(await fs.readFile(f.files.project, 'utf8'), before, 'an invalid layer never reaches the file');
+  assert.ok(f.notices.some(item => /not saved/i.test(item.message) && /maxReportsPerTask/i.test(item.message)), 'the menu reports why: ' + JSON.stringify(f.notices));
+  // A valid layer goes through the same saveLayer path as the screen.
+  f.ctx.ui.editor = async () => JSON.stringify({ version: 2, supervision: { maxRevisions: 4 }, workers: [
+    { id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] });
+  f.actions.push('Edit as JSON…', undefined);
+  await f.command('settings');
+  const written = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  assert.equal(written.supervision.maxRevisions, 4, 'the valid layer is on disk: ' + JSON.stringify(written));
+  assert.equal(f.getController().config.supervision.maxRevisions, 4, 'and the controller reloaded it');
+  assert.deepEqual(f.actions, [], 'every menu choice was used');
+}, { mode: 'rpc', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('saving a runtime field while a task runs says it is staged, in the real host path', () => fixture(async f => {
+  // The staged note needs the controller's own answer about work in flight, not a value the screen invents.
+  const c = f.getController(), spec = c.config.workers[0];
+  c.state.workers[spec.id] = { id: spec.id, cwd: f.cwd, repoRoot: f.cwd, status: 'working', bound: spec, workerGeneration: 1,
+    sessionId: 'fake-worker-session', sessionFile: path.join(f.home, 'fake-session.jsonl'), history: [], usage: null,
+    task: { id: 'task-runtime', workerId: spec.id, status: 'running', steps: [], stepIndex: 0 } };
+  c.emit('change', c.summary());
+  const settings = f.command('settings');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const screen = f.screens[0];
+  // Tab to Runtime and open its Program row, then save a different program.
+  const page = () => screen.component.render(200).map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n');
+  for (let step = 0; step < 11 && !/\[ Runtime \]/.test(page()); step++) screen.component.handleInput('\t');
+  assert.match(page(), /\[ Runtime \]/, 'the Runtime page is reachable by tabbing');
+  screen.component.handleInput('j');
+  screen.component.handleInput('\r');
+  for (let index = 0; index < 2; index++) screen.component.handleInput('\u007f');
+  for (const key of ['p', 'i', 'x']) screen.component.handleInput(key);
+  screen.component.handleInput('\r');
+  for (let waited = 0; waited < 100 && !f.notices.some(item => /settings saved/i.test(item.message)); waited++) await new Promise(resolve => setTimeout(resolve, 10));
+  const shown = screen.component.render(200).map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(shown, /A task is running, so the change is staged and applies at the next worker restart/, 'the real path knows a task is running');
+  assert.equal(JSON.parse(await fs.readFile(f.files.project, 'utf8')).runtime.command, 'pix', 'the value is still saved');
+  screen.component.handleInput('q');
+  await settings;
+  delete c.state.workers[spec.id];
+}, { mode: 'tui', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('duplicating a worker from the screen saves through the host merge path', () => fixture(async f => {
+  const settings = f.command('settings');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const screen = f.screens[0], cells = line => line.replace(/\u001b\[[0-9;]*m/g, '');
+  const shown = () => screen.component.render(200).map(cells).join('\n');
+  // Walk to the Duplicate row by its label rather than counting: the list grows as workers are added.
+  const view = screen.component.view;
+  for (let step = 0; step < 20 && view.currentRow().id !== 'duplicate'; step++) screen.component.handleInput('j');
+  assert.equal(view.currentRow().id, 'duplicate', 'the Duplicate row is selected');
+  screen.component.handleInput('\r');
+  assert.match(shown(), /Copy this worker under a new id/, 'the copy asks for its id inline');
+  for (const key of ['c', 'o', 'p', 'y']) screen.component.handleInput(key);
+  screen.component.handleInput('\r');
+  // The copy closes the overlay for the host to save through the merge path, then reopens on the new worker.
+  for (let waited = 0; waited < 200 && f.screens.length < 2; waited++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.screens.length, 2, 'the screen reopened after the host saved');
+  const written = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  assert.deepEqual(written.workers.map(worker => worker.id), ['worker', 'copy']);
+  assert.ok(f.notices.some(item => /Copied worker worker to copy/.test(item.message)), 'the host reports the copy: ' + JSON.stringify(f.notices));
+  const reopened = f.screens[1];
+  assert.equal(reopened.component.view.session.workerId, 'copy', 'the reopened screen edits the new worker');
+  // The reopened screen is the one to close: the first view is already resolved.
+  reopened.component.handleInput('q');
+  await settings;
+}, { mode: 'tui', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('rows show where each value comes from, read from the files the session loaded', () => fixture(async f => {
+  const settings = f.command('settings');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const screen = f.screens[0], view = screen.component.view;
+  const line = pattern => screen.component.render(160).map(item => item.replace(/\u001b\[[0-9;]*m/g, '')).join('\n').split('\n').find(item => pattern.test(item)) ?? '';
+  while (view.session.page !== 'review') screen.component.handleInput('\t');
+  // This fixture's project file sets supervision.maxRevisions; everything else on the page is a default.
+  assert.match(line(/Revision limit/), /project\s*│$/, 'the project file sets it: ' + line(/Revision limit/));
+  assert.match(line(/Review policy/), /default\s*│$/, 'an untouched row says default: ' + line(/Review policy/));
+  // A worker row reads the source of the workers array as a whole, which this project file also sets.
+  while (view.session.page !== 'workers') screen.component.handleInput('\t');
+  assert.match(line(/Model/), /project\s*│$/, 'a worker setting follows the workers array: ' + line(/Model/));
+  screen.component.handleInput('q');
+  await settings;
+}, { mode: 'tui', project: { version: 2, supervision: { maxRevisions: 7 }, workers: [
+  { id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('reset removes the field from the project file through the merge path, leaving the rest', () => fixture(async f => {
+  const settings = f.command('settings');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const screen = f.screens[0], view = screen.component.view;
+  while (view.session.page !== 'review') screen.component.handleInput('\t');
+  while (view.currentRow().id !== 'revisions') screen.component.handleInput('j');
+  assert.match(screen.component.render(160).map(l => l.replace(/\u001b\[[0-9;]*m/g, '')).join('\n'),
+    /Revision limit +7 +project/, 'the project file sets it, so the row says project');
+  screen.component.handleInput('r');
+  for (let waited = 0; waited < 200 && !/Reset/.test(view.session.status); waited++) await new Promise(resolve => setTimeout(resolve, 10));
+  const written = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  assert.equal(written.supervision, undefined, 'the field and its emptied section are gone from the project file');
+  assert.deepEqual(Object.keys(written).sort(), ['autoStart', 'version', 'workers'], 'nothing else was written away: ' + JSON.stringify(written));
+  assert.match(view.session.status, /✔ Reset — Revision limit now comes from/);
+  screen.component.handleInput('q');
+  await settings;
+}, { mode: 'tui', project: { version: 2, supervision: { maxRevisions: 7 }, autoStart: false,
+  workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('Edit as JSON writes a valid layer and never writes an invalid one', () => fixture(async f => {
+  const settings = f.command('settings');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const screen = f.screens[0], view = screen.component.view;
+  const before = await fs.readFile(f.files.project, 'utf8');
+  while (view.session.page !== 'general') screen.component.handleInput('\t');
+  while (view.currentRow().id !== 'json') screen.component.handleInput('j');
+  // An invalid layer is refused and the file is untouched. Declining the offer to edit again ends the attempt:
+  // the invalid value never becomes a draft, so nothing loops.
+  f.ctx.ui.editor = async () => JSON.stringify({ version: 2, supervision: { maxRevisions: 999 } });
+  f.ctx.ui.confirm = async () => false;
+  screen.component.handleInput('\r');
+  for (let waited = 0; waited < 200 && !/Not saved/.test(view.session.status); waited++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.match(view.session.status, /✖ Not saved: maxRevisions must be/);
+  assert.equal(await fs.readFile(f.files.project, 'utf8'), before, 'an invalid layer never reaches the file');
+  // A valid one is written through saveConfig and the screen reloads from disk. The invalid attempt offered
+  // another try by reopening, so the newest screen is the one to edit from now on.
+  f.ctx.ui.editor = async () => JSON.stringify({ version: 2, supervision: { maxRevisions: 9 }, workers: [
+    { id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] });
+  f.ctx.ui.confirm = async () => true;
+  assert.equal(f.screens.length, 2, 'an invalid layer offers another try in a fresh screen');
+  assert.equal(f.screens[1].component.view.session.rowId, 'json', 'and lands on the row that was being edited');
+  f.screens[1].component.handleInput('\r');
+  for (let waited = 0; waited < 200 && f.screens.length < 3; waited++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.screens.length, 3, 'a valid layer saves and the screen reloads from the file');
+  const written = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  assert.equal(written.supervision.maxRevisions, 9, 'the valid layer is on disk');
+  assert.equal(f.getController().config.supervision.maxRevisions, 9, 'and the controller reloaded it');
+  f.screens[2].component.handleInput('q');
+  await settings;
+}, { mode: 'tui', project: { version: 2, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));

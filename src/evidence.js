@@ -365,12 +365,13 @@ export class Evidence {
     this.validSnapshot(base); this.validSnapshot(current);
     assert(base.root === current.root, 'Checkpoint snapshots belong to different repositories');
     const dir = path.join(this.baseDir, 'reports', taskId, reportId); await mkdirPrivate(dir);
-    await this.saveSnapshot(current);
     // Both sides are projected through withoutPairOwned: the base may have been frozen before Pair's own files were
     // excluded (older code, or a task that started before an upgrade), and comparing it as it stands would report
     // .pi/fabric-pair.json as deleted by the worker. The projection also recomputes the hash the way capture does, so
-    // the manifest's baseHash refers to the snapshot the comparison actually used.
+    // the manifest's checkpointHash and baseHash name the snapshots the comparison actually used, and inspect() can
+    // read both from disk with every before- and after-image still matching.
     base = withoutPairOwned(base); current = withoutPairOwned(current);
+    await this.saveSnapshot(current); await this.saveSnapshot(base);
     const old = new Map(base.entries.map(e => [e.path, e])); const next = new Map(current.entries.map(e => [e.path, e]));
     const names = [...new Set([...old.keys(), ...next.keys()])].sort();
     const changed = names.filter(name => JSON.stringify(old.get(name) || null) !== JSON.stringify(next.get(name) || null));

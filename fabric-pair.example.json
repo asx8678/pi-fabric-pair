@@ -23,6 +23,9 @@
     "maxStepFiles": 5
   },
   "runtime": {
+    "backend": "pi",
+    "lowCommand": "low",
+    "lowArgs": [],
     "command": "pi",
     "commandArgs": [],
     "extraExtensions": [],

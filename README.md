@@ -92,30 +92,66 @@ policy asks for or denies some risk classes, classify Pair's tools in the same
 
 Open `/pair settings`:
 
-| Setting (page) | First-run value |
+| Setting (page) | Value when no settings file exists |
 | --- | --- |
-| Pair enabled (General) | On |
-| Start with each session (General) | Off |
-| Model and Thinking effort (Worker) | An authenticated model and a supported effort |
-| Review policy (Review) | `every-step`, with final review required |
+| Pair enabled (General) | Off — turn it on in General or with `o` on the dashboard |
+| Start with each session (General) | On |
+| Model and thinking effort (Workers) | No model, `medium` effort: choose an authenticated model and a supported effort |
+| Review policy (Review) | `milestones`, with final review always required |
 
-The settings screen is one framed panel over the chat, with four pages of tabs:
+The settings screen is one framed panel over the chat. Every configuration field
+in `fabric-pair.example.json` has a row on one of eleven pages, so the screen and
+the file cannot drift apart:
 
 | Page | What it holds |
 | --- | --- |
-| Worker | Model, thinking effort, read-only, workspace, and adding a worker slot. |
-| Review | Review policy, step size limit, revision limit, report detail, verification commands, and automatic report delivery. |
+| Workers | The roster first — one row per worker, the default starred — then, for the worker being edited, model, thinking effort, read-only and workspace, followed by Make default, Move up, Move down, Duplicate, Remove and Add a worker… last. With more than one worker an Editing row at the top of that block chooses which one the page edits. The roster rows are read-only: order and membership change through the rows below it. |
+| Review | Review policy, step size limit, revision limit, revisions per step, final review, report detail, and automatic report delivery. |
+| Supervision | Main supervision, Main recoveries per task, the idle check-in, the step time limit, and the fourteen `control` rows: watchdog, silence before a ping, ping answer limit, tool time limit, step nudge, watchdog recoveries per step, compaction time limit, Main heartbeat and its interval, nudges without a report, steers per step, provider cooldown, quota cooldown and provider waits per step. |
+| Limits | Step time limit, reports per task, report size limit, report repairs, and the optional cost and output-token ceilings (`none` by default). |
+| Verification | The trusted commands (Enter opens the editor and asks for authorization), require passing, and the command time limit. |
+| Peer review | Whether it runs, the reviewer model (through the same picker as the worker's), when it reads (`checkpoints` or `final`), and its time limit. |
+| Runtime | Backend (`pi` or `low`), program and arguments, the low program and its arguments, extra and excluded extensions, extra skills, inherit extensions, MCP servers, and the startup, request and shutdown timeouts. |
+| Requirements | Fabric, Fovea, Prewalk disabled and auto compaction. |
+| Evidence | The file limit, snapshot size limit and per-file size limit. |
 | Display | The indicator above the editor and the terminal attention cue. |
-| General | Whether Pair is on, whether it starts with each session, and which settings file you are editing. |
+| General | Whether Pair is on, whether it starts with each session, worker slots in use, Main read-only during a task, Save to, Edit as JSON…, and a pending migration when one exists. |
 
-`Tab`/`→`/`l` and `Shift+Tab`/`←`/`h` move between the pages; `↑`/`↓` move
-between the rows. `Enter` changes the selected row: it opens a list of choices, a
-text field, or the model search (type to filter). `Space` is the quick change: it
-flips an on/off switch or steps to the next choice. Every change saves at once, so
-there is no separate save step: a setting that was written says so in the status
-line, and a change that cannot be saved says why, and the screen keeps showing the
-saved value. Esc closes the screen. Save to decides which file an edit goes to: this
-project, or the global defaults every project inherits.
+`Tab`/`→`/`l` and `Shift+Tab`/`←`/`h` move between the pages (the tab bar
+scrolls and keeps the current page visible); `↑`/`↓` move between the rows.
+`Enter` changes the selected row: it opens a list of choices, a text field, or the
+model search (type to filter). `Space` is the quick change: it flips an on/off
+switch or steps to the next choice. Every change saves at once, so there is no
+separate save step: a setting that was written says so in the status line, and a
+change that cannot be saved says why, and the screen keeps showing the saved value.
+Esc closes the screen. Save to decides which file an edit goes to: this project, or
+the global defaults every project inherits.
+
+Three more keys make the pages quick to work with:
+
+- Each row shows where its value comes from — `default`, `global` or `project` —
+  dimmed at the right edge. The tag is the first thing given up on a narrow
+  terminal, and at 60 columns it is dropped so the value keeps its room.
+- `r` resets the selected row: it removes that field from the current scope's file,
+  so the value falls back to the other scope or to the default. It goes through the
+  same merge path as any edit. A field this scope does not set is left alone, and the
+  status line says which scope owns it.
+- `/` filters the rows. The filter matches labels and key paths (`maxRevisions`,
+  `control.silentMs`) across every page and lists the matches as one page with their
+  page names; Enter jumps to the row and Esc clears the filter.
+
+**Edit as JSON…** on General opens the current scope's file as formatted JSON in
+your editor. It is validated with `validateConfigLayer` before anything is written:
+an invalid or malformed layer is refused with the reason, the file stays byte for
+byte untouched, and you are offered another attempt (which reopens on what you
+typed). A valid layer is written through the normal save path and the screen
+reloads from disk. The small `/pair settings` menu outside the TUI (no custom
+views available) offers the same item; it stays deliberately short — the TUI screen
+is the place where every field is editable.
+
+Runtime, requirements, worker and evidence rows shape what the worker process
+starts with, so their hint says they apply at the next worker restart; saving one
+while a task runs adds that the change is staged.
 
 While a worker holds a task, Main is read-only in the workspace — with one
 exception: it may edit Pair's own configuration (`.pi/fabric-pair.json` and its
@@ -148,7 +184,7 @@ instruction.
 | Command | Purpose |
 | --- | --- |
 | `/pair` or alt+w | Open the live dashboard; it lists what needs you first. |
-| `/pair settings` | Open the settings screen: worker, review, display and scope. |
+| `/pair settings` | Open the settings screen: workers, review, supervision, limits, verification, peer review, runtime, requirements, evidence, display, scope, and Edit as JSON. |
 | `/pair status` | A short read-out of state, task progress and observed usage; the legend and cache-warming details live in `/pair doctor`. |
 | `/pair reload` | Reload saved Pair settings while Main stays open. |
 | `/pair restart worker` | Reload settings and restart only the worker, keeping its conversation. Asks first while a task is running. |
@@ -163,7 +199,7 @@ instruction.
 | `/pair reconcile` | After a Main crash, prove the old worker process exited so the worker can be used again. |
 | `/pair cancel worker` | Cancel the task and keep the conversation. |
 | `/pair stop worker` | Stop the worker process and retain its history. |
-| `/pair worker list` | Every configured worker in list order: the first is the default, and a never-started one says "not started". |
+| `/pair worker list` | Every configured worker in list order: the first is the default and is what a bare `/pair start` and a dispatch use, and a never-started one says "not started". |
 | `/pair worker add <id> [provider/model] [effort]` | Add a worker slot (a bare model name inherits the first worker's provider). |
 | `/pair worker remove <id> [keep\|discard]` | Remove a worker after confirming. `keep` (the default) leaves its conversation, so adding the same id later resumes it; `discard` deletes its session, inbox, archive and mesh. Refused while it runs or holds a task. |
 | `/pair worker default <id>` | Move a worker first: a bare `/pair start` and a dispatch to a worker use the first entry. |
@@ -171,6 +207,15 @@ instruction.
 | `/pair indicator mode` | Choose the footer badge and live line: `minimal`, `compact`, `board` or `off`. |
 | `/pair doctor` | Diagnose Pair, Pi and Fabric setup; also holds the key legend and the cache-warming explanation. |
 | `/pair import-backup global\|project file` | Import retained Pair V1 limits from a `.v1.bak` file. |
+
+You can configure several workers, but Pair runs one at a time. Starting a
+worker that is not live — `/pair start <id>`, a dispatch to it, or `n` on the
+dashboard — stops an idle live worker first, after asking; a worker that holds a
+task is never displaced, and the refusal names it and its task. `n` on the
+dashboard shows the same question as "Stop worker and start ds2? Pair runs one
+worker at a time." Nothing about the lease, the attempt or the report and exit
+fences changes with more than one worker: the worker that holds the lease is the
+only one that can report, decide or write.
 
 Restart keeps Main's model and session open. It asks first while the worker has an
 open task, because restarting interrupts the current step (a worker with no task
@@ -202,7 +247,15 @@ you mean /pair stop?`, or up to three when several are equally close.
 Press **alt+w**, or type `/pair` with no arguments, to open the dashboard. It is
 one live, framed panel over the chat: a rounded box around the worker's model and
 state, the plan with the current step marked, the last checkpoint's Pair checks,
-and the keys that apply right now. It updates in place — elapsed time, activity and state — while it
+and the keys that apply right now.
+
+With more than one worker configured, the panel opens with a **Workers** list: one
+row per configured worker showing its id (the first marked `(default)`),
+provider/model, effort, its state — the same liveness word the badge uses while a
+process runs, otherwise `not started`, `stopped`, the error, or `EXIT_UNCONFIRMED` —
+and the step it is on. The selected row carries `▸`, and everything you press acts
+on that worker. `↑`/`↓` (or `j`/`k`) move the selection; `w` still cycles. A
+single worker keeps the compact screen it always had, with no list to read. It updates in place — elapsed time, activity and state — while it
 stays open, so you never reopen it to see change. The header line drops whole items
 rather than cutting a word: it keeps the model, the state and `step 2/4`, and gives
 up the context percentage, then the cost, then the elapsed time, then the effort,
@@ -226,7 +279,7 @@ label.
 │ ▶ 2 Wire retries into fetch client  editing src/http/client.js · rev 1/3     │
 │ ○ 3 Tests for backoff                                                        │
 │                                                                              │
-│   t transcript  p pause  c cancel  s settings  m more  ? help                │
+│   t transcript  p pause  c cancel  x stop  a add worker  s settings  m more  ? │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -238,7 +291,14 @@ label.
 | `y` | Send retained reports to Main now. |
 | `p` | Pause a running task, or resume a paused or interrupted one; both ask first. |
 | `c` | Cancel the task; asks first, then for a reason. The conversation and file changes are kept. |
-| `w` | Show the next worker, when several are configured. The other keys act on the worker shown. |
+| `↑` / `↓` | Select the previous or next worker; `w` still cycles. Every other key acts on the worker selected. |
+| `n` | Start the selected worker. If another worker's idle process is live it is stopped first, after asking; a worker holding a task is never displaced. |
+| `x` | Stop the selected worker's process; asks while a task runs. Its conversation is kept. |
+| `a` | Add a worker: asks for an id, then the model picker, then the effort. |
+| `D` | Remove the selected worker after confirming — then keep its conversation (adding the same id later resumes it) or discard it. Never the last worker. |
+| `*` | Make the selected worker the default, which moves it first; a bare `/pair start` and a dispatch both use the first entry. |
+| `!` | Reconcile: prove an old worker process exited after a Main crash, so the worker can be used again. Shown only when the last exit is unconfirmed. |
+| `o` | Turn Pair on. Shown only while it is off, and the screen's own sentence names the same key. |
 | `s` | Open the settings screen (the same one `/pair settings` opens). |
 | `m` | More: `r` restart the worker (asks first while a task runs), `x` stop it (while it runs), `i` status, `b` inbox, `l` reload settings, `d` doctor. |
 | `?` | List every key with what it does. Each description is a few words long, so it fits one line at the narrowest overlay. |
@@ -448,7 +508,10 @@ backups `saveConfig` writes next to them, and anything else named
 `.pi/fabric-pair*` are excluded from every checkpoint, so editing your Pair
 settings during a task neither shows up as a changed file nor makes a waiting
 report stale. A report frozen before this exclusion still approves while nothing
-but those files differs: the comparison recomputes its snapshot hash without them.
+but those files differs: the comparison recomputes its snapshot hash without them. A
+task whose base snapshot was frozen before this exclusion is projected the same way
+before the checkpoint diff, so its manifest never reports your config as a file the
+worker deleted.
 Everything else in the repository — including Fabric's own `.pi/fabric.json` — is
 worker evidence as before.
 

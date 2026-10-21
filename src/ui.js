@@ -1,7 +1,7 @@
 import { Box, Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { keyHint, keyText, rawKeyHint } from '@earendil-works/pi-coding-agent';
 import { assert, briefError, cleanText, clone } from './util.js';
-import { INDICATORS, validateConfig } from './config.js';
+import { INDICATORS, validateConfig, validateConfigLayer } from './config.js';
 import { EFFORT_LEVELS } from './contracts.js';
 import { validateUsageObservation } from './observations.js';
 import { DEFAULT_CACHE_LIFETIME_S, FABRIC_CACHE_VERSION } from './native.js';
@@ -13,7 +13,7 @@ import { livenessActive } from './liveness.js';
 /**
  * Host options for both settings UIs. `merged` reports whether a save had to merge into a file that changed after the
  * screen loaded, so the status line can say so (the note itself comes from apply()).
- * @typedef {{loadScope?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig>, migrate?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>, migrationPending?: (scope: import('./config.js').ConfigScope) => boolean, merged?: () => boolean, removeWorker?: (workerId: string) => Promise<import('./config.js').PairConfig | null>}} SettingsOptions */
+ * @typedef {{loadScope?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig>, migrate?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>, migrationPending?: (scope: import('./config.js').ConfigScope) => boolean, merged?: () => boolean, removeWorker?: (workerId: string) => Promise<import('./config.js').PairConfig | null>, duplicateWorker?: (workerId: string, newId: string) => Promise<import('./config.js').PairConfig | null>, taskRunning?: () => boolean, provenance?: () => Record<string, string>, readLayer?: (scope: import('./config.js').ConfigScope) => Promise<Record<string, unknown>>, saveLayer?: (layer: Record<string, unknown>, scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | null>}} SettingsOptions */
 
 /** @param {unknown} value @returns {Readonly<import('@earendil-works/pi-coding-agent').ContextUsage> | null} */
 function contextUsage(value) {
@@ -1019,7 +1019,7 @@ export function createIndicatorSurface(ui) {
     clear() { latest = null; removeWidget(); showStatus(undefined); },
   };
 }
-/** @typedef {'report' | 'diff' | 'transcript' | 'yield' | 'pause' | 'resume' | 'cancel' | 'settings' | 'restart' | 'reload' | 'doctor' | 'start' | 'reconcile' | 'stop' | 'status' | 'inbox' | 'worker' | 'more' | 'help' | 'close' | 'add-worker' | 'remove-worker' | 'default-worker'} DashboardAction */
+/** @typedef {'report' | 'diff' | 'transcript' | 'yield' | 'pause' | 'resume' | 'cancel' | 'settings' | 'restart' | 'reload' | 'doctor' | 'start' | 'reconcile' | 'stop' | 'status' | 'inbox' | 'worker' | 'more' | 'help' | 'close' | 'add-worker' | 'remove-worker' | 'default-worker' | 'enable'} DashboardAction */
 /** @typedef {{key: string, action: DashboardAction, label: string}} DashboardKeyHint */
 /** What the dashboard resolves with: the chosen action and the worker it was shown for. @typedef {{action: DashboardAction, workerId?: string}} DashboardChoice */
 
@@ -1028,6 +1028,7 @@ const DASHBOARD_MAX_WIDTH = 100;
 /** One line of explanation per action, for the help list. @type {Readonly<Record<DashboardAction, string>>} */
 export const ACTION_HELP = {
   'add-worker': 'add a worker slot', 'remove-worker': 'remove a worker', 'default-worker': 'make a worker the default',
+  enable: 'turn Pair on for new work',
   report: "read the worker's report", diff: "scroll the checkpoint's changes", transcript: "follow the worker's session",
   yield: 'send waiting reports to Main', pause: 'hold the task after this step', resume: 'continue the held task',
   cancel: 'end the task; changes stay', reconcile: 'check the old process exited',
@@ -1063,8 +1064,16 @@ export function overlayOptions(columns) {
  * @returns {DashboardKeyHint[]}
  */
 export function dashboardKeys(summary, workerId) {
-  const worker = (workerId ? summary.workers.find(w => w.id === workerId) : null) || planWorker(summary) || summary.workers[0];
-  if (!worker) return [{ key: 's', action: 'settings', label: 'settings' }, { key: 'm', action: 'more', label: 'more' }, { key: '?', action: 'help', label: 'help' }];
+  const worker = dashboardWorker(summary, workerId);
+  // Add, remove and default act on the configuration, not on a running worker, so they need no worker at all:
+  // the first worker is added from this screen, and it exists to be started here.
+  const manage = /** @type {DashboardKeyHint[]} */ ([{ key: 'a', action: 'add-worker', label: 'add worker' }]);
+  // Removing needs a worker to keep: the controller refuses the last one, so the key would only ever fail.
+  if (worker && summary.workers.length > 1) manage.push({ key: 'D', action: 'remove-worker', label: 'remove worker' });
+  // 'Make default' means "first in the list", so it applies to every worker that is not first already.
+  if (worker && dashboardWorker(summary) !== worker) manage.push({ key: '*', action: 'default-worker', label: 'make default' });
+  if (!worker) return [...manage, ...(summary.enabled ? [] : [/** @type {DashboardKeyHint} */ ({ key: 'o', action: 'enable', label: 'turn Pair on' })]),
+    { key: 's', action: 'settings', label: 'settings' }, { key: 'm', action: 'more', label: 'more' }, { key: '?', action: 'help', label: 'help' }];
   const task = worker.task && !['completed', 'cancelled'].includes(worker.task.status) ? worker.task : null;
   /** @type {DashboardKeyHint[]} */
   const keys = [];
@@ -1077,12 +1086,25 @@ export function dashboardKeys(summary, workerId) {
   if (task && ['paused', 'interrupted'].includes(task.status)) keys.push({ key: 'p', action: 'resume', label: 'resume' });
   if (task) keys.push({ key: 'c', action: 'cancel', label: 'cancel' });
   if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) keys.push({ key: '!', action: 'reconcile', label: 'reconcile' });
+  // Stop belongs on the main row while the process runs: managing the roster is what this screen is for now.
+  if (worker.pid) keys.push({ key: 'x', action: 'stop', label: 'stop' });
   // Start needs a chosen model and Pair itself on: without a model it could only fail with a notice, and
   // while Pair is off the controller refuses to launch the worker at all.
   if (summary.enabled && !worker.pid && task === null && hasModel(worker)) keys.push({ key: 'n', action: 'start', label: 'start' });
+  keys.push(...manage);
   if (summary.workers.length > 1) keys.push({ key: 'w', action: 'worker', label: 'next worker' });
+  // Turn Pair on from the screen that says it is off, rather than sending the human to another view for it.
+  if (!summary.enabled) keys.push({ key: 'o', action: 'enable', label: 'turn Pair on' });
   keys.push({ key: 's', action: 'settings', label: 'settings' }, { key: 'm', action: 'more', label: 'more' }, { key: '?', action: 'help', label: 'help' });
   return keys;
+}
+/**
+ * Whether `data` asks for the next worker: up and down move the selection, and w keeps cycling for muscle memory.
+ * @param {KeyMatcher | null | undefined} keys @param {string} data @returns {boolean}
+ */
+export function isWorkerNav(keys, data) {
+  return keyIs(keys, data, 'tui.select.down', ['j']) || matchesKey(data, 'down')
+    || keyIs(keys, data, 'tui.select.up', ['k']) || matchesKey(data, 'up');
 }
 /**
  * Maps one keypress to an action, or null when the key does not apply to this state.
@@ -1106,14 +1128,22 @@ export function dashboardAction(data, summary, workerId, keys = null) {
  */
 export function dashboardMoreKeys(summary, workerId) {
   const worker = summary ? dashboardWorker(summary, workerId) : undefined;
+  // Stop is on the main row now; More keeps the maintenance it always had, plus stop for muscle memory.
   return [{ key: 'r', action: 'restart', label: 'restart worker' }, ...(worker?.pid ? [/** @type {DashboardKeyHint} */ ({ key: 'x', action: 'stop', label: 'stop worker' })] : []),
     { key: 'i', action: 'status', label: 'status' }, { key: 'b', action: 'inbox', label: 'inbox' },
     { key: 'l', action: 'reload', label: 'reload settings' }, { key: 'd', action: 'doctor', label: 'doctor' }, { key: '?', action: 'help', label: 'help' }];
 }
-/** @param {PairSummary} summary @param {string | undefined} workerId @returns {string | undefined} */
-function nextWorker(summary, workerId) {
+/**
+ * The worker after (or before) the selected one. It clamps rather than wrapping when a direction is given, so
+ * up at the top of the list stays put; w keeps its historical wrap-around.
+ * @param {PairSummary} summary @param {string | undefined} workerId @param {number} [delta]
+ * @returns {string | undefined}
+ */
+function nextWorker(summary, workerId, delta) {
   const ids = summary.workers.map(w => w.id), at = ids.indexOf(dashboardWorker(summary, workerId)?.id ?? '');
-  return ids.length ? ids[(at + 1) % ids.length] : workerId;
+  if (!ids.length) return workerId;
+  if (delta === undefined) return ids[(at + 1) % ids.length];
+  return ids[Math.max(0, Math.min(ids.length - 1, (at < 0 ? 0 : at) + delta))];
 }
 /**
  * The short history line under a step: what happened to this step's reports and decisions.
@@ -1300,7 +1330,7 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
   // Pair off is stated once: the readiness screen says it in its own sentence, and every other screen
   // (a plan, no worker) needs this banner because nothing else would mention it.
   // No worker at all: there is no readiness sentence below to say it, so the banner is the only notice.
-  if (!summary.enabled && !worker) top.push(fit(fg('warning', 'Pair is off. It accepts no new work until you turn it on.')));
+  if (!summary.enabled && !worker) top.push(fit(fg('warning', `Pair is off. Press ${turnOnKey(summary)} to turn it on.`)));
   /** @type {(shape: DashboardShape) => string[]} */
   let content = () => [fit(fg('dim', 'No worker is configured. Open settings to add one.'))];
   /** @type {string[]} */
@@ -1342,19 +1372,23 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
     for (const detail of pending.slice(0, 2)) top.push(fit(fg(detail.color, detail.text)));
     top.push('');
     // A plan screen relies on this banner; only the no-task readiness screen states Pair off itself.
-    if (!summary.enabled && task) top.splice(1, 0, fit(fg('warning', 'Pair is off. It accepts no new work until you turn it on.')));
+    if (!summary.enabled && task) top.splice(1, 0, fit(fg('warning', `Pair is off. Press ${turnOnKey(summary)} to turn it on.`)));
+    // With more than one worker the screen has to say which one everything acts on, so the list sits above the
+    // detail: every row is a worker, the selected one carries the marker, and its state is the row's own.
+    const roster = summary.workers.length > 1 ? workerRows(summary, worker.id, room, fg, now) : [];
     if (!task) {
       // Without a task the dashboard is a readiness screen: what is true now and what to do next.
       // Pair off is said once, here, and never twice with the line below.
-      const readiness = !summary.enabled ? 'Pair is off. It accepts no new work until you turn it on.'
+      const readiness = !summary.enabled ? `Pair is off. Press ${turnOnKey(summary)} to turn it on.`
         : !hasModel(worker) ? 'No worker model is chosen yet.'
         : worker.pid ? `${model} is ready for the next task.`
+        : worker.status === 'not_started' ? 'The worker has not started yet. Press n to start it.'
         : 'The worker is not running.';
       // A task that already ended leaves one line behind, above the readiness sentence.
-      const lines = [...(ended ? [fit(lastTaskLine(ended, now, room, fg))] : []), fit(fg('muted', readiness))];
+      const lines = [...roster, ...(ended ? [fit(lastTaskLine(ended, now, room, fg))] : []), fit(fg('muted', readiness))];
       if (hint) lines.push(fit(fg('accent', hint)));
       if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) lines.push(fit(fg('warning', 'The previous worker process may still be running: press ! to reconcile.')));
-      if (!summary.enabled) lines.push(fit(fg('accent', 'Open settings (s) to turn Pair on.')));
+
       content = () => lines;
     } else {
       const objective = fit(fg('text', bold(inline(task.objective, 300))));
@@ -1389,13 +1423,13 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
         const skip = collapse && finished > 1 ? finished : 0;
         const steps = rows.slice(skip).flatMap((item, offset) => [stepLine(item),
           ...(history === 'all' || (history === 'current' && skip + offset === current) ? item.history : [])]);
-        const body = [objective, ...(skip ? [folded(skip)] : []), ...steps, ...verification, ...hintLine];
+        const body = [...roster, objective, ...(skip ? [folded(skip)] : []), ...steps, ...verification, ...hintLine];
         if (body.length <= limit) return body;
         // Still too tall: the plan starts at its first open step and says how many steps it leaves out.
         const tail = rows.slice(finished).map(stepLine);
         const free = Math.max(1, limit - 2 - (finished ? 1 : 0) - verification.length - hintLine.length);
         const hidden = tail.length - free;
-        return [objective, ...(finished ? [folded(finished)] : []), ...tail.slice(0, free), ...(hidden > 0 ? [fit(fg('dim', `  … ${hidden} more step${hidden === 1 ? '' : 's'}`))] : []), ...verification, ...hintLine];
+        return [...roster, objective, ...(finished ? [folded(finished)] : []), ...tail.slice(0, free), ...(hidden > 0 ? [fit(fg('dim', `  … ${hidden} more step${hidden === 1 ? '' : 's'}`))] : []), ...verification, ...hintLine];
       };
     }
     // Recent activity: the worker's own last tool events, oldest first, bounded by the ring buffer.
@@ -1411,6 +1445,55 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
     activityLines = [];
   }
   return fitRows(top, content, activityLines, bottom, options.maxRows ?? Infinity);
+}
+/**
+ * The key that turns Pair on when it is off. It comes from the same key table the hint line is drawn from, so the
+ * sentence and the hint can never name different keys.
+ * @param {PairSummary} summary @returns {string}
+ */
+function turnOnKey(summary) { return dashboardKeys(summary).find(item => item.action === 'enable')?.key ?? 'o'; }
+/**
+ * One configured worker as one line: default marker, id, provider/model, effort, state and — when it has one —
+ * its task step. The state is the same classifier the badge and the live line use, so the list cannot disagree
+ * with them; a worker that never ran says so.
+ * @param {PairSummary} summary @param {any} w @param {boolean} selected @param {number} room
+ * @param {(color: IndicatorColor, text: string) => string} fg @param {number} now
+ * @returns {string}
+ */
+function workerRowText(summary, w, selected, room, fg, now) {
+  const state = workerState(summary, w, !!summary.main?.busy, now);
+  const liveness = w.liveness?.state;
+  // The liveness state is the truthful one while a process is live; the record's own status covers the rest.
+  // A worker that never ran is "not started", which says more than "off" (that is Pair's state, not its own).
+  const word = w.pid && liveness && liveness !== 'idle' ? String(liveness)
+    : state.kind === 'working' ? 'working'
+    : w.status === 'not_started' ? 'not started'
+    : state.label;
+  const task = w.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
+  const stepText = task ? `step ${task.step}/${task.steps}` : '';
+  const model = w.model && w.model !== '/' ? w.model : 'no model';
+  // The state word carries its own colour; everything else is muted so the colour reads as the state.
+  const tail = `  ${fg(state.color, word)}${stepText ? fg('muted', ` · ${stepText}`) : ''}`;
+  const isDefault = dashboardWorker(summary) === w;
+  /** @param {boolean} named @returns {string} */
+  const headOf = named => `${selected ? fg('accent', '▸') : ' '} ${fg(isDefault ? 'accent' : 'text', w.id)}${named && isDefault ? fg('muted', ' (default)') : ''}  `;
+  // The default marker is a nicety; on a narrow screen the id and the state matter more, so it goes first.
+  let head = headOf(true);
+  if (visibleWidth(head) + visibleWidth(tail) + 4 > room) head = headOf(false);
+  const roomForMeta = room - visibleWidth(head) - visibleWidth(tail);
+  const meta = [model, w.effort].filter(Boolean).join(' · ');
+  // The meta column is what gets clipped; the state word and the step must always be readable.
+  return truncateToWidth(head + fg('muted', truncateToWidth(meta, Math.max(2, roomForMeta), '…')) + tail, room, '…');
+}
+/**
+ * The Workers section: one row per configured worker with the selected one marked. It is only shown when there
+ * is a choice to make, so a single-worker dashboard stays the compact readiness/plan screen it was.
+ * @param {PairSummary} summary @param {string} selectedId @param {number} room
+ * @param {(color: IndicatorColor, text: string) => string} fg @param {number} now
+ * @returns {string[]}
+ */
+function workerRows(summary, selectedId, room, fg, now) {
+  return [...summary.workers.map(w => workerRowText(summary, w, w.id === selectedId, room, fg, now)), ''];
 }
 /**
  * The help list: one key per line with what it does, the keys of this screen first, then the More row.
@@ -1522,6 +1605,12 @@ export function createDashboard(source, options = {}) {
         const action = dashboardMoreKeys(summary, workerId).find(item => item.key === data)?.action;
         if (action === 'help') { more = false; help = true; return []; }
         if (action) { more = false; return [action]; }
+        return [];
+      }
+      // Up and down move the worker selection; every action below applies to the selected one. A single-worker
+      // summary has nothing to move between, so the arrows do nothing there and no hint claims otherwise.
+      if (isWorkerNav(keys, data)) {
+        if (summary.workers.length > 1) workerId = nextWorker(summary, workerId, keyIs(keys, data, 'tui.select.down', ['j']) || matchesKey(data, 'down') ? 1 : -1);
         return [];
       }
       const action = dashboardAction(data, summary, workerId, keys);
@@ -2139,7 +2228,7 @@ export function reportCardLines(view) {
   if (view.decisions.length) lines.push('', '## Worker decisions', ...view.decisions.flatMap(d => quoted(`• ${d}`)));
   return lines;
 }
-/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'reconcile' | 'enable' | 'model' | 'effort' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more' | 'add-worker' | 'remove-worker' | 'default-worker', workerId?: string, section: string, hint: string, value?: string, tone?: PanelColor}} DashboardItem */
+/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'reconcile' | 'enable' | 'model' | 'effort' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more' | 'add-worker' | 'remove-worker' | 'default-worker' | 'worker', workerId?: string, section: string, hint: string, value?: string, tone?: PanelColor}} DashboardItem */
 /** @param {PairSummary} summary @returns {string[]} */
 export function dashboardHeader(summary) {
   const many = summary.workers.length > 1;
@@ -2180,6 +2269,15 @@ export function dashboardItems(summary) {
     else items.push({ section, label: 'Start worker', action: 'start', workerId: w.id, hint: !hasModel(w) ? 'Choose a worker model in Settings first.'
       : w.workspaceGit === false ? `${w.cwd} is not in a Git repository. Open Pi in a Git project, or set the worker workspace in Settings → Advanced settings… → Workspace.` : 'Launch the worker process. No model turn is requested.' });
   }
+  // The list itself, for a menu that is not the dashboard: which workers exist, which is the default, and the
+  // operations that change that list. The dashboard's own keys do the same work for a selected row.
+  // The roster states which workers exist and which is the default, in the same section as the rows that change
+  // the list. It is a summary, not a row to run: acting on a worker is the Worker/Nneeds-you rows above.
+  if (many) items.push({ section: 'Workers', label: 'Workers', action: 'worker', value: summary.workers.map((w, index) => `${w.id}${index === 0 ? ' (default)' : ''}`).join(', '),
+    hint: 'The worker slots, in order. The first is the default: a bare /pair start and a dispatch to a worker use it.' });
+  items.push({ section: 'Workers', label: 'Add worker…', action: 'add-worker', hint: 'Add a worker slot. Only one worker runs at a time.' });
+  if (many) items.push({ section: 'Workers', label: 'Make a worker the default…', action: 'default-worker', hint: 'Move it first: a bare /pair start and a dispatch to a worker use the first entry.' });
+  if (many) items.push({ section: 'Workers', label: 'Remove a worker…', action: 'remove-worker', hint: 'Remove it after confirming. Its conversation is kept unless you choose to discard it.' });
   items.push({ section: 'Pair', label: 'Status', action: 'status', hint: 'Worker, task, Main and cache details.' },
     { section: 'Pair', label: 'Inbox', action: 'inbox', hint: 'Reports Main has not read yet.' },
     { section: 'Pair', label: 'Settings', action: 'settings', hint: 'Worker model, review policy, indicator and more.' },
@@ -2465,7 +2563,9 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
       { id: '23', label: 'Attention cue', value: onOff(draft.attentionCue), hint: draft.attentionCue ? 'Terminal title gains "! pair · <reason>" and one bell when a worker needs you.' : 'Off: the terminal title and bell are never changed by Pair.' },
       { id: '18', label: 'Save scope', value: scope, hint: scope === 'global' ? 'Global defaults for every project; project overrides are excluded.' : 'This project: its overrides plus inherited global defaults.' },
       { section: 'More' },
-      { id: '20', label: 'Advanced settings…', hint: 'Worker workspace, read-only mode, revision limit, verification commands, extra workers.' }
+      { id: '20', label: 'Advanced settings…', hint: 'Worker workspace, read-only mode, revision limit, verification commands, extra workers.' },
+      // The same escape hatch the TUI screen offers: the whole scope file, validated before it is written.
+      ...(options.readLayer && options.saveLayer ? [{ id: '21', label: 'Edit as JSON…', hint: 'Open this scope\'s settings file as JSON. It is validated before saving; an invalid edit is refused.' }] : [])
     ];
     /** @type {MenuEntry[]} */
     const extra = [
@@ -2491,6 +2591,19 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
     lastEdited = index;
     try {
       if (index === 20) { advanced = true; continue; }
+      if (index === 21) {
+        // The whole scope file, validated as a layer before it is written: an invalid edit is refused outright.
+        const layer = await options.readLayer?.(scope);
+        const edited = await ctx.ui.editor(`Pair settings for the ${scope} scope as JSON. Validated before saving.`, JSON.stringify(layer ?? {}, null, 2));
+        if (edited === undefined) continue;
+        let parsed;
+        try { parsed = JSON.parse(edited); } catch (error) { ctx.ui.notify(`Setting not saved: ${briefError(error)}`, 'error'); continue; }
+        try { validateConfigLayer(parsed); }
+        catch (error) { ctx.ui.notify(`Setting not saved: ${briefError(error)}`, 'error'); continue; }
+        const next = await options.saveLayer?.(/** @type {Record<string, unknown>} */ (parsed), scope);
+        if (next) saved = clone(next);
+        continue;
+      }
       if (index === 18) {
         const nextScope = await chooseValue(ctx, 'Save scope', [...(ctx.isProjectTrusted?.() ? [{ value: /** @type {const} */ ('project'), hint: 'This project: its overrides plus inherited global defaults. Switching copies nothing.' }] : []),
           { value: /** @type {const} */ ('global'), hint: 'Global defaults for every project. Switching copies nothing.' }], scope);

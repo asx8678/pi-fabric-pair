@@ -17,7 +17,7 @@ history incrementally.
   `liveness`, `peek-steer`, `runtime-startup`, `step-limit-escape`,
   `supervision-notices`, `watchdog-core`, `worker-speed`, `config-merge`,
   `pair-owned-paths`, `pair-config-checkpoint`, `worker-management`,
-  `worker-removal`, `worker-commands`.
+  `worker-removal`, `worker-commands`, `worker-config`, `low-runtime`.
 - `heartbeat-docs`: the opt-in Main heartbeat (off adds nothing; `note` appends one
   display-only line with state, step, step time, event age and context; `wake` also
   starts a turn), that every supervision setting has an editable `/pair settings` row,
@@ -106,6 +106,11 @@ Re-derived from the current behaviour at the same time:
   recomputes its hash without those paths); a real source change is still
   `STALE_CHECKPOINT`; and `writesOnlyPairConfig`/`writtenPaths` decide Main's
   read-only exception (Pair config only, mixed batches and other paths blocked).
+  A base snapshot that still lists the config produces a checkpoint with no `.pi`
+  entry in `changed`, `files` or `diff.patch` — `checkpoint` projects both sides
+  through `withoutPairOwned` and persists the projected snapshots under the hashes
+  its manifest names — while a real addition or deletion of source is still listed.
+  `snapshotDelta` ignores Pair-owned paths on both sides too.
 - `pair-config-checkpoint`: the same exclusion end to end through `registerMain`:
   dispatch a step, edit `.pi/fabric-pair.json` and a backup while the review waits,
   approve, and see the checkpoint list only the worker's file; a real source edit
@@ -120,10 +125,51 @@ Re-derived from the current behaviour at the same time:
   deletes the worker directory only with `keepConversation: false`, keeps it
   otherwise so adding the same id resumes the same session file, and restores the
   record when the config save fails.
+- The dashboard suite also covers the Workers list: every configured worker with
+  its default marker, provider/model, effort, state (including `not started` for a
+  worker that never ran) and task step; the selection moving with `↑`/`↓`, `j`/`k`
+  and `w`; `n`/`x`/`a`/`D`/`*`/`o` offered only when they apply (no start while Pair is
+  off, no remove for the last worker, `*` only for a worker that is not first) and
+  resolved with the selected worker; the Pair-off sentence naming the same `o` key
+  as the hint row; every row and key line inside 60 columns; and the non-TUI menu
+  offering Start, Stop, Add, Remove, Make default and Turn Pair on plus a roster row.
 - `worker-commands`: the `/pair worker` completions (verb, then configured IDs only
   for `remove`/`default`, then keep/discard), `/pair start|stop <id>` IDs,
   `workerListText` fitting 60 columns and labelling a never-started worker, and
   `/pair status` reading "not started" for a configured worker that never ran.
+- `documentation`: the example config documents every leaf field of `DEFAULTS` and
+  validates as a saved file (and has no field `DEFAULTS` lacks); the README's settings
+  table names every page in `src/settings-screen.js` and describes provenance, reset,
+  the filter, Edit as JSON, merge-on-save and the checkpoint exclusion; the skill has
+  its Workers section naming the one-at-a-time rule and the roster commands, and
+  states the config-edit exception Main may use; and this file names every suite
+  `npm test` runs, so a new suite cannot ship undocumented.
+- `worker-config`: the pure roster helpers — `addWorker` (the id is validated and
+  unique, a bare model inherits the first worker's provider), `updateWorker`,
+  `duplicateWorker` (copies model and effort under a new id, right after the
+  original), `moveWorker` (clamped at the ends), `makeDefault`, `removeWorker`
+  (refuses the last one) and `describeWorker`/`splitModel`.
+- `low-runtime`: the `runtime.backend === 'low'` path against
+  `helpers/fake-low.mjs`, which speaks low's inbox protocol, so the low worker starts,
+  takes a turn and stops without Pi RPC or a model request.
+- `settings-screen`: the TUI settings screen driven by keypresses against a fake
+  `ctx.ui.custom`: one framed overlay whose every line is exactly the render width,
+  page movement wrapping both ways, and one row kind at a time (toggle on Enter and on
+  Space, choice list, number with its bounds and inline error, text, model picker with
+  filter and effort clamp, nullable `none` numbers, comma/line lists, the verification
+  editor with its authorization confirm). It also covers what the pages are for: the
+  Workers page listing every worker with its model and effort and the default marked,
+  add/duplicate/remove/make default/move up and down, the tab bar fitting 60 columns
+  and keeping the active page on it, one test that walks `DEFAULTS` and asserts every
+  leaf field except `version` has a row on some page, restart-bound rows saying so and
+  staging the save while a task runs, provenance labels (`default`/`global`/`project`,
+  dropped at 60 columns), reset with `r` falling back to the other scope and to the
+  default (and refusing a field this scope does not set), the `/` filter matching
+  labels and key paths across pages, and Edit as JSON (valid saves; an invalid or
+  malformed layer is refused with the file left unchanged and the editor reopened on
+  the typed draft; cancel changes nothing). `main-settings` repeats the merge,
+  provenance, reset and JSON paths through the real host, in both the TUI and the
+  non-TUI menu.
 - `main-settings`: the restart variant through the menu goes through More…, as
   bare `/pair` does without the TUI.
 
