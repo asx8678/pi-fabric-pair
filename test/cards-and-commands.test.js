@@ -216,6 +216,132 @@ test('the component renders within the width it is given', () => {
   }
 });
 
+/** The leading spaces of a rendered card line. */
+const indents = (/** @type {string[]} */ lines) => lines.map(line => /^ */.exec(line)?.[0].length ?? 0);
+/**
+ * The rendered rows of one card group: from the first row that starts with `lead` up to the next row that
+ * starts a different group. A wrapped group must repeat its own indent on every row.
+ * @param {string[]} lines @param {number} lead the indent of the group's first row, including side padding
+ * @returns {string[]}
+ */
+function groupRows(lines, lead) {
+  const start = lines.findIndex(line => indents([line])[0] === lead && line.trim() !== '');
+  if (start < 0) return [];
+  const rows = [lines[start]];
+  for (let index = start + 1; index < lines.length; index++) {
+    const level = indents([lines[index]])[0];
+    if (lines[index].trim() === '') break;
+    if (level !== lead) break;
+    rows.push(lines[index]);
+  }
+  return rows;
+}
+/** A theme that paints nothing, so widths are the plain text's own. */
+const flatTheme = { fg: (/** @type {string} */ _color, /** @type {string} */ value) => value };
+
+/**
+ * Every card kind (report, notice, supervision, check), at the widths the review named. Each checks the
+ * three rules: nothing over the width, continuation lines keep their line's indent, and the expand hint is
+ * never left alone on a line.
+ */
+test('wrapped card lines keep their indent and the expand hint never takes a line of its own', () => {
+  const cards = {
+    report: reportText({ kind: 'checkpoint', summary: 'A summary that is long enough to wrap at narrow widths, with many words in it.\nSecond paragraph here.', checks: WORKER_CLAIMS, independentlyRunChecks: VERIFIED_MIXED, actualChangedFiles: FILES, changedFileCount: 4 }),
+    question: reportText({ kind: 'question', summary: 'I cannot reach the API from this sandbox, so I need a decision.', question: 'Should I mock the endpoint for the retry tests, or skip them until it is reachable?', checks: [], independentlyRunChecks: [] }),
+    notice: 'FABRIC PAIR NOTICE — the human paused worker w1 so it can be inspected before the step continues.' + NL + 'Details follow in a second line that is long enough to wrap at thirty columns.' + NL,
+    supervision: 'FABRIC PAIR SUPERVISION — the worker stopped responding after a long silence and needs a human.' + NL + 'More context that also wraps.' + NL,
+    check: 'FABRIC PAIR CHECK — Pair ran the configured verification commands and one of them failed.' + NL + 'Typecheck reports a missing export in the retry module.' + NL,
+  };
+  for (const [name, text] of Object.entries(cards)) {
+    for (const expanded of [false, true]) {
+      const component = /** @type {any} */ (pairMessageComponent({ content: text }, { expanded }, flatTheme));
+      for (const width of [30, 40, 60, 80]) {
+        const lines = component.render(width);
+        const where = name + (expanded ? ' (expanded)' : '') + ' at ' + width;
+        for (const line of lines) assert.ok(visibleWidth(line) <= width, where + ': ' + JSON.stringify(line));
+        // No rendered row may lose indentation: every row is indented at least as far as the card's padding.
+        for (const line of lines) assert.ok((indents([line])[0] ?? 0) >= 1, where + ': a row lost its indent: ' + JSON.stringify(line));
+        // The hint is never the only thing on a line, and appears at most once.
+        for (const line of lines) assert.equal(/^\s*\(ctrl\+o[^)]*\)\s*$/.test(line), false, where + ': hint alone: ' + JSON.stringify(line));
+        if (!expanded) assert.ok(lines.filter(line => line.includes('ctrl+o')).length <= 1, where + ': the hint appears once');
+      }
+    }
+  }
+});
+
+test('a wrapped summary keeps its two-space indent, so text lines up under its first line', () => {
+  const text = reportText({ kind: 'checkpoint', summary: 'Both revision points fixed in src/ui.js and in the tests that cover the wrapped card layout.', checks: [], independentlyRunChecks: [] });
+  const component = /** @type {any} */ (pairMessageComponent({ content: text }, { expanded: false }, flatTheme));
+  const lines = component.render(40);
+  // The summary is the second row: it and every continuation line keep the card's two-space indent.
+  const summaryRows = groupRows(lines, 3);
+  assert.ok(summaryRows.length >= 2, 'the summary should wrap at 40 columns: ' + JSON.stringify(lines));
+  for (const row of summaryRows) assert.ok(row.startsWith('   ') && !row.startsWith('    '), 'the continuation keeps the indent: ' + JSON.stringify(row));
+  assert.ok(summaryRows.join(' ').includes('src/ui.js'), summaryRows.join(' '));
+  // The file row wraps the same way, under its own indent.
+  const fileRows = groupRows(lines, 3).filter(row => row.includes('file'));
+  for (const row of fileRows) assert.ok(row.startsWith('   '), JSON.stringify(row));
+});
+
+/**
+ * A card whose header is long enough that the long expand hint cannot sit beside it, built from ordinary
+ * words so the header wraps between them rather than inside one.
+ */
+function longHeaderCard() {
+  const text = reportText({ kind: 'checkpoint', stepId: 'glance', peerReview: { verdict: 'needs a longer look at the diff because the retry loop changed' }, summary: 'Short summary.', checks: [], independentlyRunChecks: [] });
+  return (/** @type {number} */ width) => /** @type {any} */ (pairMessageComponent({ content: text }, { expanded: false }, flatTheme)).render(width);
+}
+
+test('the expand hint falls back to the bare key rather than wrapping', () => {
+  const text = reportText({ kind: 'checkpoint', stepId: 'glance', summary: 'Short summary.', checks: [], independentlyRunChecks: [], actualChangedFiles: ['src/ui.js'], changedFileCount: 1 });
+  const render = (/** @type {number} */ width) => /** @type {any} */ (pairMessageComponent({ content: text }, { expanded: false }, flatTheme)).render(width);
+  // Room for the long form at 80 columns.
+  assert.ok(render(80)[0].includes('(ctrl+o to expand)'), render(80)[0]);
+  // The rule is: whole header plus the long hint, else whole header plus the short form, else the wrapped
+  // header with the short form after its last word, else no hint. The hint always follows the text's end.
+  for (const width of [40, 60]) {
+    const lines = render(width);
+    assert.ok(lines[0].startsWith(' ◐ Checkpoint · step glance (ctrl+o'), 'the header stays whole: ' + lines[0]);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, width + ': ' + JSON.stringify(line));
+  }
+  // The whole rule, checked from the header's own width at every width:
+  //   whole header + long hint, else whole header + the short form, else the wrapped header with the short
+  //   hint after its last word, else no hint at all. The hint always trails the text, never splits it.
+  const header = '◐ Checkpoint · step glance';
+  const longHintRoom = header.length + ' (ctrl+o to expand)'.length;
+  for (const width of [30, 34, 40, 60, 80]) {
+    const lines = render(width);
+    const hintLine = lines.find((/** @type {string} */ line) => line.includes('ctrl+o'));
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, width + ': ' + JSON.stringify(line));
+    assert.equal(/^\s*\(ctrl\+o[^)]*\)\s*$/.test(hintLine ?? ''), false, width + ': the hint is never alone');
+    if (hintLine) assert.match(hintLine, /\S \(ctrl\+o[^)]*\)$/, width + ': the hint trails the text: ' + JSON.stringify(hintLine));
+    // The header's words always read in order and contiguous: stripping the hint and joining the rows
+    // must still yield the whole header, so the hint can never have landed inside it.
+    const body = lines.map((/** @type {string} */ line) => line.replace(/\(ctrl\+o[^)]*\)\s*$/, '').trimEnd()).join(' ').replace(/\s+/g, ' ').trim();
+    assert.ok(body.includes(header), width + ': the header is never split: ' + body);
+    // The long form whenever it fits beside the whole header, the short one only when it does not.
+    const longFits = width - 1 >= longHintRoom;
+    if (longFits) assert.ok(String(hintLine).includes('(ctrl+o to expand)'), width + ': the long form fits: ' + String(hintLine));
+    else if (hintLine) assert.equal(String(hintLine).includes('to expand'), false, width + ': the short form is used: ' + String(hintLine));
+  }
+  // A header that has to wrap keeps its words contiguous and takes the hint after its last word when it
+  // fits there, and none when it does not (40 columns leaves no room beside the last word).
+  const wrappedHeader = longHeaderCard();
+  for (const width of [26, 30, 60, 80]) {
+    const lines = wrappedHeader(width);
+    for (const line of lines) {
+      assert.ok(visibleWidth(line) <= width, width + ': ' + JSON.stringify(line));
+      assert.equal(/^\s*\(ctrl\+o[^)]*\)\s*$/.test(line), false, width + ': the hint is never alone: ' + JSON.stringify(line));
+    }
+    const hinted = lines.filter((/** @type {string} */ line) => line.includes('ctrl+o'));
+    assert.ok(hinted.length <= 1, width + ': at most one hint line: ' + JSON.stringify(lines));
+    for (const line of hinted) assert.match(line, /\S \(ctrl\+o[^)]*\)$/, width + ': the hint follows the last word: ' + JSON.stringify(line));
+    // The header words in order, with the hint removed again.
+    const words = lines.map((/** @type {string} */ line) => line.replace(/\(ctrl\+o[^)]*\)\s*$/, '').trimEnd()).join(' ').replace(/\s+/g, ' ').trim();
+    assert.ok(words.includes('◐ Checkpoint · step glance · peer review: needs a longer look'), width + ': the header reads in order: ' + words);
+  }
+});
+
 test('with Pi\'s theme a card sits on the custom message background, as Pi\'s own messages do', () => {
   const text = reportText({ kind: 'checkpoint', summary: 'Added backoff with jitter.', checks: WORKER_CLAIMS, independentlyRunChecks: VERIFIED_MIXED, actualChangedFiles: FILES, changedFileCount: 4 });
   /** @type {string[]} */

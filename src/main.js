@@ -8,7 +8,8 @@ import { gitIgnores } from './evidence.js';
 import { assert, briefError, canonical, cleanText, digest, Serial } from './util.js';
 import { pairCommandDescription, pairCompletions, unknownCommandMessage } from './commands.js';
 import { createAttentionCue } from './cue.js';
-import { ageLabel, chooseWorkerEffort, chooseWorkerModel, createIndicatorSurface, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, dashboardView, diffLineColor, doctorText, followView, humanPatch, inboxText, kindLabel, menu, pairMessageComponent, planWorker, reportCardLines, settingsUI, staleWorkers, statusText, textView, workerModel } from './ui.js';
+import { ageLabel, chooseWorkerEffort, chooseWorkerModel, createIndicatorSurface, dashboardHeader, dashboardItems, dashboardMenu, dashboardMoreItems, dashboardView, diffLineColor, doctorText, followView, humanPatch, inboxText, kindLabel, menu, pairMessageComponent, planWorker, reportCardLines, staleWorkers, statusText, textView, workerModel } from './ui.js';
+import { settingsScreen } from './settings-screen.js';
 
 /** How Main calls Pair's tools, by route (see pairToolRoute in native.js). */
 const MAIN_CALLS = {
@@ -343,7 +344,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     if (!bound || bound !== controller || stopped || epoch !== bindingEpoch || !bound.config.enabled || !bound.config.autoStart) return;
     const spec = bound.config.workers.slice(0, bound.config.maxWorkers).find(candidate => candidate.provider && candidate.model);
     if (!spec) { ctxRef?.ui.notify('Pair setup: choose a worker model in /pair settings, then run /pair start.', 'info'); return; }
-    if (bound.workspaceGit.get(bound.workspaceFor(spec)) === false) { ctxRef?.ui.notify(`Pair did not start the worker: ${bound.workspaceFor(spec)} is not in a Git repository. Open Pi in a Git project, or set the worker workspace in /pair settings → Advanced.`, 'info'); return; }
+    if (bound.workspaceGit.get(bound.workspaceFor(spec)) === false) { ctxRef?.ui.notify(`Pair did not start the worker: ${bound.workspaceFor(spec)} is not in a Git repository. Open Pi in a Git project, or set the worker workspace in /pair settings → Worker → Workspace.`, 'info'); return; }
     try { await offerProfileRepair(bound, spec.id); await bound.start(spec.id); }
     catch (error) { if (!stopped && bound === controller && epoch === bindingEpoch) ctxRef?.ui.notify(`Pair worker ${spec.id}: ${briefError(error)}`, 'error'); }
   }
@@ -415,7 +416,7 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     }
     controller = candidate; boundEpoch = epoch;
     controller.on('change', summary => { if (current()) render(summary); }); controller.setMainObservation(modelObservation(ctx, null)); render();
-    if (loaded.migrations.length) ctx.ui.notify(`Pair configuration migration pending for ${loaded.migrations.flatMap(item => item ? [item.scope] : []).join(', ')}. Review each affected scope under /pair settings → Advanced → Review/migrate selected scope.`, 'warning');
+    if (loaded.migrations.length) ctx.ui.notify(`Pair configuration migration pending for ${loaded.migrations.flatMap(item => item ? [item.scope] : []).join(', ')}. Review each affected scope under /pair settings → General → Review or migrate this scope…`, 'warning');
     return controller;
   }
   /** @param {BoundMainContext} ctx @returns {Promise<PairController>} */
@@ -499,13 +500,15 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
   }
   /** @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx */
   async function openSettings(ctx) {
-    return settingsUI(ctx, await readScope(scope), scope, apply, {
+    return settingsScreen(ctx, await readScope(scope), scope, apply, {
       loadScope: readScope,
       migrate: async target => {
         const current = await readScope(target);
         if (!configState?.migrations.some(item => item.scope === target)) ctx.ui.notify('No migration pending for this scope.', 'info');
         return apply(current, target, true);
-      }
+      },
+      // apply() asks to confirm a pending migration itself, so a save on that scope has to run outside the overlay.
+      migrationPending: target => !!configState?.migrations.some(item => item.scope === target)
     });
   }
   /** @param {BoundMainContext} ctx @param {boolean} [notify] */
@@ -563,6 +566,21 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
     const held = record?.task && ['interrupted', 'paused'].includes(record.task.status) ? ' Work remains held; inspect changes, then /pair resume to continue.' : '';
     const outcome = restart ? retained ? 'restarted; conversation retained' : 'started' : 'ready';
     ctx.ui.notify(`Worker ${id} ${outcome}; no model turn was requested.${held}`, 'info');
+  }
+  /**
+   * Restarting interrupts the step in flight, so a worker with a current task asks first — on every route,
+   * like stop, pause and cancel. A worker with no current task restarts without a prompt, as before.
+   * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx
+   * @param {PairController} c
+   * @param {string} id
+   * @returns {Promise<boolean>}
+   */
+  async function confirmRestart(ctx, c, id) {
+    // A task that already ended is not interrupted by a restart; the worker keeps its conversation either way.
+    const worker = c.summary().workers.find(item => item.id === id);
+    const active = !!worker?.task && !['completed', 'cancelled'].includes(worker.task.status);
+    if (!active) return true;
+    return ctx.ui.confirm('Restart worker', `Restart worker ${id}? It is running a task; the current step is interrupted. The conversation and file changes are kept.`);
   }
   /**
    * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx
@@ -688,6 +706,8 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
         }
         if (command === 'restart') {
           assert(!rest.length, 'Use /pair restart [worker]');
+          const target = idArg || id;
+          if (!await confirmRestart(ctx, c, target)) return;
           return await restartWorker(ctx, idArg);
         }
         if (command === 'indicator') {
@@ -768,7 +788,9 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
             ...(main.native.cacheWarming === 'idle' ? [] : [`Native cacheWarming is ${String(main.native.cacheWarming)}: Pi does not refresh a settled session, so Main is not warmed while the worker works and the worker is not warmed while its report waits (choose "idle" in Pi's settings; Pair never changes it)`]),
             ...(fabricStateShown ? [`${workspace} does not ignore .pi/fabric/: the worker's Fabric writes runtime state there (such as mcp-cache.json), so it appears as a changed file in every checkpoint. Add .pi/fabric/ to its .gitignore`] : []),
             ...[warmingNote('Main', ctx.model, signedIn(ctx.modelRegistry, ctx.model)), warmingNote('Worker', workerModel(ctx, workerSpec), signedIn(ctx.modelRegistry, workerModel(ctx, workerSpec)))].flatMap(note => note ? [note] : [])];
-          await textView(ctx, 'Pair · Doctor (no inference)', doctorText({ main, pair, configuration, blockers, notes, raw: { main, pair, configuration, requirements, pi: PI_VERSION } }), { panel: true });
+          // The legend and the cache-warming explanation live in doctor, so pass the native settings they quote.
+          const native = await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true);
+          await textView(ctx, 'Pair · Doctor (no inference)', doctorText({ main, pair, configuration, blockers, notes, native, raw: { main, pair, configuration, requirements, pi: PI_VERSION } }), { panel: true });
         };
         if (command === 'report') return await showReport(id);
         if (command === 'diff') return await showDiff(id);
@@ -822,7 +844,11 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
           if (action === 'reconcile') { await reconcileWorker(target); return { reopen: !deliveredToMain, ...(deliveredToMain ? { notice: `Worker ${target} reconciled.` } : {}) }; }
           if (action === 'start') { await startWorker(target); return { reopen: true }; }
           if (action === 'settings') { await openSettings(ctx); return { reopen: true }; }
-          if (action === 'restart') { await restartWorker(ctx, c.config.workers.length > 1 ? target : undefined); return { reopen: !deliveredToMain, ...(deliveredToMain ? { notice: 'Worker restarted.' } : {}) }; }
+          if (action === 'restart') {
+            if (!await confirmRestart(ctx, c, target)) return { reopen: true };
+            await restartWorker(ctx, c.config.workers.length > 1 ? target : undefined);
+            return { reopen: !deliveredToMain, ...(deliveredToMain ? { notice: 'Worker restarted.' } : {}) };
+          }
           if (action === 'reload') { await reloadConfiguration(ctx, true); return { reopen: true, notice: 'Pair settings reloaded.' }; }
           if (action === 'doctor') { await showDoctor(c.config.requirements); return { reopen: true }; }
           return { reopen: true };
@@ -845,7 +871,10 @@ Call pair_status and handle what is yours: answer worker questions (pair_decide 
             return;
           }
           if (item.action === 'enable') { await apply({ ...await readScope(scope), enabled: true }, scope); return; }
-          if (item.action === 'restart') return await restartWorker(ctx, current.workers.length > 1 ? target : undefined);
+          if (item.action === 'restart') {
+            if (await confirmRestart(ctx, c, target)) await restartWorker(ctx, current.workers.length > 1 ? target : undefined);
+            return;
+          }
           if (item.action === 'stop') { if (await confirmStop(ctx, c, [target])) await c.stop(target); return; }
           if (item.action === 'pause') { if (await confirmPause(ctx, target)) { await c.pause(target); informMain(`the human paused worker ${target}. Do not resume it yourself.`); } return; }
           if (item.action === 'resume') { if (await ctx.ui.confirm('Resume retained worker', 'Existing changes will remain. Resume after inspecting any interrupted commands? Pair will not blindly replay them.')) { await offerProfileRepair(c, target); await c.resume(target); } return; }

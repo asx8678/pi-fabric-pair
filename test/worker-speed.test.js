@@ -75,7 +75,12 @@ test('worker speed aggregate is weighted streaming throughput, not an average of
   await f.end(usage(100));
   const speed = (await f.packet()).speed;
   assert.deepEqual(speed, { tokens: 200, seconds: 4 });
-  assert.equal(speedLabel(speed), 'avg 50.0 tok/s');
+  assert.equal(speedLabel(speed), '50.0 tok/s');
+  // No measurement gives no label, so a surface can leave the row out instead of printing a placeholder.
+  assert.equal(speedLabel(null), '');
+  assert.equal(speedLabel({ tokens: 0, seconds: 1 }), '');
+  assert.equal(speedLabel({ tokens: 10, seconds: 0 }), '');
+  assert.equal(speedLabel({ tokens: 'ten', seconds: 1 }), '');
 }));
 
 test('unmatched, zero-output, nonpositive and non-assistant samples never touch the aggregate', () => fixture(async f => {

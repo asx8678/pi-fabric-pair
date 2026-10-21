@@ -130,8 +130,15 @@ test('history lines describe a revise, an approval and a failed check', () => {
   assert.deepEqual(timelineLine({ type: 'decision', reportId: 'r1', step: 2, action: 'approve', at: 1, feedback: '' }), { step: 2, color: 'success', text: '✔ approved' });
   assert.deepEqual(timelineLine({ type: 'decision', reportId: 'r1', step: 2, action: 'answer', at: 1, feedback: 'yes' }), { step: 2, color: 'accent', text: '↻ answer: yes' });
   assert.equal(timelineLine({ type: 'decision', reportId: 'r1', step: 2, action: 'cancel', at: 1, feedback: '' }).text, '✖ cancelled');
-  assert.equal(timelineLine({ type: 'report', reportId: 'r1', step: 2, kind: 'checkpoint', at: 1, verification: { passed: 1, failed: 2 } }).text, '↻ report checkpoint · 2 Pair checks failed');
-  assert.equal(timelineLine({ type: 'report', reportId: 'r1', step: 2, kind: 'checkpoint', at: 1, verification: { passed: 2, failed: 0 } }).text, '↻ report checkpoint');
+  // A report line names its kind and says how Pair's own checks went.
+  assert.deepEqual(timelineLine({ type: 'report', reportId: 'r1', step: 2, kind: 'checkpoint', at: 1, verification: { passed: 1, failed: 2 } }), { step: 2, color: 'warning', text: '◐ Checkpoint · 2 Pair checks failed' });
+  assert.equal(timelineLine({ type: 'report', reportId: 'r1', step: 2, kind: 'checkpoint', at: 1, verification: { passed: 2, failed: 0 } }).text, '◐ Checkpoint · 2/2 Pair checks passed');
+  assert.equal(timelineLine({ type: 'report', reportId: 'r1', step: 2, kind: 'checkpoint', at: 1, verification: { passed: 0, failed: 1 } }).text, '◐ Checkpoint · 1 Pair check failed');
+  assert.equal(timelineLine({ type: 'report', reportId: 'r1', step: 2, kind: 'question', at: 1, verification: { passed: 0, failed: 0 } }).text, '◐ Question');
+  assert.equal(timelineLine({ type: 'report', reportId: 'r1', step: 2, kind: 'blocked', at: 1, verification: { passed: 0, failed: 0 } }).text, '◐ Blocker');
+  assert.equal(timelineLine({ type: 'report', reportId: 'r1', step: 2, kind: 'final_review', at: 1, verification: { passed: 0, failed: 0 } }).text, '◐ Final review');
+  // No verification at all still renders as the kind alone.
+  assert.equal(timelineLine(/** @type {any} */ ({ type: 'report', reportId: 'r1', step: 1, kind: 'checkpoint', at: 1 })).text, '◐ Checkpoint');
   // History is per step and bounded.
   const timeline = [
     { type: 'decision', reportId: 'a', step: 1, action: 'approve', at: 1, feedback: '' },
@@ -157,7 +164,19 @@ test('the dashboard renders history under its step and a Recent activity section
   const s = summary({ workers: [{ ...summary().workers[0], task: task({ timeline }), recentActivity: activity }] });
   const text = dashboardLines(s, 100, NOW).map(strip).join('\n');
   assert.ok(text.includes('↻ revise: honour Retry-After on 429'), text);
-  assert.ok(text.includes('1 Pair check failed'), text);
+  assert.ok(text.includes('◐ Checkpoint · 1 Pair check failed'), text);
+  // A finished step's row already says "approved" on its right, so its history does not repeat it.
+  const approved = summary({ workers: [{ ...summary().workers[0], task: task({ timeline: [
+    { type: 'report', reportId: 'r1', step: 1, kind: 'checkpoint', at: NOW - 6000, verification: { passed: 2, failed: 0 } },
+    { type: 'decision', reportId: 'r1', step: 1, action: 'approve', at: NOW - 5000, feedback: '' }
+  ] }) }] });
+  const approvedText = dashboardLines(approved, 100, NOW).map(strip).join('\n');
+  assert.ok(approvedText.includes('◐ Checkpoint · 2/2 Pair checks passed'), approvedText);
+  assert.equal(approvedText.includes('✔ approved'), false, 'no duplicate approval under a finished step: ' + approvedText);
+  // Anywhere else, stepHistory keeps the approval: only the dashboard asks to omit it.
+  const onlyApproval = [{ type: 'decision', reportId: 'r1', step: 1, action: 'approve', at: 1, feedback: '' }];
+  assert.deepEqual(stepHistory(/** @type {any} */ (onlyApproval), 1).map(line => line.text), ['✔ approved']);
+  assert.deepEqual(stepHistory(/** @type {any} */ (onlyApproval), 1, 3, { omitApproved: true }), []);
   assert.ok(text.includes('Recent activity'), text);
   assert.ok(text.includes('npm test'), text);
   // A failing timeline must not widen a line.

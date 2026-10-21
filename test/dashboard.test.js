@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { createDashboard, createFollowView, dashboardAction, dashboardItems, dashboardKeys, dashboardLines, dashboardMenu, dashboardMoreKeys, dashboardView, menu } from '../src/ui.js';
+import { ACTION_HELP, ACTION_HELP_MAX, createDashboard, createFollowView, dashboardAction, dashboardItems, dashboardKeys, dashboardLines, dashboardMenu, dashboardMoreKeys, dashboardView, menu } from '../src/ui.js';
 
 const NOW = 1_700_000_000_000;
 const strip = (/** @type {string} */ text) => text.replace(/\u001b\[[0-9;]*m/g, '');
@@ -24,7 +24,12 @@ function summary(over = {}) {
   return { ownerSession: 'session-1', ownerEpoch: 1, directory: '/tmp/pair', enabled: true, autoDeliverReports: true, settingsPending: false,
     main: { model: 'provider/model', busy: false }, mainPhase: null, waitingReports: 0, workers: [worker()], cacheNote: '', ...over };
 }
-const plain = (/** @type {string[]} */ lines) => lines.map(strip).join('\n');
+// The overlay draws a box, so a view line carries a border and a padding space on each side. Tests that assert
+// wording compare the interior only; the box itself is asserted by its own test.
+const interior = (/** @type {string} */ line) => { const text = strip(line); return text.startsWith('│') ? text.slice(2, -2) : text; };
+/** Whether a line is inside the box's interior: needed now that the overlay is framed. */
+const framed = (/** @type {string} */ line) => strip(line).startsWith('│');
+const plain = (/** @type {string[]} */ lines) => lines.map(interior).join('\n');
 
 const CASES = {
   'working': summary(),
@@ -100,13 +105,69 @@ test('the dashboard without a task is a readiness screen', () => {
   assert.ok(text.includes('Press n to start the worker.'), text);
   assert.ok(text.includes('n start'), text);
   const off = plain(dashboardLines(CASES.off, 100, NOW));
-  assert.ok(off.includes('Pair is off'), off);
+  // Pair off is said once, not twice (no banner above the readiness sentence).
+  assert.equal(off.match(/Pair is off/g)?.length, 1, off);
   assert.ok(off.includes('○ off'), off);
+  // The controller refuses to start a worker while Pair is off, so no start key is offered.
+  assert.equal(off.includes('n start'), false, off);
+  assert.equal(dashboardKeys(CASES.off).some(item => item.action === 'start'), false);
   const unset = summary({ workers: [worker({ task: null, status: 'stopped', pid: null, model: '' })] });
   const unsetText = plain(dashboardLines(unset, 100, NOW));
   assert.ok(unsetText.includes('No worker model is chosen yet.'), unsetText);
   assert.ok(unsetText.includes('Press s to choose the worker model.'), unsetText);
   assert.ok(unsetText.includes('○ set up'), unsetText);
+});
+
+test('Pair off offers settings, never a start key the controller would refuse', () => {
+  const off = CASES.off;
+  assert.equal(off.enabled, false);
+  const keys = dashboardKeys(off).map(item => item.key);
+  assert.equal(keys.includes('n'), false, 'no start key while Pair is off: ' + keys.join(','));
+  assert.equal(dashboardKeys(off).some(item => item.action === 'start'), false);
+  // The settings key that turns Pair on is offered instead.
+  assert.ok(dashboardKeys(off).some(item => item.action === 'settings'), keys.join(','));
+  for (const width of [20, 40, 60, 100]) {
+    const lines = dashboardLines(off, width, NOW).map(strip);
+    const text = lines.join('\n');
+    assert.equal((text.match(/Pair is off/g) || []).length, 1, width + ': ' + text);
+    // Narrow widths truncate the sentence rather than repeating it; the settings hint survives as far as it can.
+    assert.ok(text.includes('Pair is off'), width + ': ' + text);
+    if (width >= 40) assert.ok(text.includes('Open settings (s) to turn Pair on.'), width + ': ' + text);
+    else assert.ok(text.includes('Open settings'), width + ': ' + text);
+    assert.ok(lines[1].includes('claude-opus'), 'the identity line stays: ' + text);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, width + ': ' + JSON.stringify(line));
+  }
+  // Turning Pair on brings the key back.
+  const on = summary({ workers: [worker({ task: null, status: 'stopped', pid: null, observation: null })] });
+  assert.ok(dashboardKeys(on).some(item => item.action === 'start'));
+});
+
+test('Pair off is still announced on the screens that show a plan or no worker at all', () => {
+  // The readiness sentence is the only notice on a no-task screen, so these two need the banner instead.
+  const withTask = summary({ enabled: false, workers: [worker()] });
+  const noWorker = summary({ enabled: false, workers: [] });
+  for (const [name, s] of Object.entries({ 'a running task': withTask, 'no worker': noWorker })) {
+    for (const width of [40, 60, 100]) {
+      const lines = dashboardLines(s, width, NOW).map(strip);
+      const text = lines.join('\n');
+      assert.equal((text.match(/Pair is off/g) || []).length, 1, name + ' at ' + width + ': ' + text);
+      assert.ok(text.includes('Pair is off'), name + ' at ' + width + ': ' + text);
+      if (width >= 60) assert.ok(text.includes('Pair is off. It accepts no new work until you turn it on.'), name + ' at ' + width + ': ' + text);
+      for (const line of lines) assert.ok(visibleWidth(line) <= width, width + ': ' + JSON.stringify(line));
+    }
+  }
+  // The plan screen keeps its header identity line and its plan; the banner sits under the title.
+  const taskLines = dashboardLines(withTask, 100, NOW).map(strip);
+  assert.equal(taskLines[0], 'Pair', taskLines.join('\n'));
+  assert.ok(taskLines[1].includes('Pair is off'), taskLines.join('\n'));
+  assert.ok(taskLines.some(line => line.includes('Wire retries into fetch client')), taskLines.join('\n'));
+  // No start key while off, even with a plan on screen.
+  assert.equal(dashboardKeys(withTask).some(item => item.action === 'start'), false);
+  // A finished task off screen shows the Last task line and still states Pair off once.
+  const done = summary({ enabled: false, workers: [worker({ status: 'ready', task: task({ status: 'completed', step: 3, updatedAt: NOW - 30000, stepList: ['A', 'B', 'C'].map(title => step(title, 'done')) }) })] });
+  const doneText = plain(dashboardLines(done, 100, NOW));
+  assert.equal((doneText.match(/Pair is off/g) || []).length, 1, doneText);
+  assert.ok(doneText.includes('Last task'), doneText);
 });
 
 test('several workers name the worker in the header', () => {
@@ -147,6 +208,183 @@ test('the keys follow the state, so a key is only offered when it applies', () =
   assert.ok(more.includes('d doctor'), more);
   assert.equal(more.includes('c cancel'), false, more);
   assert.deepEqual(dashboardMoreKeys().map(item => item.action), ['restart', 'status', 'inbox', 'reload', 'doctor', 'help']);
+});
+
+/** Keys the dashboard actually offers, so a test never asserts a key the state does not have. */
+const hintKey = (/** @type {any} */ s, /** @type {any} */ row, /** @type {string} */ action) => row.find((/** @type {any} */ item) => item.action === action)?.key;
+
+/** Every hint the main row offers for this state. */
+function offeredHints(/** @type {any} */ s) { return dashboardKeys(s); }
+const questionCase = summary({ workers: [worker({ status: 'question', task: task({ status: 'question', reportId: 'report-1', reportKind: 'question' }) })] });
+const HINT_CASES = { waiting: CASES['waiting reports'], question: questionCase, 'several workers': CASES['several workers'] };
+
+test('a key hint is never split from its label, at any width', () => {
+  for (const [name, s] of Object.entries(HINT_CASES)) {
+    const hints = offeredHints(s);
+    for (const width of [40, 50, 60, 72, 100]) {
+      const lines = dashboardLines(s, width, NOW).map(strip);
+      // The hint row sits at the end of the surface: only those lines are checked.
+      const tail = lines.slice(Math.max(0, lines.findLastIndex(line => !/^  /.test(line)) + 1));
+      for (const hint of hints) {
+        for (const line of tail) {
+          if (!line.includes(hint.label)) continue;
+          assert.ok(line.includes(hint.key + ' ' + hint.label), name + ' at ' + width + ': "' + hint.label + '" sits apart from its key: ' + JSON.stringify(line));
+        }
+      }
+      // Every hint is rendered somewhere, so the row never silently loses one.
+      for (const hint of hints) assert.ok(tail.some(line => line.includes(hint.key + ' ' + hint.label)), name + ' at ' + width + ': missing ' + hint.key + ' ' + hint.label + ' in ' + JSON.stringify(tail));
+      // The same holds for the More row and the help/back row.
+      for (const options of [{ more: true }, { help: true }]) {
+        const moreLines = dashboardLines(s, width, NOW, options).map(strip);
+        const moreTail = moreLines.slice(Math.max(0, moreLines.findLastIndex(line => !/^  /.test(line)) + 1));
+        for (const hint of dashboardMoreKeys(s)) {
+          for (const line of moreTail) {
+            if (!line.includes(hint.label)) continue;
+            assert.ok(line.includes(hint.key + ' ' + hint.label), name + ' at ' + width + ' (' + Object.keys(options)[0] + '): ' + JSON.stringify(line));
+          }
+        }
+        assert.ok(moreLines.some(line => line.trimEnd().endsWith('esc back')), name + ' at ' + width + ': esc back is split: ' + JSON.stringify(moreLines.slice(-4)));
+      }
+    }
+  }
+});
+
+test('the dashboard never shows a bare slash command', () => {
+  const states = {
+    'error': summary({ workers: [worker({ status: 'error', error: 'RPC worker exited with code 1: ENOENT pi', task: null, pid: null })] }),
+    'stopped': summary({ workers: [worker({ task: null, status: 'stopped', pid: null, observation: null })] }),
+    'paused': CASES.paused,
+    'interrupted': summary({ workers: [worker({ status: 'interrupted', task: task({ status: 'interrupted' }) })] }),
+    // The controller's own wording for a generation it cannot prove exited.
+    'exit unconfirmed': summary({ workers: [worker({ status: 'error', error: 'EXIT_UNCONFIRMED: worker vanished. Stop/reconcile before reusing this generation.', task: null, pid: null })] }),
+    'held after a crash': summary({ workers: [worker({ status: 'error', error: 'EXIT_UNCONFIRMED: worker vanished. Stop/reconcile before reusing this generation.', task: task({ status: 'paused' }), status2: 'error' })] }),
+    'no model': summary({ workers: [worker({ task: null, status: 'stopped', pid: null, model: '' })] }),
+    'not a git repo': summary({ workers: [worker({ task: null, status: 'stopped', pid: null, workspaceGit: false })] }),
+  };
+  for (const [name, s] of Object.entries(states)) {
+    for (const width of [40, 60, 100]) {
+      const lines = dashboardLines(s, width, NOW).map(strip);
+      for (const line of lines) assert.equal(line.includes('/pair'), false, name + ' at ' + width + ' shows a command: ' + JSON.stringify(line));
+    }
+  }
+  // The hint names a key the dashboard actually offers in that state.
+  const stopped = states.stopped, stoppedText = plain(dashboardLines(stopped, 100, NOW));
+  const startKey = hintKey(stopped, dashboardKeys(stopped), 'start');
+  assert.ok(startKey, 'a stopped worker with a model offers start');
+  assert.ok(stoppedText.includes('Press ' + startKey + ' to start the worker.'), stoppedText);
+  const held = states.paused, heldText = plain(dashboardLines(held, 100, NOW));
+  const resumeKey = hintKey(held, dashboardKeys(held), 'resume');
+  assert.ok(resumeKey, 'a held task offers resume');
+  assert.ok(heldText.includes('Press ' + resumeKey + ' to resume the task.'), heldText);
+  // A crashed worker with a held task: stop first, then resume, using the keys the rows offer.
+  const crash = states['held after a crash'], crashText = plain(dashboardLines(crash, 100, NOW));
+  const stopKey = hintKey(crash, dashboardMoreKeys(crash), 'stop');
+  const crashResume = hintKey(crash, dashboardKeys(crash), 'resume');
+  if (stopKey && crashResume) assert.ok(crashText.includes('Press m then ' + stopKey + ' to stop, then ' + crashResume + ' to resume the task.'), crashText);
+  else assert.equal(/\/pair/.test(crashText), false, crashText);
+  // EXIT_UNCONFIRMED reconcile is said once, by the warning line, so the hint does not repeat it.
+  const unconfirmedLines = dashboardLines(states['exit unconfirmed'], 100, NOW).map(strip);
+  const unconfirmed = unconfirmedLines.join('\n');
+  assert.ok(unconfirmed.includes('press ! to reconcile'), unconfirmed);
+  // The hint does not add a second instruction for the same key.
+  assert.equal(unconfirmedLines.some(line => /^Press .*reconcile/i.test(line)), false, unconfirmed);
+  // No offered key applies (no model, no start): a plain sentence, not a command.
+  const unset = plain(dashboardLines(states['no model'], 100, NOW));
+  assert.ok(unset.includes('No worker model is chosen yet.'), unset);
+  assert.ok(unset.includes('Press s to choose the worker model.'), unset);
+  assert.ok(plain(dashboardLines(states['not a git repo'], 100, NOW)).includes('not a Git repository'), 'a plain sentence when no key applies');
+});
+
+test('the header drops whole items and never ends in a cut word', () => {
+  const cases = { ...CASES, question: questionCase };
+  for (const [name, s] of Object.entries(cases)) {
+    if (!s.workers.length) continue;
+    for (const width of [40, 60, 72, 100]) {
+      const lines = dashboardLines(s, width, NOW).map(strip);
+      // The identity line follows the title (and, for a stopped Pair, the off notice).
+      const header = lines.find(line => line.includes('claude-opus')) ?? '';
+      assert.equal(header.includes('…'), false, name + ' at ' + width + ' cuts the header mid-word: ' + JSON.stringify(header));
+      assert.ok(header.includes('claude-opus'), name + ' at ' + width + ' keeps the model: ' + JSON.stringify(header));
+      if (s.workers[0].task && !['completed', 'cancelled'].includes(s.workers[0].task.status)) {
+        assert.ok(/step \d+\/\d+/.test(header), name + ' at ' + width + ' keeps the step: ' + JSON.stringify(header));
+      }
+    }
+  }
+  // The numbers go in a fixed order: ctx first, then cost, then elapsed, then the effort.
+  const header = (/** @type {any} */ s, /** @type {number} */ width) => strip(dashboardLines(s, width, NOW).find(line => line.includes('claude-opus')) ?? '');
+  const working = CASES.working;
+  assert.ok(header(working, 100).includes('ctx 41%'), header(working, 100));
+  const narrow = header(working, 52);
+  assert.equal(narrow.includes('ctx'), false, narrow);
+  assert.ok(narrow.includes('3m12s'), narrow);
+  assert.ok(narrow.includes('step 2/3'), narrow);
+  assert.ok(header(working, 40).includes('◉ working'), header(working, 40));
+});
+
+test('a finished task leaves one Last task line above the readiness sentence', () => {
+  const completed = summary({ workers: [worker({ status: 'ready', task: task({ status: 'completed', step: 3, updatedAt: NOW - 30000, stepList: ['A', 'B', 'C'].map(title => step(title, 'done')) }) })] });
+  const doneText = plain(dashboardLines(completed, 100, NOW));
+  assert.ok(doneText.includes('Last task'), doneText);
+  assert.ok(doneText.includes('✔ Add retry and backoff to the fetch client'), doneText);
+  assert.ok(doneText.includes('3/3 approved'), doneText);
+  assert.ok(doneText.includes('2m42s'), 'the frozen elapsed time: ' + doneText);
+  assert.ok(doneText.includes('$0.14'), doneText);
+  const doneLines = dashboardLines(completed, 100, NOW).map(strip);
+  const lastAt = doneLines.findIndex(line => line.includes('Last task'));
+  assert.ok(doneLines[lastAt + 1].includes('ready for the next task'), 'the line sits above the readiness sentence: ' + doneLines.join('\n'));
+
+  const cancelled = summary({ workers: [worker({ status: 'stopped', pid: null, task: task({ status: 'cancelled', step: 2 }) })] });
+  const cancelledText = plain(dashboardLines(cancelled, 100, NOW));
+  assert.ok(cancelledText.includes('Last task'), cancelledText);
+  assert.ok(cancelledText.includes('✖ cancelled at step 2/3'), cancelledText);
+  assert.ok(cancelledText.includes('Add retry and backoff to the fetch client'), cancelledText);
+
+  // Narrow widths shorten the objective, never the numbers, and never exceed the width.
+  for (const width of [20, 40, 60]) {
+    for (const s of [completed, cancelled]) {
+      const lines = dashboardLines(s, width, NOW);
+      for (const line of lines) assert.ok(visibleWidth(strip(line)) <= width, width + ': ' + JSON.stringify(strip(line)));
+      const text = plain(lines);
+      // The label shortens at the narrowest widths; the result is always marked as a finished task.
+      assert.ok(/Last task|✔|✖/.test(text), width + ': ' + text);
+    }
+    // The count survives even when the words around it are gone.
+    assert.ok(plain(dashboardLines(cancelled, width, NOW)).includes('2/3'), 'the count survives at ' + width);
+  }
+  // The Last task line already gives the count, so the header line drops "step N/M".
+  /** @param {any} s */
+  const doneLinesFor = s => dashboardLines(s, 100, NOW).map(strip);
+  const header = (/** @type {any} */ s) => doneLinesFor(s).find((line) => line.includes('claude-opus')) ?? '';
+  assert.equal(header(completed).includes('step '), false, 'no step count next to Last task: ' + header(completed));
+  assert.ok(header(completed).includes('✔ done'), header(completed));
+  assert.ok(header(cancelled).includes('○ off'), header(cancelled));
+  // A running task keeps the step in its header.
+  assert.ok(doneLinesFor(CASES.working).some(line => line.includes('claude-opus') && line.includes('step 2/3')), doneLinesFor(CASES.working).join('\n'));
+  // The line is stable: the same summary and clock always render the same text.
+  assert.deepEqual(dashboardLines(completed, 100, NOW), dashboardLines(completed, 100, NOW));
+});
+
+test('every help description fits one line at 60 columns', () => {
+  // The descriptions are a fixed table: keep each one short enough for the narrowest overlay.
+  for (const [action, text] of Object.entries(ACTION_HELP)) {
+    assert.ok(text.length <= ACTION_HELP_MAX, action + ' description is ' + text.length + ' characters: ' + text);
+  }
+  // At 60 columns each description occupies its own line, with no hanging continuation.
+  for (const [name, s] of Object.entries(CASES)) {
+    for (const options of [{ help: true }, { more: true }]) {
+      const lines = dashboardLines(s, 60, NOW, options).map(strip);
+      const keysAt = lines.findIndex(line => line.trim() === 'Keys');
+      if (keysAt < 0) continue;
+      for (let index = keysAt; index < lines.length - 1; index++) {
+        // A key row starts at four spaces; a continuation row starts at the shared description column.
+        if (!/^ {4}\S/.test(lines[index])) continue;
+        const column = lines[index].search(/\S{2,}\s{2,}\S/);
+        if (column < 0) continue;
+        const indented = lines[index].slice(0, column).length;
+        assert.equal(new RegExp('^ {' + indented + '}\\S').test(lines[index + 1]), false, name + ': a description wrapped at 60 columns: ' + JSON.stringify(lines[index]) + ' / ' + JSON.stringify(lines[index + 1]));
+      }
+    }
+  }
 });
 
 test('a notice is shown under the state and does not break the layout', () => {
@@ -334,6 +572,16 @@ test('the overlay fits the terminal: a readable width and never taller than Pi a
   assert.ok(lines.length <= 16, `20 rows leave 16 for the overlay, got ${lines.length}`);
   assert.ok(strip(lines.at(-2)).includes('? help'), 'the keys survive: ' + strip(lines.at(-2)));
   assert.ok(lines.every((/** @type {string} */ line) => visibleWidth(strip(line)) <= options.width));
+  // The frame holds at the widest and the narrowest allowed overlay: exact width, corners, sides, keys last.
+  for (const width of [options.width, 72, 40]) {
+    const box = host.component.render(width).map(strip);
+    assert.equal(visibleWidth(box[0]), width, 'top border at ' + width);
+    assert.ok(box[0].startsWith('╭') && box[0].endsWith('╮'), 'rounded top: ' + box[0]);
+    assert.ok(box.at(-1)?.startsWith('╰') && box.at(-1)?.endsWith('╯'), 'rounded bottom: ' + box.at(-1));
+    assert.ok(box.slice(1, -1).every(framed), 'every interior line has its sides');
+    assert.ok(box.every(line => visibleWidth(line) === width), 'every line is exactly the overlay width');
+    assert.ok(box.at(-2)?.includes('? help'), 'the keys sit on the line just above the bottom border: ' + box.at(-2));
+  }
   host.component.dispose();
   const narrow = overlayHost({ columns: 80, rows: 40 });
   await dashboardView(narrow.ctx, fakeController(tall), {});
@@ -438,19 +686,28 @@ test('help lists one key per line with what it does', () => {
   assert.ok(lines.some(line => line.trim() === 'Keys'), text);
   assert.ok(lines.some(line => line.trim() === 'More (press m, then the key)'), text);
   const line = (/** @type {string} */ start) => lines.find(item => item.trimStart().startsWith(start + ' ')) ?? '';
-  assert.ok(line('p pause').includes('stop the current step and hold the task'), text);
-  assert.ok(line('x stop worker').includes('the conversation is kept'), text);
+  assert.ok(line('p pause').includes('hold the task after this step'), text);
+  assert.ok(line('x stop worker').includes('conversation is kept'), text);
   assert.ok(line('esc close').includes('q too'), text);
-  assert.equal(line('p pause').indexOf('stop the current'), line('t transcript').indexOf("follow the worker's"), 'descriptions share one column');
+  assert.equal(line('p pause').indexOf('hold the task'), line('t transcript').indexOf("follow the worker's"), 'descriptions share one column');
   assert.equal(text.includes('Wire retries'), false, 'the list replaces the plan');
   assert.equal(lines.at(-1)?.trim(), 'esc back');
   for (const item of lines) assert.ok(visibleWidth(item) <= 100);
   // A narrow overlay wraps a description under its column instead of cutting it off.
   const narrow = dashboardLines(CASES.working, 50, NOW, { help: true }).map(strip);
   assert.equal(narrow.slice(narrow.findIndex(item => item.trim() === 'Keys')).some(item => item.includes('…')), false, narrow.join('\n'));
-  const at = narrow.findIndex(item => item.trimStart().startsWith('c cancel '));
-  const column = narrow[at].indexOf('end the task');
+  // A description longer than its column continues under its first word, not at the left margin.
+  const at = narrow.findIndex(item => item.trimStart().startsWith('esc close '));
+  const column = narrow[at].indexOf('close (q too)');
+  assert.ok(column > 0, narrow.join('\n'));
   assert.match(narrow[at + 1], new RegExp(`^ {${column}}\\S`), 'the rest of the description hangs under its first word');
+  // At 60 columns every description fits on its own line.
+  const wide = dashboardLines(CASES.working, 60, NOW, { help: true }).map(strip);
+  for (let index = 0; index < wide.length - 1; index++) {
+    if (!/^ {4}\S/.test(wide[index])) continue;
+    const next = wide[index + 1];
+    assert.equal(/^ {23}\S/.test(next), false, 'no description may wrap at 60 columns: ' + JSON.stringify(wide[index]) + ' / ' + JSON.stringify(next));
+  }
   for (const item of narrow) assert.ok(visibleWidth(item) <= 50, JSON.stringify(item));
 });
 

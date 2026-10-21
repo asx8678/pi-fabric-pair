@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { registerMain } from '../src/main.js';
-import { configPaths } from '../src/config.js';
+import { configPaths, DEFAULTS } from '../src/config.js';
 
 async function fixture(run, { global, project = { version: 2, autoStart: false }, trusted = true, mode = 'rpc', fabric } = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-settings-main-'));
@@ -19,6 +19,7 @@ async function fixture(run, { global, project = { version: 2, autoStart: false }
   await fs.writeFile(files.project, JSON.stringify(project));
   const events = new Map(), commands = new Map(), tools = new Map(), actions = [], notices = [], confirmations = [], widgets = [], messages = [], titles = [];
   let confirmed = true;
+  const screens = [];
   const ctx = { cwd, mode, hasUI: true, isProjectTrusted: () => trusted,
     sessionManager: { getSessionId: () => 'settings-test-owner' }, getContextUsage: () => undefined,
     model: { provider: 'main', id: 'native' }, modelRegistry: { getAvailable: () => [] },
@@ -27,6 +28,8 @@ async function fixture(run, { global, project = { version: 2, autoStart: false }
       if (next === undefined) return undefined;
       const value = rows.find(row => row.startsWith(next)); assert.ok(value, `missing ${next}`); return value;
     }, setStatus: () => {}, setWidget: () => {}, notify: (message, level) => notices.push({ message, level }), setWidget: (key, component) => widgets.push({ key, component }),
+    // A custom view is the settings screen: keep it mounted so a test can read what it shows.
+    custom: (factory, options) => new Promise(resolve => { const screen = { component: factory({ terminal: { columns: 100, rows: 40 }, requestRender() {} }, null, null, resolve), options }; screens.push(screen); }),
     confirm: async (...args) => { confirmations.push(args); return confirmed; }, setTitle: title => titles.push(title) }
   };
   const fabricTools = [];
@@ -42,7 +45,7 @@ async function fixture(run, { global, project = { version: 2, autoStart: false }
     await events.get('session_start')({}, ctx);
     const controller = main.getController(); assert.ok(controller);
     let spawns = 0; controller.rpcFactory = () => { spawns++; throw Error('RPC spawn forbidden in settings fixture'); };
-    await run({ controller, getController: () => main.getController(), files, actions, notices, confirmations, tools, events, ctx, widgets, messages, titles, spawns: () => spawns,
+    await run({ controller, getController: () => main.getController(), files, actions, notices, confirmations, tools, events, ctx, widgets, messages, titles, screens, spawns: () => spawns,
       confirm: value => { confirmed = value; },
       command: args => commands.get('pair').handler(args, ctx), home, cwd });
   } finally {
@@ -169,6 +172,66 @@ for (const viaMenu of [false, true]) test(`worker restart ${viaMenu ? 'menu' : '
   assert.deepEqual(f.messages, []);
 }));
 
+/** A worker with a plan and a status, so a restart either interrupts a step or does not. */
+function taskRecord(status) {
+  return { id: 'restart-task', workerId: 'worker', requestId: 'restart-request', objective: 'Restart fixture', context: '', constraints: [],
+    steps: [{ id: 'one', title: 'Work', instructions: 'fixture' }, { id: 'two', title: 'More', instructions: 'fixture' }], stepIndex: 1, planRevision: 1,
+    attemptId: 'restart-attempt', attemptNumber: 1, status, leaseId: 'restart-lease', policy: structuredClone(DEFAULTS.supervision),
+    limits: structuredClone(DEFAULTS.limits), verification: structuredClone(DEFAULTS.verification), startedAt: Date.now() - 60000,
+    updatedAt: Date.now(), revisions: 0, turns: 3, usage: null, baseSnapshotRef: '/unused-fixture', pendingReport: null, report: null,
+    decisions: {}, lastDecision: null };
+}
+for (const via of ['command', 'menu']) test(`a ${via} restart asks first while a task runs, and not without one`, () => fixture(async f => {
+  const c = f.controller, spec = c.config.workers[0];
+  let restarts = 0;
+  c.restart = async id => { restarts++; return { task: { status: 'interrupted' } }; };
+  /** @param {string | null} status null for a worker with no task at all */
+  const show = status => {
+    c.state.workers[spec.id] = { id: spec.id, cwd: f.cwd, repoRoot: f.cwd, status: 'working', bound: spec, workerGeneration: 1,
+      sessionId: 'fake-worker-session', sessionFile: path.join(f.home, 'fake-session.jsonl'), history: [], usage: null, task: status ? taskRecord(status) : null };
+    c.emit('change', c.summary());
+  };
+  const restart = async () => {
+    if (via === 'menu') { f.actions.push('More…', 'Restart worker', undefined); await f.command(''); assert.equal(f.actions.length, 0, 'every menu choice was used'); }
+    else await f.command('restart');
+  };
+  // Restarting may also offer the Fabric profile repair; only the restart prompt itself is counted here.
+  const restartPrompts = () => f.confirmations.filter(([title]) => title === 'Restart worker').length;
+  try {
+    // A worker resting between tasks restarts without a prompt, exactly as before.
+    // A worker with no task restarts without a prompt, exactly as before.
+    show(null);
+    await restart();
+    assert.equal(restarts, 1, 'the taskless restart ran');
+    assert.equal(restartPrompts(), 0, 'no task means nothing to interrupt: no prompt');
+    // A running task is interrupted, so a declined confirmation must stop the restart.
+    show('running');
+    f.confirm(false);
+    await restart();
+    assert.equal(restartPrompts(), 1, 'the running restart asked');
+    const [title, message] = f.confirmations.find(([name]) => name === 'Restart worker');
+    assert.equal(title, 'Restart worker');
+    assert.match(message, /^Restart worker worker\? It is running a task; the current step is interrupted\./);
+    assert.match(message, /conversation and file changes are kept/);
+    assert.equal(restarts, 1, 'a declined restart does not run');
+    // Accepting runs it.
+    f.confirm(true);
+    await restart();
+    assert.equal(restarts, 2, 'an accepted restart runs');
+    assert.equal(restartPrompts(), 2);
+    // A finished task is not interrupted either.
+    show('completed');
+    await restart();
+    assert.equal(restartPrompts(), 2, 'a finished task needs no prompt');
+    assert.equal(restarts, 3);
+    // A held (paused) task still counts as an open task, so it asks too.
+    show('paused');
+    await restart();
+    assert.equal(restartPrompts(), 3, 'an open held task asks');
+    assert.equal(restarts, 4);
+  } finally { delete c.state.workers[spec.id]; }
+}, { project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'fixture', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
 test('stop during a restart configuration read prevents a later launch', () => fixture(async f => {
   let restarts = 0; f.controller.restart = async () => { restarts++; };
   const update = f.controller.updateConfig.bind(f.controller);
@@ -285,3 +348,20 @@ test('the attention cue works with the indicator off, and puts the title back on
   f.controller.emit('change', { ...summary, enabled: true, autoDeliverReports: false, waitingReports: 0 });
   assert.equal(f.titles.at(-1), `π - ${path.basename(f.cwd)}`, "Pi's own title is back");
 }, { mode: 'tui', project: { version: 2, enabled: true, autoStart: false, indicator: 'off', attentionCue: true, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('/pair settings in a TUI opens the dedicated settings screen, not the select menu', () => fixture(async f => {
+  const settings = f.command('settings');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.screens.length, 1, 'exactly one custom view: the settings screen');
+  const screen = f.screens[0];
+  assert.equal(screen.options.overlay, true, 'the screen is an overlay over the chat');
+  const shown = screen.component.render(100).map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(shown, /Pair settings/, 'the frame names the screen');
+  for (const page of ['Worker', 'Review', 'Display', 'General']) assert.ok(shown.includes(page), `the ${page} page is offered`);
+  assert.match(shown, /esc|close/, 'the keys are on screen');
+  assert.deepEqual(f.actions, [], 'no select menu replaced the editor');
+  screen.component.handleInput('q');
+  await settings;
+  assert.equal(f.notices.length, 0, 'closing the screen says nothing and changes nothing');
+}, { mode: 'tui', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }] } }));
+

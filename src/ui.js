@@ -9,7 +9,7 @@ import { DEFAULT_CACHE_LIFETIME_S, FABRIC_CACHE_VERSION } from './native.js';
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} UIContext */
 /** @typedef {Readonly<ReturnType<import('./controller.js').PairController['summary']>>} PairSummary */
 /** @typedef {(next: import('./config.js').PairConfig, scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>} ApplySettings */
-/** @typedef {{loadScope?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig>, migrate?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>}} SettingsOptions */
+/** @typedef {{loadScope?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig>, migrate?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>, migrationPending?: (scope: import('./config.js').ConfigScope) => boolean}} SettingsOptions */
 
 /** @param {unknown} value @returns {Readonly<import('@earendil-works/pi-coding-agent').ContextUsage> | null} */
 function contextUsage(value) {
@@ -27,6 +27,34 @@ function contextUsage(value) {
  * @returns {(color: C, text: string) => string}
  */
 function painter(theme) { return (color, text) => (theme ? theme.fg(color, text) : text); }
+/** @typedef {(text: string) => string} TextPainter */
+/**
+ * Clips unstyled text to a visible width with '…', without a single escape sequence. pi-tui's
+ * truncateToWidth wraps its ellipsis in SGR resets even for plain text, so a caller that paints the
+ * clipped string afterwards would have its colour cut short mid-string. Clipping the plain text first
+ * keeps the whole result one paintable run.
+ * @param {string} text @param {number} width @returns {string}
+ */
+function clipPlain(text, width) {
+  if (!(width > 0)) return '';
+  const plain = cleanText(text, 4000);
+  if (visibleWidth(plain) <= width) return plain;
+  let out = '';
+  for (const glyph of plain) {
+    if (visibleWidth(out + glyph) > width - 1) break;
+    out += glyph;
+  }
+  // No trimEnd: pi-tui's truncateToWidth keeps the cut character, and the extra column matters at a row's edge.
+  return out + '…';
+}
+/**
+ * Clips one row of plain text and removes a separator or space left dangling in front of the ellipsis, so
+ * a narrow row reads '⚠ worker needs attention…' rather than '⚠ worker needs attention ·…'. Only the
+ * ellipsis' own lead-in is cleaned: the clipped text itself keeps its width, and clipPlain stays untouched
+ * because the live line's title minimum depends on its exact accounting.
+ * @param {string} text @param {number} width @returns {string}
+ */
+function clipRow(text, width) { return clipPlain(text, width).replace(/[\s·]+…$/, '…'); }
 /**
  * @param {{render(width: number): string[], handleInput(data: string): void}} view
  * @param {{requestRender?(): void}} tui
@@ -70,12 +98,16 @@ export function staleWorkers(summary, now = Date.now()) {
     .map(w => ({ id: w.id, ageMs: activityAge(w, now) }));
 }
 
-/** @param {{tokens?: unknown, seconds?: unknown} | null | undefined} speed @returns {string} */
+/**
+ * Weighted streaming throughput. Empty when nothing was measured, so a surface can leave the row out
+ * instead of printing a placeholder.
+ * @param {{tokens?: unknown, seconds?: unknown} | null | undefined} speed @returns {string}
+ */
 export function speedLabel(speed) {
   const tokens = speed?.tokens, seconds = speed?.seconds;
   if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0
-    || typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return 'avg — tok/s';
-  return `avg ${(tokens / seconds).toFixed(1)} tok/s`;
+    || typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return '';
+  return `${(tokens / seconds).toFixed(1)} tok/s`;
 }
 /**
  * @param {PairSummary['workers'][number]['observation']} observation
@@ -213,7 +245,8 @@ export function workerState(summary, w, mainBusy, now = Date.now()) {
     const base = { active: true, details: [
       ...(title ? [d(title, 'text')] : []),
       ...(age >= STALE_AGE_MS ? [d(`no activity for ${ageLabel(age)}`, 'warning')] : activity ? [d(activity, 'accent')] : []),
-      d(speedLabel(observedSpeed(obs)).replace(/^avg /, '')),
+      // Only a measured speed: an empty detail would render as a trailing separator.
+      ...(speedLabel(observedSpeed(obs)) ? [d(speedLabel(observedSpeed(obs)))] : []),
       ...(typeof percent === 'number' && percent > 75 ? [d(`context ${Math.round(percent)}%`, percent > 90 ? 'error' : 'warning')] : []),
       ...cost] };
     // A silent worker needs the human, so it is not merely 'working'.
@@ -232,6 +265,59 @@ export function workerState(summary, w, mainBusy, now = Date.now()) {
   const next = nextAction(w);
   return state('stopped', '○', 'dim', 'off', 'Worker stopped', { details: next ? [d(next, next === 'not a Git repo' ? 'warning' : 'dim')] : [], ...(next === 'not a Git repo' ? { reason: 'not a Git repo' } : {}) });
 }
+/** One badge entry: its plain text and the colour of that worker's own state. @typedef {{text: string, color: IndicatorColor}} BadgePart */
+/** @typedef {{parts: BadgePart[], text: string}} BadgePlan */
+/**
+ * The badge plan both surfaces share: the plain entries in show order, and the finished plain text.
+ * The leading 'pair' is not an entry; it is painted in the first entry's colour.
+ *
+ * With several workers the entries are ordered needs-you-first — 'error' colours, then 'warning', then
+ * everyone else in the order the badge has always used (plan worker, then configuration order), stable
+ * inside each group — and each entry keeps its own state colour, so a crashed second worker no longer
+ * wears the plan worker's green. A worker left out becomes one '+N' marker, painted 'dim'.
+ * @param {PairSummary} summary @param {number} now @returns {BadgePlan}
+ */
+function badgePlan(summary, now) {
+  const primary = planWorker(summary) || summary.workers[0];
+  const many = summary.workers.length > 1, cap = many ? 32 : 24;
+  /** @param {BadgePart[]} parts @returns {BadgePlan} */
+  const plan = parts => ({ parts, text: clipPlain(['pair', ...parts.map(part => part.text)].join(' '), cap) });
+  if (!primary) return plan([{ text: '○ off', color: 'dim' }]);
+  const busy = !!summary.main?.busy;
+  const state = workerState(summary, primary, busy, now);
+  // A single worker keeps exactly today's badge: one run, one colour, the plan worker's.
+  if (!many) return plan([{ text: singleBadgeParts(state, now).join(' '), color: state.color }]);
+  /** @param {IndicatorColor} color @returns {number} */
+  const group = color => (color === 'error' ? 0 : color === 'warning' ? 1 : 2);
+  /** @type {{worker: PairSummary['workers'][number], state: WorkerState, order: number}[]} */
+  const ranked = [];
+  let order = 0;
+  for (const w of [primary, ...summary.workers.filter(other => other !== primary)]) {
+    ranked.push({ worker: w, state: w === primary ? state : workerState(summary, w, busy, now), order: order++ });
+  }
+  // A stable sort keeps today's order inside each group, so only a worker who needs the human moves up.
+  ranked.sort((left, right) => group(left.state.color) - group(right.state.color) || left.order - right.order);
+  /** @type {BadgePart[]} */
+  const parts = [];
+  let index = 0;
+  for (; index < ranked.length; index++) {
+    const { worker, state: workerStates } = ranked[index];
+    const next = /** @type {BadgePart} */ ({ text: `${workerLabel(summary, worker.id)} ${workerStates.icon}${progressPart(workerStates)}`, color: workerStates.color });
+    // The first entry is always kept, even alone: it is the one that needs the human most.
+    if (parts.length && visibleWidth(['pair', ...parts.map(part => part.text), next.text].join(' ')) > cap) break;
+    parts.push(next);
+  }
+  // The workers left out become one marker; giving up the last entry makes room when the marker needs it.
+  let rest = ranked.length - index;
+  while (rest > 0) {
+    const marker = /** @type {BadgePart} */ ({ text: `+${rest}`, color: 'dim' });
+    if (visibleWidth(['pair', ...parts.map(part => part.text), marker.text].join(' ')) <= cap) { parts.push(marker); break; }
+    if (parts.length <= 1) break;
+    parts.pop();
+    rest++;
+  }
+  return plan(parts);
+}
 /**
  * The footer badge: tiny, steady, attention-first. It never carries the step title, because Pi renders
  * every extension's setStatus text on one shared line (\<=24 columns, \<=32 with several workers).
@@ -240,21 +326,7 @@ export function workerState(summary, w, mainBusy, now = Date.now()) {
  * @returns {string}
  */
 export function footerBadge(summary, now = Date.now()) {
-  const primary = planWorker(summary) || summary.workers[0];
-  if (!primary) return 'pair ○ off';
-  const busy = !!summary.main?.busy, many = summary.workers.length > 1, cap = many ? 32 : 24;
-  const state = workerState(summary, primary, busy, now);
-  if (!many) return truncateToWidth(['pair', ...singleBadgeParts(state, now)].join(' '), cap, '…');
-  const order = [primary, ...summary.workers.filter(w => w !== primary)];
-  /** @type {string[]} */
-  const parts = [];
-  for (let i = 0; i < order.length; i++) {
-    const w = order[i], s = w === primary ? state : workerState(summary, w, busy, now);
-    const entry = `${workerLabel(summary, w.id)} ${s.icon}${progressPart(s)}`;
-    if (visibleWidth(['pair', ...parts, entry].join(' ')) > cap) { parts.push(`+${order.length - i}`); break; }
-    parts.push(entry);
-  }
-  return truncateToWidth(['pair', ...parts].join(' '), cap, '…');
+  return badgePlan(summary, now).text;
 }
 /**
  * The one badge form: steady icon, the step count where a step matters, then one short word.
@@ -310,13 +382,32 @@ function workerStage(summary, w, mainBusy, now) {
  */
 export function indicator(summary, mainBusy, theme, now = Date.now()) {
   void mainBusy; // workerState recomputes its own busy flag from the summary
-  const paint = painter(theme);
-  const state = summary.workers.length ? workerState(summary, planWorker(summary) || summary.workers[0], !!summary.main?.busy, now) : null;
-  return paint(state ? state.color : 'dim', footerBadge(summary, now));
+  return paintBadge(badgePlan(summary, now).parts, painter(theme));
 }
-/** @param {PairSummary} summary @param {string} id @returns {string} */
+/**
+ * Paints badge parts with one run per colour: adjacent entries that share a colour stay a single run, so a
+ * calm badge is still painted exactly once, and only an entry whose own state differs gets its own colour.
+ * The leading 'pair' takes the first entry's colour.
+ * @param {BadgePart[]} parts @param {(color: IndicatorColor, text: string) => string} paint @returns {string}
+ */
+function paintBadge(parts, paint) {
+  /** @type {{color: IndicatorColor, texts: string[]}[]} */
+  const runs = [{ color: parts[0]?.color ?? 'dim', texts: ['pair'] }];
+  for (const part of parts) {
+    const last = runs[runs.length - 1];
+    if (last.color === part.color) last.texts.push(part.text);
+    else runs.push({ color: part.color, texts: [part.text] });
+  }
+  return runs.map(run => paint(run.color, run.texts.join(' '))).join(' ');
+}
+/**
+ * The label a surface puts in front of a worker's entry: nothing for a lone worker, the worker id (clipped
+ * to ten columns) once several are configured, so the badge, the live line, the board and the dashboard
+ * title all name the same worker.
+ * @param {PairSummary} summary @param {string} id @returns {string}
+ */
 function workerLabel(summary, id) {
-  return summary.workers.length === 1 ? 'W' : `W${summary.workers.findIndex(w => w.id === id) + 1}`;
+  return summary.workers.length === 1 ? '' : clipPlain(id, 10);
 }
 /** @param {PairSummary} summary @returns {PairSummary['workers'][number] | undefined} */
 export function planWorker(summary) {
@@ -339,18 +430,16 @@ function glanceWorker(summary, now) {
   const first = planWorker(summary);
   return taskShown(first?.task, now) ? first : summary.workers.find(w => taskShown(w.task, now));
 }
-/** A task's running time; a completed task's clock stops when it finished. @param {{startedAt: number, status: string, updatedAt?: number | null}} task @param {number} now @returns {number} */
-function taskElapsed(task, now) { return (task.status === 'completed' && task.updatedAt ? task.updatedAt : now) - task.startedAt; }
 /**
- * @param {number} done
- * @param {number} total
- * @param {number} [maxCells]
- * @returns {{filled: number, empty: number, label: string, percent: number}}
+ * A task's running time. The clock stops at the last update for a completed, paused or interrupted task,
+ * so a held line does not look busy. After a resume it counts from the start again, because Pair does not
+ * record how long a task was held; the alert beside it is what counts the wait.
+ * @param {{startedAt: number, status: string, updatedAt?: number | null}} task @param {number} now @returns {number}
  */
-function progressBar(done, total, maxCells = 10) {
-  const cells = Math.min(Math.max(1, total), Math.max(1, maxCells));
-  const filled = total > 0 ? Math.min(cells, Math.round((cells * done) / total)) : 0;
-  return { filled, empty: cells - filled, label: `${done}/${total}`, percent: total > 0 ? Math.round((100 * done) / total) : 0 };
+function taskElapsed(task, now) {
+  // A held or finished task's clock stops at its last update; a running one keeps counting.
+  const end = ['completed', 'paused', 'interrupted'].includes(task.status) ? task.updatedAt : null;
+  return (end ?? now) - task.startedAt;
 }
 
 /** @typedef {'done' | 'active' | 'review' | 'held' | 'todo'} StepState */
@@ -371,8 +460,21 @@ function stepColor(state) {
   if (state === 'held') return 'warning';
   return 'dim';
 }
-/** @param {StepState} state @returns {string} */
-function stepPrefix(state) { return state === 'done' ? `complete ${stepSymbol(state)}` : stepSymbol(state); }
+
+/**
+ * What the current step is waiting for, in one short phrase the live line, the board and the dashboard all
+ * use. A review, a question and a blocked step used to read alike ('◐ <title>') on the live line and
+ * identically on the step rows ('waiting for Main'), which told the human nothing about whose move it is.
+ * @param {NonNullable<PairSummary['workers'][number]['task']>} task @returns {string}
+ */
+function awaitingWord(task) {
+  if (task.status === 'review') return task.reportKind === 'final_review' ? 'final review by Main' : 'review by Main';
+  if (task.status === 'question') return 'question for Main';
+  if (task.status === 'blocked') return 'blocker for Main';
+  if (task.status === 'paused') return 'paused';
+  if (task.status === 'interrupted') return 'interrupted';
+  return '';
+}
 /** @typedef {{rank: number, key: string, color: IndicatorColor, text: string, plain: string, flex?: boolean, min?: number, paint?: (plain: string) => string}} LiveSegment */
 const SEGMENT_SEPARATOR = ' · ';
 /**
@@ -387,6 +489,9 @@ function barCells(done, total, cells, current) {
   return { filled, current: through - filled, empty: cells - through };
 }
 /**
+ * The progress segment: the bar (■ approved, ▣ the step under way), then the step count. The count reads
+ * "step 2/4" so it is never mistaken for "2 approved"; callers fall back to the bare "2/4" once the bar is
+ * gone, and only after every lower-ranked segment has dropped.
  * @param {number} done @param {number} total @param {number} cells @param {string} owner @param {string} count
  * @param {(color: IndicatorColor, text: string) => string} paint
  * @param {IndicatorColor | null} currentColor the current step's color, or null when no step is under way
@@ -395,40 +500,87 @@ function barCells(done, total, cells, current) {
 function progressSegment(done, total, cells, owner, count, paint, currentColor) {
   const { filled, current, empty } = barCells(done, total, cells, currentColor !== null);
   const bar = '■'.repeat(filled) + '▣'.repeat(current) + '□'.repeat(empty);
+  // With no cells left there is no bar: the count stands alone and says plainly what it counts.
+  const label = cells > 0 ? `step ${count}` : count;
   return { rank: 1, key: 'progress', color: 'muted',
-    text: (owner ? paint('muted', owner) + ' ' : '') + paint('success', '■'.repeat(filled)) + (current && currentColor ? paint(currentColor, '▣'.repeat(current)) : '') + paint('dim', '□'.repeat(empty)) + (bar ? ' ' : '') + paint('muted', count),
-    plain: (owner ? owner + ' ' : '') + (bar ? bar + ' ' : '') + count };
+    text: (owner ? paint('muted', owner) + ' ' : '') + paint('success', '■'.repeat(filled)) + (current && currentColor ? paint(currentColor, '▣'.repeat(current)) : '') + paint('dim', '□'.repeat(empty)) + (bar ? ' ' : '') + paint('muted', label),
+    plain: (owner ? owner + ' ' : '') + (bar ? bar + ' ' : '') + label };
+}
+/** The title keeps at least this much before a measured detail is dropped for it. */
+const TITLE_KEEP = 40;
+/**
+ * How one candidate bar width ranks against another: whether the alert survived, then whether the step
+ * title did, then the bar's own width. A narrower bar that still shows the alert and the title beats a
+ * wider one that had to drop them.
+ * @param {LiveSegment[]} kept @param {LiveSegment | undefined} title @param {number} cells
+ * @returns {number[]}
+ */
+function fitKey(kept, title, cells) {
+  // A bar width only wins if it keeps the alert and the step title; among those, the widest one wins.
+  return [kept.some(segment => segment.rank === 2) ? 1 : 0, title ? 1 : 0, cells];
+}
+/** @param {number[]} left @param {number[]} right @returns {number} lexicographic, higher is better */
+function compareKeys(left, right) {
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const a = left[index] ?? -1, b = right[index] ?? -1;
+    if (a !== b) return a - b;
+  }
+  return 0;
 }
 /**
  * Greedy width fitting, kept separate so the drop order is testable on its own.
- * Lowest rank goes first; the flexing title shrinks to its minimum before any higher rank is dropped.
+ * The title is the reason the line exists, so it is protected twice: first every measured detail (speed,
+ * cache, cost, revisions, elapsed) goes, but only while measures still compete with it; then it shrinks to
+ * its minimum; then activity and the title itself go, lowest rank first.
+ * Progress (rank 1) always survives; an alert (rank 2) survives while any rank above it remains.
  * @param {LiveSegment[]} segments
  * @param {number} width
  * @returns {string | null} the fitted line, or null when even the progress segment does not fit
  */
-export function fitSegments(segments, width) {
+export function fitSegments(segments, width) { return fitSegmentsDetailed(segments, width)?.line ?? null; }
+/**
+ * fitSegments plus the segments that survived, so a caller can prefer a narrower bar that keeps the alert
+ * and the title over a wider one that would have to drop them.
+ * @param {LiveSegment[]} segments
+ * @param {number} width
+ * @returns {{line: string, kept: LiveSegment[]} | null}
+ */
+function fitSegmentsDetailed(segments, width) {
   const kept = segments.slice();
   /** @returns {string} */
   const joined = () => kept.map(segment => segment.text).join(SEGMENT_SEPARATOR);
-  for (;;) {
-    if (visibleWidth(joined()) <= width) return joined();
-    const flex = kept.find(segment => segment.flex);
-    if (flex) {
-      const target = visibleWidth(flex.plain) - (visibleWidth(joined()) - width);
-      if (target >= (flex.min ?? 16)) {
-        const plain = truncateToWidth(flex.plain, target, '…');
-        flex.plain = plain;
-        flex.text = flex.paint ? flex.paint(plain) : plain;
-        if (visibleWidth(joined()) <= width) return joined();
-      }
-    }
-    // Progress (rank 1) always survives; an alert (rank 2) survives while any rank above it remains.
+  const fits = () => visibleWidth(joined()) <= width;
+  /** @param {(segment: LiveSegment) => boolean} test @returns {number} */
+  const lowest = test => {
     let victim = -1;
     for (let index = 0; index < kept.length; index++) {
       const segment = kept[index];
-      const droppable = segment.rank > 1 && (segment.rank > 2 || !kept.some(other => other.rank > 2));
-      if (droppable && (victim < 0 || segment.rank > kept[victim].rank)) victim = index;
+      if (test(segment) && (victim < 0 || segment.rank > kept[victim].rank)) victim = index;
     }
+    return victim;
+  };
+  for (;;) {
+    if (fits()) return { line: joined(), kept };
+    const flex = kept.find(segment => segment.flex);
+    if (flex) {
+      const plainWidth = visibleWidth(flex.plain), target = plainWidth - (visibleWidth(joined()) - width);
+      // (a) While the title would have to give up more than its full width up to 40 columns, the lowest
+      // measured number goes instead: speed, then cache, cost, revisions, elapsed.
+      if (target < Math.min(plainWidth, TITLE_KEEP)) {
+        const measured = lowest(segment => segment.rank >= 5);
+        if (measured >= 0) { kept.splice(measured, 1); continue; }
+      }
+      // (b) Then the title shrinks, down to its 16-column minimum.
+      if (target >= (flex.min ?? 16)) {
+        const plain = clipPlain(flex.plain, target);
+        flex.plain = plain;
+        flex.text = flex.paint ? flex.paint(plain) : plain;
+        if (fits()) return { line: joined(), kept };
+        continue;
+      }
+    }
+    // (c) Then anything above the alert, lowest rank first; progress and a lone alert stay.
+    const victim = lowest(segment => segment.rank > 1 && (segment.rank > 2 || !kept.some(other => other.rank > 2)));
     if (victim < 0) return null;
     kept.splice(victim, 1);
   }
@@ -445,7 +597,8 @@ export function liveLine(summary, width, theme, now = Date.now()) {
   if (!(width > 0)) return [];
   const worker = glanceWorker(summary, now);
   const list = worker?.task?.stepList;
-  if (!worker || !list?.length) return [];
+  // No plan to draw: a worker that needs the human still gets one alert line above the editor.
+  if (!worker || !list?.length) return alertLine(summary, width, painter(theme), now);
   const paint = painter(theme);
   const task = /** @type {NonNullable<PairSummary['workers'][number]['task']>} */ (worker.task);
   const done = list.filter(step => step.state === 'done').length, many = summary.workers.length > 1;
@@ -454,6 +607,7 @@ export function liveLine(summary, width, theme, now = Date.now()) {
   const step = current >= 0 ? list[current] : null;
   const owner = many ? workerLabel(summary, worker.id) : '';
   const count = task.step + '/' + task.steps;
+  const finished = task.status === 'completed';
   /** @param {number} cells @returns {LiveSegment[]} */
   const build = cells => {
     /** @type {LiveSegment[]} */
@@ -463,11 +617,17 @@ export function liveLine(summary, width, theme, now = Date.now()) {
     const title = step ? inline(step.title, 400) : done === list.length ? 'all steps approved' : inline(task.objective, 200);
     const symbol = step ? stepSymbol(step.state) : '✔', titleColor = step ? stepColor(step.state) : 'success';
     segments.push({ rank: 3, key: 'title', color: titleColor, text: paint(titleColor, symbol + ' ' + title), plain: symbol + ' ' + title, flex: true, min: 16, paint: plain => paint(titleColor, plain) });
-    const activity = activityText(worker);
+    // A crashed or stopped worker keeps its last observation: its tool is history, not activity.
+    const activity = finished || !activityLive(worker) ? '' : activityText(worker);
     if (activity) segments.push({ rank: 4, key: 'activity', color: 'accent', text: paint('accent', activity), plain: activity, paint: plain => paint('accent', plain) });
+    // What the current step waits for, named so a review, a question and a blocked step read differently.
+    // A paused or interrupted task already carries an alert on this line, so it adds no word of its own.
+    const awaiting = !finished && ['review', 'question', 'blocked'].includes(task.status) && (step?.state === 'review' || step?.state === 'held') ? awaitingWord(task) : '';
+    if (awaiting) segments.push({ rank: 4, key: 'awaiting', color: 'accent', text: paint('accent', awaiting), plain: awaiting, paint: plain => paint('accent', plain) });
     if (task.startedAt) { const elapsed = elapsedLabel(taskElapsed(task, now)); segments.push({ rank: 5, key: 'elapsed', color: 'muted', text: paint('muted', elapsed), plain: elapsed, paint: plain => paint('muted', plain) }); }
     const perStep = task.limits?.maxRevisionsPerStep;
-    if ((task.stepRevisions ?? 0) > 0 && typeof perStep === 'number') {
+    // A finished task has no work in flight: its elapsed time and cost stay, activity and revisions do not.
+    if (!finished && (task.stepRevisions ?? 0) > 0 && typeof perStep === 'number') {
       const revisions = 'rev ' + task.stepRevisions + '/' + perStep;
       segments.push({ rank: 6, key: 'revisions', color: 'muted', text: paint('muted', revisions), plain: revisions, paint: plain => paint('muted', plain) });
     }
@@ -479,16 +639,108 @@ export function liveLine(summary, width, theme, now = Date.now()) {
     // Slow cache reads and a measured speed only earn space when they say something notable.
     const cache = validateUsageObservation(worker.observation?.lastUsage ?? null, 'Last cache-read usage')?.cacheRatio;
     if (typeof cache === 'number' && cache < 0.5) { const text = 'cache ' + Math.round(cache * 100) + '%'; segments.push({ rank: 8, key: 'cache', color: 'muted', text: paint('muted', text), plain: text, paint: plain => paint('muted', plain) }); }
-    const speed = speedLabel(observedSpeed(worker.observation)).replace('avg ', '');
-    if (!speed.includes('—')) segments.push({ rank: 9, key: 'speed', color: 'muted', text: paint('muted', speed), plain: speed, paint: plain => paint('muted', plain) });
+    // A finished task no longer streams, so a measured speed describes nothing that is still happening.
+    const speed = finished ? '' : speedLabel(observedSpeed(worker.observation));
+    if (speed) segments.push({ rank: 9, key: 'speed', color: 'muted', text: paint('muted', speed), plain: speed, paint: plain => paint('muted', plain) });
     return segments;
   };
-  // A wide bar first, then progressively narrower ones: the n/m count always stays.
+  // The bar is the most expendable part of the line: a narrower bar that still shows the alert and the
+  // step title beats a wide bar that has to drop them, so every bar width is tried and the widest one
+  // that keeps the most important segments wins.
+  /** @type {{line: string, kept: LiveSegment[]} | null} */
+  let best = null;
+  /** @type {number[]} */
+  let bestKey = [];
   for (const cells of [10, 8, 6, 4, 2, 0]) {
-    const line = fitSegments(build(cells), width);
-    if (line !== null) return [truncateToWidth(line, width, '…')];
+    const fitted = fitSegmentsDetailed(build(cells), width);
+    if (!fitted) continue;
+    const title = fitted.kept.find(segment => segment.flex);
+    const key = fitKey(fitted.kept, title, cells);
+    if (!best || compareKeys(key, bestKey) > 0) { best = fitted; bestKey = key; }
   }
-  return [];
+  if (best) return [truncateToWidth(best.line, width, '…')];
+  // Last resort: even the bare step count does not fit; fall back to a truncated bare count.
+  const bare = fitSegments(build(0), width);
+  if (bare !== null) return [truncateToWidth(bare, width, '…')];
+  // A covered worker with no plan at all still says it needs the human.
+  return alertLine(summary, width, paint, now);
+}
+/**
+ * The workers a compact surface should name: every worker whose task is current (not completed or
+ * cancelled) or whose state needs a human, minus the one the main plan already shows.
+ * @param {PairSummary} summary
+ * @param {number} now
+ * @param {PairSummary['workers'][number] | undefined} primary
+ * @returns {PairSummary['workers'][number][]}
+ */
+function otherWorkers(summary, now, primary) {
+  return summary.workers.filter(w => {
+    if (w === primary) return false;
+    const current = !!w.task && !['completed', 'cancelled'].includes(w.task.status);
+    const state = workerState(summary, w, !!summary.main?.busy, now);
+    return current || ['attention', 'permission', 'paused'].includes(state.kind);
+  });
+}
+/**
+ * The workers a compact surface must call out: their state needs the human before anything else.
+ * @param {PairSummary} summary @param {number} now
+ * @returns {{worker: PairSummary['workers'][number], state: WorkerState}[]}
+ */
+function attentionWorkers(summary, now) {
+  return summary.workers
+    .map(worker => ({ worker, state: workerState(summary, worker, !!summary.main?.busy, now) }))
+    .filter(item => ['attention', 'permission'].includes(item.state.kind));
+}
+/**
+ * The line a compact surface shows when the worker needs the human and there is no plan to draw.
+ * Here, above the editor, naming /pair is right: it is not a keypress inside the dashboard.
+ * @param {PairSummary} summary @param {number} width @param {(color: IndicatorColor, text: string) => string} paint @param {number} now
+ * @returns {string[]}
+ */
+function alertLine(summary, width, paint, now) {
+  if (!(width > 0) || !summary.workers.length) return [];
+  const many = summary.workers.length > 1;
+  const needs = attentionWorkers(summary, now);
+  if (!needs.length) return [];
+  const shown = needs.slice(0, 2);
+  const rest = needs.length - shown.length;
+  const first = shown[0];
+  const owner = many ? `${workerLabel(summary, first.worker.id)} ` : '';
+  const detail = first.state.kind === 'permission' ? 'worker is waiting for a permission dialog'
+    : `worker needs attention${first.worker.error ? ' · ' + inline(briefError(first.worker.error), 60) : ''}`;
+  const head = `! ${owner}${detail}`;
+  const tail = `${rest > 0 ? ` · +${rest} more` : ''} · open /pair`;
+  // Red only for an error; a permission dialog waits on the human and stays amber.
+  const color = first.state.color === 'error' ? 'error' : 'warning';
+  if (visibleWidth(head + tail) <= width) return [paint(color, head) + paint('muted', tail)];
+  // The tail no longer fits: clip the plain head into the width and paint that one run.
+  return [paint(color, clipRow(head, width))];
+}
+/**
+ * One compact row per other worker that is busy or needs the human: "<icon> <id> <step>/<steps> <title> ·
+ * <state label>". Capped, with a count of the workers left out, so a crowded Pair stays readable.
+ * @param {PairSummary} summary @param {number} width @param {(color: IndicatorColor, text: string) => string} paint @param {number} now
+ * @param {PairSummary['workers'][number] | undefined} primary
+ * @param {Set<string>} [exclude] workers an alert line above already named
+ * @returns {string[]}
+ */
+function otherWorkerRows(summary, width, paint, now, primary, exclude = new Set()) {
+  const others = otherWorkers(summary, now, primary).filter(worker => !exclude.has(worker.id));
+  if (!others.length) return [];
+  const many = summary.workers.length > 1;
+  const rows = others.slice(0, 3).map(worker => {
+    const state = workerState(summary, worker, !!summary.main?.busy, now);
+    // Only a current task is named by its plan; a finished or cancelled one gives way to the state text.
+    const task = worker.task && !['completed', 'cancelled'].includes(worker.task.status) ? worker.task : null;
+    const steps = task?.steps || task?.stepList?.length || 0;
+    const count = task && steps ? `${task.step}/${steps} ` : '';
+    const what = task ? (state.title || inline(task.objective, 200)) : (worker.error ? inline(briefError(worker.error), 120) : state.text);
+    const plain = `${state.icon} ${many ? workerLabel(summary, worker.id) + ' ' : ''}${count}${what} · ${state.label}`;
+    return fitRow(plain, '', width, '', text => paint(state.color, text));
+  });
+  const hidden = others.length - Math.min(others.length, 3);
+  if (hidden > 0) rows.push(paint('dim', clipPlain(`… ${hidden} more worker${hidden === 1 ? '' : 's'}`, width)));
+  return rows;
 }
 /**
  * The one alert the live line shows, or null. Alerts mark the reasons a human must act.
@@ -505,7 +757,12 @@ function alertText(worker, state, now) {
   // Limits, step-revision caps and failed Pair verification are raised by workerState into details.
   const detail = state.details.find(item => item.color === 'warning' || item.color === 'error');
   if (detail) return { text: detail.text.replace('⚠ ', ''), color: detail.color };
-  if (state.kind === 'paused') return { text: 'held ' + compactAge(now - (worker.task?.updatedAt ?? now)), color: 'warning' };
+  // A held task names its own state, how long it has been held, and the command that resolves it, so the
+  // alert says what to do instead of only how long the clock has been stopped.
+  if (state.kind === 'paused' && worker.task) {
+    const age = compactAge(now - (worker.task.updatedAt ?? now));
+    return { text: [worker.task.status + ' ' + age, state.next ?? ''].filter(Boolean).join(' · '), color: 'warning' };
+  }
   return null;
 }
 /**
@@ -521,6 +778,17 @@ function baseName(target) {
   const base = trimmed.replace(/\/+$/, '').split('/').pop();
   return base || trimmed;
 }
+/**
+ * Whether the worker's observation describes work actually in flight. A crashed, stopped or paused worker
+ * keeps its last observation, whose tool and target are then only history: printing them invites the human
+ * to read a dead command as something still running. A stalled worker still counts — it has a live process
+ * and a current task, so what it is stuck on is exactly what the human wants to see.
+ * @param {PairSummary['workers'][number]} worker @returns {boolean}
+ */
+function activityLive(worker) {
+  if (!worker.pid || !['working', 'settling', 'starting', 'permission'].includes(worker.status)) return false;
+  return !worker.task || ['running', 'awaiting_settle', 'activating'].includes(worker.task.status);
+}
 /** @param {PairSummary['workers'][number]} worker @param {boolean} [full] keep the full path (dashboard) */
 function activityText(worker, full = false) {
   const observation = worker.observation;
@@ -530,7 +798,7 @@ function activityText(worker, full = false) {
 }
 /**
  * The board (indicator 'board'): a header line, then one row per step, with finished steps collapsed
- * into one '✔ N done' row when the plan is longer than the cap.
+ * into one '✔ 1–N approved' row when the plan is longer than the cap, worded as the dashboard words it.
  * @param {PairSummary} summary
  * @param {number} width
  * @param {{fg(color: IndicatorColor, text: string): string}} [theme]
@@ -539,10 +807,15 @@ function activityText(worker, full = false) {
  */
 export function boardLines(summary, width, theme, now = Date.now()) {
   if (!(width > 0)) return [];
+  const paint = painter(theme);
   const worker = glanceWorker(summary, now);
   const list = worker?.task?.stepList;
-  if (!worker || !list?.length) return [];
-  const paint = painter(theme);
+  // No plan to draw: a worker that needs the human still gets one alert line, and the workers left
+  // out of the main plan are named either way.
+  if (!worker || !list?.length) {
+    const alerted = attentionWorkers(summary, now).slice(0, 2).map(item => item.worker.id);
+    return [...alertLine(summary, width, paint, now), ...otherWorkerRows(summary, width, paint, now, worker, new Set(alerted))];
+  }
   const task = /** @type {NonNullable<PairSummary['workers'][number]['task']>} */ (worker.task);
   const state = workerState(summary, worker, !!summary.main?.busy, now);
   const spend = typeof task.reportedCost === 'number' && task.reportedCost > 0
@@ -550,29 +823,48 @@ export function boardLines(summary, width, theme, now = Date.now()) {
   const meta = [task.startedAt ? elapsedLabel(taskElapsed(task, now)) : '', spend].filter(Boolean).join(' · ');
   const head = 'Pair · ' + inline(task.objective, 200);
   /** @typedef {{prefix: string, title: string, right: string, color: IndicatorColor}} BoardRow */
-  const revisions = (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? 'rev ' + task.stepRevisions + '/' + task.limits.maxRevisionsPerStep : '';
+  // A finished task has no work in flight, so its rows carry no activity and no step revisions.
+  const finished = task.status === 'completed';
+  const revisions = !finished && (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? 'rev ' + task.stepRevisions + '/' + task.limits.maxRevisionsPerStep : '';
   /** @type {BoardRow[]} */
   const rows = list.map((step, index) => ({
     prefix: stepSymbol(step.state) + ' ' + (index + 1) + ' ',
     title: inline(step.title, 200),
-    right: step.state === 'active' ? [activityText(worker), revisions].filter(Boolean).join(' · ')
-      : step.state === 'review' ? 'waiting for Main' : step.state === 'held' ? 'held' : '',
+    // The step's own state names what it waits for; the same words the live line and the dashboard use.
+    right: step.state === 'review' || step.state === 'held' ? awaitingWord(task)
+      : step.state === 'active' ? [finished || !activityLive(worker) ? '' : activityText(worker), revisions].filter(Boolean).join(' · ') : '',
     color: stepColor(step.state) }));
   /** @type {BoardRow[]} */
   const shown = [];
   if (rows.length > BOARD_ROW_CAP) {
     const firstUnfinished = list.findIndex(step => step.state !== 'done');
     const finished = firstUnfinished < 0 ? rows.length : firstUnfinished;
-    if (finished > 1) shown.push({ prefix: '✔ ', title: finished + ' done', right: '', color: 'success' });
+    // The same words the dashboard's folded row uses, so one plan never reads two ways.
+    if (finished > 1) shown.push({ prefix: '✔ ', title: finished === 1 ? '1 approved' : `1–${finished} approved`, right: '', color: 'success' });
     shown.push(...rows.slice(finished > 1 ? finished : 0));
   } else shown.push(...rows);
-  const lines = [meta ? fitRow(head, meta, width) : truncateToWidth(head, width, '…'),
-    ...shown.map(row => row.right ? fitRow(paint(row.color, row.prefix + row.title), row.right, width, row.prefix) : truncateToWidth(paint(row.color, row.prefix + row.title), width, '…'))];
-  if (state.kind === 'attention' || state.kind === 'permission' || state.kind === 'paused') {
-    const alert = alertText(worker, state, now);
-    if (alert) lines.push(truncateToWidth(paint(alert.color, '⚠ ' + alert.text), width, '…'));
+  const lines = [fitRow(head, meta, width, '', text => paint('text', text)),
+    ...shown.map(row => row.right ? fitRow(paint(row.color, row.prefix + row.title), row.right, width, row.prefix) : paint(row.color, clipPlain(row.prefix + row.title, width)))];
+  // The board carries every alert the live line does — a failed Pair check, a reached limit, the step
+  // revision cap, a nearly full context, a crashed or stalled worker, a permission dialog — so a plan
+  // drawn on the board never hides the reason the human must act. An attention alert also names the
+  // error and the next step, because on the board there is room to say what to do about it.
+  const alert = alertText(worker, state, now);
+  if (alert) {
+    const head = '⚠ ' + alert.text;
+    // On an attention row the next step outranks the error: the error explains what went wrong, but the
+    // command is what the human can act on, so the error only ever takes the room left over.
+    const next = state.kind === 'attention' ? state.next ?? '' : '';
+    const error = state.kind === 'attention' && worker.error ? inline(briefError(worker.error), 200).trim() : '';
+    const room = width - visibleWidth(head) - (next ? visibleWidth(' · ' + next) : 0);
+    // Below ten columns an error would read as a fragment, so it is left out rather than cut to noise.
+    const shown = error && room - 3 >= 10 ? clipPlain(error, room - 3) : '';
+    // Without room for the error as well, the alert text and the next step still stand on their own.
+    const row = [head, shown, next].filter(Boolean).join(' · ');
+    lines.push(paint(alert.color, clipRow(row, width)));
   }
-  return lines;
+  // Then one compact row per other worker that is busy or needs the human.
+  return [...lines, ...otherWorkerRows(summary, width, paint, now, worker)];
 }
 /** @param {string} left @param {string} right @param {number} width @returns {string} */
 function padBetween(left, right, width) {
@@ -583,18 +875,21 @@ function padBetween(left, right, width) {
  * A row with left and right text: the right side keeps its place and the left title shrinks to about 16
  * columns before the right side is dropped — the same rule the live line applies to its segments.
  * @param {string} left @param {string} right @param {number} width @param {string} [prefix] unstyled leading glyphs
+ * @param {TextPainter | null} [paint] paints a plain left side after it is clipped
  * @returns {string}
  */
-function fitRow(left, right, width, prefix = '') {
+function fitRow(left, right, width, prefix = '', paint = null) {
+  void prefix;
+  // A plain left side is clipped first and painted afterwards, so no SGR reset lands inside a colour.
+  /** @param {string} text @param {number} limit @returns {string} */
+  const cut = (text, limit) => (paint ? paint(clipPlain(text, limit)) : truncateToWidth(text, limit, '…'));
+  // No right side to place: one left-hand run, clipped to the width.
+  if (!right) return cut(left, width);
   const gap = 2;
   const room = width - visibleWidth(right) - gap;
-  if (room >= ROW_TITLE_MIN) {
-    const fitted = truncateToWidth(left, room, '…');
-    return padBetween(fitted, right, width);
-  }
+  if (room >= ROW_TITLE_MIN) return padBetween(cut(left, room), right, width);
   // Too narrow for both: drop the right side, keep the title with the full width.
-  void prefix;
-  return truncateToWidth(left, width, '…');
+  return cut(left, width);
 }
 /**
  * @param {() => PairSummary | null} current
@@ -642,8 +937,12 @@ export function widgetSignature(summary, mode, now = Date.now()) {
   const ticks = summary.workers.map(w => {
     const last = Math.max(w.observation?.at || 0, w.lastExchange?.at || 0);
     // A finished task's clock is frozen, so only a running one ticks; the shown flag flips when a done plan leaves.
-    const t = w.task, running = !!t?.startedAt && !['completed', 'cancelled'].includes(t.status);
-    return [t && running ? Math.floor((now - t.startedAt) / 1000) : 0, last > 0 ? Math.floor((now - last) / 60000) : 0, taskShown(t, now)];
+    // A held task's clock is frozen too, but its held age still moves, so it redraws once a minute, not each tick.
+    const t = w.task, held = !!t?.startedAt && ['paused', 'interrupted'].includes(t.status);
+    const elapsed = !t || !t.startedAt ? 0
+      : held ? Math.floor((now - (t.updatedAt ?? now)) / 60000)
+      : ['completed', 'cancelled'].includes(t.status) ? 0 : Math.floor((now - t.startedAt) / 1000);
+    return [elapsed, last > 0 ? Math.floor((now - last) / 60000) : 0, taskShown(t, now)];
   });
   return JSON.stringify([mode, plan, ticks, summary.waitingReports, summary.autoDeliverReports, summary.enabled, summary.main?.busy ?? null]);
 }
@@ -713,28 +1012,30 @@ export function createIndicatorSurface(ui) {
 /** The widest the overlay may be; wider terminals keep a readable column. */
 const DASHBOARD_MAX_WIDTH = 100;
 /** One line of explanation per action, for the help list. @type {Readonly<Record<DashboardAction, string>>} */
-const ACTION_HELP = {
-  report: "read the worker's report card", diff: "scroll the checkpoint's changes", transcript: "follow the worker's conversation",
-  yield: 'send the waiting reports to Main', pause: 'stop the current step and hold the task', resume: 'continue the held task',
-  cancel: 'end the task for good; file changes stay', reconcile: 'prove the previous worker process exited',
-  start: 'launch the worker process', settings: 'worker model, review policy, indicator', worker: 'show the next worker',
-  more: 'maintenance keys', help: 'this list', restart: 'restart the process; the conversation is kept',
-  stop: 'stop the process; the conversation is kept', status: 'worker, task, Main and cache details',
-  inbox: 'reports Main has not read yet', reload: 'reread the saved Pair settings', doctor: 'check Fabric, Fovea and Pair setup',
-  close: 'close the dashboard',
+export const ACTION_HELP = {
+  report: "read the worker's report", diff: "scroll the checkpoint's changes", transcript: "follow the worker's session",
+  yield: 'send waiting reports to Main', pause: 'hold the task after this step', resume: 'continue the held task',
+  cancel: 'end the task; changes stay', reconcile: 'check the old process exited',
+  start: 'launch the worker process', settings: 'model, review policy, indicator', worker: 'show the next worker',
+  more: 'maintenance keys', help: 'this list', restart: 'restart; conversation is kept',
+  stop: 'stop; conversation is kept', status: 'worker, task, Main, cache',
+  inbox: 'reports Main has not read yet', reload: 'reread the saved settings', doctor: 'check Fabric, Fovea and Pair',
+  close: 'close (q too); back from More/help',
 };
+/** Every help description must fit one line at the narrowest overlay, so the list never wraps mid-sentence. */
+export const ACTION_HELP_MAX = 34;
 /**
  * The rows an overlay may use: Pi clamps it to its maxHeight (80% here) and to the terminal less the margins.
  * @param {number} rows @returns {number}
  */
-function overlayRows(rows) { return Math.max(1, Math.min(Math.floor(rows * 0.8), rows - 2)); }
+export function overlayRows(rows) { return Math.max(1, Math.min(Math.floor(rows * 0.8), rows - 2)); }
 /**
  * Pair's overlays: centered, and no wider than a readable column plus the frame on a wide terminal. Pi reads
  * these options once, when the overlay opens.
  * @param {number | undefined} columns
  * @returns {import('@earendil-works/pi-tui').OverlayOptions}
  */
-function overlayOptions(columns) {
+export function overlayOptions(columns) {
   const width = columns ? Math.min(DASHBOARD_MAX_WIDTH + 2, Math.floor(columns * 0.9)) : '90%';
   return { width, minWidth: 40, maxHeight: '80%', anchor: 'center', margin: 1 };
 }
@@ -761,8 +1062,9 @@ export function dashboardKeys(summary, workerId) {
   if (task && ['paused', 'interrupted'].includes(task.status)) keys.push({ key: 'p', action: 'resume', label: 'resume' });
   if (task) keys.push({ key: 'c', action: 'cancel', label: 'cancel' });
   if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) keys.push({ key: '!', action: 'reconcile', label: 'reconcile' });
-  // Start needs a chosen model: without one it could only fail with a notice, and s settings covers that state.
-  if (!worker.pid && task === null && hasModel(worker)) keys.push({ key: 'n', action: 'start', label: 'start' });
+  // Start needs a chosen model and Pair itself on: without a model it could only fail with a notice, and
+  // while Pair is off the controller refuses to launch the worker at all.
+  if (summary.enabled && !worker.pid && task === null && hasModel(worker)) keys.push({ key: 'n', action: 'start', label: 'start' });
   if (summary.workers.length > 1) keys.push({ key: 'w', action: 'worker', label: 'next worker' });
   keys.push({ key: 's', action: 'settings', label: 'settings' }, { key: 'm', action: 'more', label: 'more' }, { key: '?', action: 'help', label: 'help' });
   return keys;
@@ -806,8 +1108,13 @@ function nextWorker(summary, workerId) {
 export function timelineLine(entry) {
   const step = Math.max(1, Math.trunc(entry.step));
   if (entry.type === 'report') {
-    const failed = entry.verification.failed;
-    return { step, color: failed ? 'warning' : 'muted', text: `↻ report ${entry.kind}${failed ? ` · ${failed} Pair check${failed === 1 ? '' : 's'} failed` : ''}` };
+    // A report is a checkpoint, question, blocker or final review; Pair's own checks ride with it.
+    const label = kindLabel(entry.kind);
+    const passed = entry.verification?.passed ?? 0, failed = entry.verification?.failed ?? 0, total = passed + failed;
+    if (failed > 0) return { step, color: 'warning', text: `◐ ${label} · ${failed} Pair check${failed === 1 ? '' : 's'} failed` };
+    // Every check passed: say how many, so "0/2" never has to be read as a failure.
+    if (total > 0) return { step, color: 'muted', text: `◐ ${label} · ${passed}/${total} Pair checks passed` };
+    return { step, color: 'muted', text: `◐ ${label}` };
   }
   if (entry.action === 'approve') return { step, color: 'success', text: '✔ approved' };
   if (entry.action === 'revise') return { step, color: 'warning', text: `↻ revise: ${entry.feedback || 'no feedback'}` };
@@ -820,11 +1127,14 @@ export function timelineLine(entry) {
  * @param {import('./timeline.js').TimelineEntry[] | undefined} timeline
  * @param {number} step
  * @param {number} [limit]
+ * @param {{omitApproved?: boolean}} [options] drop an "✔ approved" line a step row already states
  * @returns {{text: string, color: IndicatorColor}[]}
  */
-export function stepHistory(timeline, step, limit = 3) {
+export function stepHistory(timeline, step, limit = 3, options = {}) {
   const entries = Array.isArray(timeline) ? timeline.filter(entry => entry.step === step) : [];
-  return entries.slice(Math.max(0, entries.length - limit)).map(entry => { const line = timelineLine(entry); return { text: line.text, color: line.color }; });
+  return entries.slice(Math.max(0, entries.length - limit)).map(entry => { const line = timelineLine(entry); return { text: line.text, color: line.color }; })
+    // A step row already says "approved" on its right, so repeating it here would only spend a line.
+    .filter(line => !(options.omitApproved && line.text === '✔ approved'));
 }
 
 /** @param {PairSummary} summary @param {string} [workerId] @returns {PairSummary['workers'][number] | undefined} */
@@ -832,7 +1142,108 @@ function dashboardWorker(summary, workerId) {
   return (workerId ? summary.workers.find(w => w.id === workerId) : null) || planWorker(summary) || summary.workers[0];
 }
 /** @param {string} notice @param {number} width @returns {string} */
-const clampNotice = (notice, width) => truncateToWidth(notice, Math.max(1, width), '…');
+const clampNotice = (notice, width) => clipPlain(notice, Math.max(1, width));
+/**
+ * Packs key hints into lines of whole hints, two spaces apart: a key and its label always share a line.
+ * A single hint too wide for the line is truncated rather than split.
+ * @param {string[]} hints
+ * @param {number} width
+ * @returns {string[]}
+ */
+export function packHints(hints, width) {
+  const room = Math.max(1, width);
+  /** @type {string[]} */
+  const lines = [];
+  /** @type {string[]} */
+  let line = [];
+  for (const hint of hints) {
+    const item = truncateToWidth(hint, room, '…');
+    if (line.length && visibleWidth([...line, item].join('  ')) > room) { lines.push(line.join('  ')); line = []; }
+    line.push(item);
+  }
+  if (line.length) lines.push(line.join('  '));
+  return lines.length ? lines : [''];
+}
+/**
+ * Turns the action a worker needs into a hint on a key this dashboard actually offers in this state: the
+ * human is already in /pair, so a bare command would only be noise. Empty when no offered key applies.
+ * @param {PairSummary} summary
+ * @param {PairSummary['workers'][number] | undefined} worker
+ * @returns {string}
+ */
+function nextActionHint(summary, worker) {
+  // Pair is off: the readiness lines already say to turn it on, and starting would not work.
+  if (!worker || !summary.enabled) return '';
+  const action = nextAction(worker);
+  if (!action) return '';
+  const keys = dashboardKeys(summary, worker.id);
+  /** @param {DashboardAction} name */
+  const now = name => keys.find(item => item.action === name)?.key;
+  /** @param {DashboardAction} name */
+  const more = name => dashboardMoreKeys(summary, worker.id).find(item => item.action === name)?.key;
+  const start = now('start'), resume = now('resume');
+  if (action === 'not a Git repo') return 'The workspace is not a Git repository yet.';
+  if (!hasModel(worker)) return now('settings') ? `Press ${now('settings')} to choose the worker model.` : '';
+  // A held task is resumed from here; a crashed generation must be stopped first, and both keys are rows
+  // of this screen, so the hint names them instead of the commands behind them.
+  if (resume) {
+    const stop = more('stop');
+    const released = worker.status === 'error' || action === '/pair stop, then /pair resume';
+    if (!released) return `Press ${resume} to resume the task.`;
+    return stop ? `Press m then ${stop} to stop, then ${resume} to resume the task.` : '';
+  }
+  // Reconciling is already named by the warning line right below, so this hint stays out of its way.
+  if (action === '/pair reconcile') return '';
+  if (start) return `Press ${start} to start the worker.`;
+  const transcript = now('transcript');
+  if (transcript) return `Press ${transcript} to read the worker's transcript.`;
+  // No offered key resolves it: say it plainly rather than pointing at a command the human already ran.
+  return '';
+}
+/**
+ * One line for a task that already ended: what it was and how it went. The numbers survive as long as the
+ * line can hold them; only the objective is shortened.
+ * @param {any} task
+ * @param {number} now
+ * @param {number} room
+ * @param {(color: IndicatorColor, text: string) => string} fg
+ * @returns {string}
+ */
+function lastTaskLine(task, now, room, fg) {
+  const steps = Math.max(1, task.steps || (Array.isArray(task.stepList) ? task.stepList.length : 0) || 1);
+  const objective = inline(task.objective, 300) || 'untitled task';
+  const cancelled = task.status === 'cancelled';
+  const at = Math.min(steps, Math.max(1, task.step || 1));
+  const approved = Array.isArray(task.stepList) ? task.stepList.filter((/** @type {{state: string}} */ item) => item.state === 'done').length : steps;
+  const count = `${approved || steps}/${steps} approved`;
+  // The numbers come first and the objective takes what is left; a narrow surface keeps the count and
+  // shortens only the objective, and only at the very narrowest drops the words around the numbers.
+  /** @type {{label: string, marker: string, tail: string[]}[]} */
+  const variants = cancelled ? [
+    { label: 'Last task  ', marker: `✖ cancelled at step ${at}/${steps}`, tail: [] },
+    { label: '', marker: `✖ cancelled ${at}/${steps}`, tail: [] },
+    { label: '', marker: `✖ ${at}/${steps}`, tail: [] }
+  ] : [
+    { label: 'Last task  ', marker: '✔', tail: [count, ...(task.startedAt ? [elapsedLabel(taskElapsed(task, now))] : []),
+      ...(typeof task.reportedCost === 'number' && task.reportedCost > 0 ? [costLabel(task.reportedCost)] : [])] },
+    { label: '', marker: '✔', tail: [count, ...(task.startedAt ? [elapsedLabel(taskElapsed(task, now))] : [])] },
+    { label: '', marker: '✔', tail: [count] },
+    { label: '', marker: `✔ ${approved || steps}/${steps}`, tail: [] }
+  ];
+  /** @param {{label: string, marker: string, tail: string[]}} variant @returns {number} */
+  const fixed = variant => variant.label.length + visibleWidth(variant.marker) + (variant.tail.length ? 1 + 3 + visibleWidth(variant.tail.join(' · ')) : 3);
+  const chosen = variants.find(variant => room - fixed(variant) >= Math.min(12, visibleWidth(objective)))
+    ?? variants[variants.length - 1];
+  const budget = Math.max(1, room - fixed(chosen));
+  const marker = cancelled ? fg('warning', chosen.marker) : fg('success', chosen.marker);
+  const label = chosen.label ? fg('muted', chosen.label) : '';
+  if (!chosen.tail.length) return `${label}${marker} · ${truncateToWidth(objective, budget, '…')}`;
+  const head = label + marker + ' ';
+  // Room went to the numbers: the objective keeps only what is left over, without a dangling separator.
+  const rest = ' · ' + fg('muted', chosen.tail.join(' · '));
+  const forObjective = room - visibleWidth(head) - visibleWidth(rest) - 3;
+  return forObjective >= 4 ? `${head}${truncateToWidth(objective, forObjective, '…')}${rest}` : head + fg('muted', chosen.tail.join(' · '));
+}
 
 /** How the dashboard sheds detail to fit its rows. @typedef {{history: 'all' | 'current' | 'none', collapse: boolean, limit?: number}} DashboardShape */
 /**
@@ -860,12 +1271,16 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
   const row = options.help ? [back]
     : options.more ? [fg('muted', 'More ›'), ...dashboardMoreKeys(summary, worker?.id).map(keyText), back]
     : dashboardKeys(summary, worker?.id).map(keyText);
-  // The hint row wraps rather than truncating and keeps its indent, so every key stays visible.
-  const bottom = [...(options.notice ? [fg('warning', clampNotice(options.notice, room))] : []), '', ...wrapTextWithAnsi(row.join('  '), room - 2).map(line => `  ${line}`)];
+  // The hint row wraps by whole hints rather than by spaces, and keeps its indent: a key is never left at
+  // the end of one line with its label on the next.
+  const bottom = [...(options.notice ? [fg('warning', clampNotice(options.notice, room))] : []), '', ...packHints(row, room - 2).map(line => `  ${line}`)];
   const waiting = summary.waitingReports || 0;
   const title = `Pair${worker && summary.workers.length > 1 ? ` · ${worker.id}` : ''}`;
   const top = [fit(`${fg('mdHeading', bold(title))}${waiting ? `  ${fg('warning', `◐ ${waiting} report${waiting === 1 ? '' : 's'} waiting for Main`)}` : ''}`)];
-  if (!summary.enabled) top.push(fit(fg('warning', 'Pair is off. It accepts no new work until you turn it on.')));
+  // Pair off is stated once: the readiness screen says it in its own sentence, and every other screen
+  // (a plan, no worker) needs this banner because nothing else would mention it.
+  // No worker at all: there is no readiness sentence below to say it, so the banner is the only notice.
+  if (!summary.enabled && !worker) top.push(fit(fg('warning', 'Pair is off. It accepts no new work until you turn it on.')));
   /** @type {(shape: DashboardShape) => string[]} */
   let content = () => [fit(fg('dim', 'No worker is configured. Open settings to add one.'))];
   /** @type {string[]} */
@@ -876,29 +1291,48 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
     const model = worker.model.split('/').pop() || worker.model;
     // One identity line: which model, what state, and the live numbers. The state word comes from the
     // shared classifier, so the dashboard can never disagree with the badge or the live line.
-    const meta = [model, worker.effort].filter(Boolean).join(' · ');
-    const measure = [
-      task?.startedAt ? elapsedLabel(now - task.startedAt) : '',
-      typeof task?.reportedCost === 'number' && task.reportedCost > 0 ? costLabel(task.reportedCost) : '',
-      worker.observation?.context?.percent != null ? `ctx ${Math.round(worker.observation.context.percent)}%` : '',
-      state.step ? `step ${state.step}/${state.steps}` : ''
-    ].filter(Boolean).join(' · ');
     // A working state's label is a verb ('working on'); the dashboard names the state plainly instead.
     const stateWord = state.kind === 'working' ? 'working' : state.label;
-    top.push(fit(`${fg('muted', meta)}   ${fg(state.color, `${state.icon} ${stateWord}`)}${measure ? '  ' + fg('muted', measure) : ''}`));
+    // The Last task line already gives the count of a finished task, so the header does not repeat it.
+    const ended = worker.task && ['completed', 'cancelled'].includes(worker.task.status) ? worker.task : null;
+    const stepText = state.step && state.steps && !ended ? `step ${state.step}/${state.steps}` : '';
+    // The action this state needs, as a key this state offers; a readiness screen shows it below instead.
+    const hint = nextActionHint(summary, worker);
+    // Whole items only: a line that does not fit drops its numbers in this order (ctx, cost, elapsed, then
+    // the effort), so the model, the state and the step survive intact and never end in a cut word.
+    const running = !!worker.pid && !['stopped', 'error', 'not_started'].includes(worker.status);
+    let measures = [
+      task?.startedAt ? elapsedLabel(taskElapsed(task, now)) : '',
+      typeof task?.reportedCost === 'number' && task.reportedCost > 0 ? costLabel(task.reportedCost) : '',
+      // A context reading describes a running process: a stopped or crashed worker's last number is stale.
+      running && worker.observation?.context?.percent != null ? `ctx ${Math.round(worker.observation.context.percent)}%` : ''
+    ].filter(Boolean);
+    let showEffort = !!worker.effort;
+    /** @returns {string} */
+    const identity = () => {
+      const meta = [model, ...(showEffort && worker.effort ? [worker.effort] : [])].join(' · ');
+      const tail = [...measures, ...(stepText ? [stepText] : [])];
+      return `${fg('muted', meta)}   ${fg(state.color, `${state.icon} ${stateWord}`)}${tail.length ? '  ' + fg('muted', tail.join(' · ')) : ''}`;
+    };
+    while (visibleWidth(identity()) > room && measures.length) measures = measures.slice(0, -1);
+    if (visibleWidth(identity()) > room && showEffort) showEffort = false;
+    top.push(fit(identity()));
     // The state sentence is the header's job; here only what the human or Main must resolve is repeated.
     const pending = state.details.filter(detail => (detail.color === 'warning' || detail.color === 'error') && !detail.text.startsWith('/pair'));
     for (const detail of pending.slice(0, 2)) top.push(fit(fg(detail.color, detail.text)));
     top.push('');
+    // A plan screen relies on this banner; only the no-task readiness screen states Pair off itself.
+    if (!summary.enabled && task) top.splice(1, 0, fit(fg('warning', 'Pair is off. It accepts no new work until you turn it on.')));
     if (!task) {
       // Without a task the dashboard is a readiness screen: what is true now and what to do next.
-      const readiness = !summary.enabled ? 'Pair is off: it accepts no new work until you turn it on.'
+      // Pair off is said once, here, and never twice with the line below.
+      const readiness = !summary.enabled ? 'Pair is off. It accepts no new work until you turn it on.'
         : !hasModel(worker) ? 'No worker model is chosen yet.'
         : worker.pid ? `${model} is ready for the next task.`
         : 'The worker is not running.';
-      const lines = [fit(fg('muted', readiness))];
-      const next = nextAction(worker);
-      if (next) lines.push(fit(fg('accent', next === '/pair to set up' ? 'Press s to choose the worker model.' : next === '/pair start' ? 'Press n to start the worker.' : next)));
+      // A task that already ended leaves one line behind, above the readiness sentence.
+      const lines = [...(ended ? [fit(lastTaskLine(ended, now, room, fg))] : []), fit(fg('muted', readiness))];
+      if (hint) lines.push(fit(fg('accent', hint)));
       if (!worker.pid && /^EXIT_UNCONFIRMED/.test(worker.error || '')) lines.push(fit(fg('warning', 'The previous worker process may still be running: press ! to reconcile.')));
       if (!summary.enabled) lines.push(fit(fg('accent', 'Open settings (s) to turn Pair on.')));
       content = () => lines;
@@ -906,11 +1340,12 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
       const objective = fit(fg('text', bold(inline(task.objective, 300))));
       const rows = task.stepList.map((step, index) => ({
         left: `${stepSymbol(step.state)} ${index + 1} ${inline(step.title, 200)}`,
-        right: step.state === 'active' ? [activityText(worker, true), (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? `rev ${task.stepRevisions}/${task.limits.maxRevisionsPerStep}` : ''].filter(Boolean).join(' · ')
-          : step.state === 'review' ? 'for Main' : step.state === 'held' ? 'held' : step.state === 'done' ? 'approved' : '',
+        right: step.state === 'active' ? [activityLive(worker) ? activityText(worker, true) : '', (task.stepRevisions ?? 0) > 0 && typeof task.limits?.maxRevisionsPerStep === 'number' ? `rev ${task.stepRevisions}/${task.limits.maxRevisionsPerStep}` : ''].filter(Boolean).join(' · ')
+          : step.state === 'review' || step.state === 'held' ? awaitingWord(task) : step.state === 'done' ? 'approved' : '',
         color: stepColor(step.state),
-        // What happened to this step's reports: a revise with its feedback excerpt, an approval, a failed check.
-        history: stepHistory(task.timeline, index + 1).map(item => fit(`    ${fg(item.color, item.text)}`)) }));
+        // What happened to this step's reports: a revise with its feedback excerpt, a report and its checks.
+        // A finished step's own row already says "approved", so its history does not repeat it.
+        history: stepHistory(task.timeline, index + 1, 3, { omitApproved: step.state === 'done' }).map(item => fit(`    ${fg(item.color, item.text)}`)) }));
       // Align the right-hand column to the widest left cell, with two clear columns of space, shrinking
       // only when the width demands it.
       const widest = Math.max(...rows.map(item => visibleWidth(item.left)));
@@ -923,6 +1358,8 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
       const finished = open < 0 ? rows.length : open;
       /** @param {number} count */
       const folded = count => fit(fg('success', count === 1 ? '✔ 1 approved' : `✔ 1–${count} approved`));
+      // A caller waiting on someone else still needs to know which key moves it on.
+      const hintLine = hint ? [fit(fg('accent', hint))] : [];
       const checks = Array.isArray(task.lastVerification) ? task.lastVerification : [];
       const verification = checks.length
         ? [fit(`  ${fg('muted', 'Last checkpoint')}  ${fg('muted', 'Pair verified')}  ${checks.map(check => `${check.passed ? fg('success', '✔') : fg('warning', '✖')} ${inline(check.name, 40)}`).join('  ')}`)]
@@ -932,13 +1369,13 @@ export function dashboardLines(summary, width, now = Date.now(), options = {}) {
         const skip = collapse && finished > 1 ? finished : 0;
         const steps = rows.slice(skip).flatMap((item, offset) => [stepLine(item),
           ...(history === 'all' || (history === 'current' && skip + offset === current) ? item.history : [])]);
-        const body = [objective, ...(skip ? [folded(skip)] : []), ...steps, ...verification];
+        const body = [objective, ...(skip ? [folded(skip)] : []), ...steps, ...verification, ...hintLine];
         if (body.length <= limit) return body;
         // Still too tall: the plan starts at its first open step and says how many steps it leaves out.
         const tail = rows.slice(finished).map(stepLine);
-        const free = Math.max(1, limit - 2 - (finished ? 1 : 0) - verification.length);
+        const free = Math.max(1, limit - 2 - (finished ? 1 : 0) - verification.length - hintLine.length);
         const hidden = tail.length - free;
-        return [objective, ...(finished ? [folded(finished)] : []), ...tail.slice(0, free), ...(hidden > 0 ? [fit(fg('dim', `  … ${hidden} more step${hidden === 1 ? '' : 's'}`))] : []), ...verification];
+        return [objective, ...(finished ? [folded(finished)] : []), ...tail.slice(0, free), ...(hidden > 0 ? [fit(fg('dim', `  … ${hidden} more step${hidden === 1 ? '' : 's'}`))] : []), ...verification, ...hintLine];
       };
     }
     // Recent activity: the worker's own last tool events, oldest first, bounded by the ring buffer.
@@ -971,11 +1408,11 @@ function helpLines(now, more, room, fg) {
   const column = 4 + widest + 2;
   /** @param {DashboardKeyHint} item */
   const line = item => {
-    const [first = '', ...rest] = wrapTextWithAnsi(item === close ? 'q too; in More and this list, both go back' : ACTION_HELP[item.action], Math.max(12, room - column));
+    const [first = '', ...rest] = wrapTextWithAnsi(ACTION_HELP[item.action], Math.max(12, room - column));
     const head = `    ${fg('accent', item.key)} ${item.label}${' '.repeat(widest + 2 - visibleWidth(`${item.key} ${item.label}`))}`;
     return [head + fg('dim', first), ...rest.map(part => ' '.repeat(column) + fg('dim', part))].map(text => truncateToWidth(text, room, '…'));
   };
-  return [fg('muted', '  Keys'), ...now.flatMap(line), ...line(close), '', fg('muted', '  More (press m, then the key)'), ...more.flatMap(line)];
+  return [fg('muted', '  Keys'), ...now.flatMap(line), ...line(close), '', truncateToWidth(fg('muted', '  More (press m, then the key)'), room, '…'), ...more.flatMap(line)];
 }
 /**
  * Fits the dashboard into `max` rows: the header and the keys stay, and the middle sheds detail in order.
@@ -1015,7 +1452,7 @@ const DASHBOARD_TICK_MS = 2000;
  * @returns {{render(width: number): string[], handleInput(data: string): DashboardAction[], invalidate(): void, dispose(): void, attach(finish: (value?: unknown) => void): void, readonly closed: boolean, readonly subscribed: boolean, readonly notice: string | null, readonly more: boolean, readonly help: boolean, readonly workerId: string | undefined}}
  */
 export function createDashboard(source, options = {}) {
-  const clock = options.now ?? Date.now, keys = options.keys ?? null, fg = painter(options.theme ?? null);
+  const clock = options.now ?? Date.now, keys = options.keys ?? null;
   const notice = options.initial ?? null;
   let workerId = options.workerId;
   let more = false, help = false, closed = false, disposed = false;
@@ -1044,11 +1481,11 @@ export function createDashboard(source, options = {}) {
     /** @param {(value?: unknown) => void} finish */
     attach(finish) { done = finish; },
     render(w) {
-      // A rule above and below marks the overlay over the chat; the rows it may use exclude them.
+      // A box marks the overlay over the chat: Pi's compositor only blanks the overlay's own columns, so an
+      // unframed panel lets chat text run in beside it. The two borders are the rows the body may not use.
       const rows = options.rows?.();
-      const lines = dashboardLines(summary, Math.max(1, w - 2), clock(), { theme: options.theme ?? null, workerId, notice, more, help, ...(rows ? { maxRows: Math.max(6, overlayRows(rows) - 2) } : {}) });
-      const rule = fg('border', '─'.repeat(Math.max(1, w)));
-      return [rule, ...lines.map(line => ` ${line}`), rule];
+      const lines = dashboardLines(summary, Math.max(1, w - 4), clock(), { theme: options.theme ?? null, workerId, notice, more, help, ...(rows ? { maxRows: Math.max(6, overlayRows(rows) - 2) } : {}) });
+      return boxFrame(lines, w, { theme: options.theme ?? null });
     },
     /**
      * One keypress. Navigation keys are handled here; everything else is returned for main.js to run. Keys
@@ -1234,50 +1671,95 @@ export async function followView(ctx, source, options = {}) {
     }, { overlay: true, overlayOptions: () => ({ width: '90%', minWidth: 40, maxHeight: '80%', anchor: 'center', margin: 1 }) });
   } finally { if (options.onClose) await options.onClose(); }
 }
-/** @param {unknown} value @returns {string} */
-function lastCacheRead(value) {
-  const usage = validateUsageObservation(value, 'Last cache-read usage');
-  if (!usage) return 'unknown';
-  return usage.cacheRatio === null ? 'unknown' : `${(100 * usage.cacheRatio).toFixed(1)}%`;
+/**
+ * The legend and the warming explanation belong in /pair doctor, which has the room for them; status keeps
+ * one line that says where they are.
+ * @returns {string}
+ */
+function legendPointer() { return '> Legend and cache warming details: /pair doctor'; }
+/**
+ * The legend and the native-warming explanation, shared by /pair doctor.
+ * @param {Readonly<Awaited<ReturnType<typeof import('./native.js').nativeSettings>>> | null} native
+ * @param {PairSummary} pair
+ * @returns {string[]}
+ */
+function legendLines(native, pair) {
+  /** @type {Readonly<Awaited<ReturnType<typeof import('./native.js').nativeSettings>>> | null} */
+  const settings = native ?? null;
+  return ['## Legend',
+    '> ● ready  ◉ working  ◐ waiting on Main  ○ stopped  ! needs attention',
+    '> Plan: ✔ approved  ▶ in progress  ◐ in review  ⏸ held  ○ not started',
+    '> Bar: ■ approved  ▣ the step under way  □ not started',
+    '> Heartbeat: the live line above the editor shows the current step; the worker counts as stale after 5 minutes of silence.',
+    '> Cache: cacheRead ÷ (input + cacheRead + cacheWrite) of the last measured request, not task totals.',
+    '> Speed: weighted streaming output tokens per second, excluding request latency and tool time.', '',
+    '## Native cache warming',
+    `> Pi's native idle refreshes, kept for Main while the worker works and for the worker while its report waits (models with a priced prompt cache, except Codex and ChatGPT sign-in models; ${DEFAULT_CACHE_LIFETIME_S} s lifetime where Pi knows none) · Pi through 1.3.0 sends none in a Pair session${settings ? ` · native ${settings.cacheWarming}${settings.cacheWarming === 'idle' ? '' : ' (not warmed)'}` : ''} · Main can also use Fabric cache.hold (Fabric ${FABRIC_CACHE_VERSION}+ on a Pi with scoped warming) · Pair holds no leases`,
+    ...(pair.cacheNote ? ['', `> ${pair.cacheNote}`] : []), ''];
 }
 /**
+ * The share of the last measured request that came from the provider cache, or an empty string when
+ * nothing was measured: a surface then leaves the row out instead of printing a placeholder.
+ * @param {unknown} value @returns {string}
+ */
+function lastCacheRead(value) {
+  const usage = validateUsageObservation(value, 'Last cache-read usage');
+  if (!usage || usage.cacheRatio === null) return '';
+  return `${(100 * usage.cacheRatio).toFixed(1)}%`;
+}
+/**
+ * The /pair status view: a short read-out of state, task progress and observed usage. The key legend
+ * and the native cache-warming explanation live in /pair doctor; one line here says so.
  * @param {PairSummary} summary
- * @param {Readonly<Awaited<ReturnType<typeof import('./native.js').nativeSettings>>> | null} [native]
+ * @param {unknown} [_native] accepted for callers that still pass the native settings; status no longer prints them
  * @param {number} [now]
  * @returns {string}
  */
-export function statusText(summary, native = null, now = Date.now()) {
+export function statusText(summary, _native = null, now = Date.now()) {
   /** @param {string} key @param {string} value */
   const row = (key, value) => `  ${key.padEnd(10)}  ${value}`;
   /** @type {string[]} */ const lines = [];
   for (const w of summary.workers) {
-    const active = ['working', 'settling', 'starting'].includes(w.status), obs = w.observation;
+    const active = ['working', 'settling', 'starting'].includes(w.status), obs = w.observation, task = w.task ?? null;
     lines.push(`## Worker · ${w.id}`, row('State', `${symbol(w.status)} ${w.status === 'permission' ? 'needs permission' : w.status.replace(/_/g, ' ')}`),
       row('Model', hasModel(w) ? `${w.model} · effort ${w.effort}` : 'not chosen yet'));
     if (w.error) lines.push(`! ${w.error}`);
     if (w.task && active && activityAge(w, now) >= STALE_AGE_MS) lines.push('! No recent worker activity. Read the transcript or cancel the task.');
     const next = nextAction(w);
     if (next) lines.push(row('Next', next === '/pair to set up' ? 'open /pair and choose the worker model'
-      : next === 'not a Git repo' ? 'open Pi in a Git repository, or set the worker workspace in /pair settings → Advanced' : next));
+      : next === 'not a Git repo' ? 'open Pi in a Git repository, or set the worker workspace in /pair settings → Worker → Workspace'
+      : next === '/pair' ? 'open /pair for this worker' : next));
     if (w.pendingConfiguration) lines.push(row('Settings', 'change pending; applied before the next task'));
     if (w.task) {
       const cost = typeof w.task.reportedCost === 'number' && w.task.reportedCost > 0 ? ` · ${costLabel(w.task.reportedCost)}` : '';
       lines.push('', `## Task · ${w.task.id}`, row('Objective', inline(w.task.objective, 2000)),
         row('Status', `${w.task.status} · step ${w.task.step} of ${w.task.steps} · ${w.task.revisions} revision${w.task.revisions === 1 ? '' : 's'}${cost}`));
       if (Array.isArray(w.task.stepList) && w.task.stepList.length > 0) {
-        const bar = progressBar(w.task.stepList.filter(step => step.state === 'done').length, w.task.stepList.length);
-        lines.push(row('Progress', `${'■'.repeat(bar.filled)}${'□'.repeat(bar.empty)} ${bar.label} approved`), '');
-        w.task.stepList.forEach((step, i) => lines.push(`  ${stepPrefix(step.state)} ${i + 1}. ${inline(step.title, 500)}`));
+        // The same bar the live line draws: ■ for approved steps, ▣ for the step under way.
+        const list = w.task.stepList, approved = list.filter(step => step.state === 'done').length;
+        const underWay = list.some(step => ['active', 'review', 'held'].includes(step.state));
+        const cells = barCells(approved, list.length, Math.min(10, list.length), underWay);
+        const bar = '■'.repeat(cells.filled) + '▣'.repeat(cells.current) + '□'.repeat(cells.empty);
+        lines.push(row('Progress', `${bar} step ${w.task.step} of ${w.task.steps} · ${approved} approved`), '');
+        // One row per step: the symbol already says "approved", so the word would only repeat it.
+        list.forEach((step, i) => lines.push(`  ${stepSymbol(step.state)} ${i + 1}. ${inline(step.title, 500)}`));
       }
     }
-    const speed = speedLabel(observedSpeed(obs));
-    if (active || obs?.currentTool || obs?.context || !speed.includes('—')) {
-      lines.push('', '## Activity');
-      if (obs?.currentTool) lines.push(row('Tool', inline(obs.currentTool, 200)));
-      if (active || !speed.includes('—')) lines.push(row('Speed', speed.replace(/^avg /, '')));
-      if (obs?.context) lines.push(row('Context', `${tokenLabel(obs.context.tokens)} of ${tokenLabel(obs.context.contextWindow)} tokens${obs.context.percent == null ? '' : ` (${obs.context.percent.toFixed(0)}%)`}${obs.compacting ? ' · compacting' : ''}`));
-      lines.push(row('Cache', `last read ${lastCacheRead(obs?.lastUsage ?? null)}`));
-    }
+    // Activity describes work in flight. A worker with no current task keeps last task state only, so
+    // an idle worker never shows a tool it ran minutes ago or a measurement of a finished run.
+    const inFlight = !!task && !['completed', 'cancelled'].includes(task.status);
+    const speed = speedLabel(observedSpeed(obs)), context = obs?.context, cache = lastCacheRead(obs?.lastUsage ?? null);
+    // A running worker with no task yet is still working: its current tool is real, not stale. A crashed
+    // or stopped worker keeps a live-process PID of null, so its last tool is never reported as current.
+    const tool = activityLive(w) && obs?.currentTool ? inline(obs.currentTool, 200) : '';
+    /** @type {Array<[string, string]>} */
+    const activity = /** @type {Array<[string, string]>} */ ([
+      ...(tool ? [['Tool', tool]] : []),
+      ...(speed ? [['Speed', speed]] : []),
+      ...(context ? [['Context', `${tokenLabel(context.tokens)} of ${tokenLabel(context.contextWindow)} tokens${context.percent == null ? '' : ` (${context.percent.toFixed(0)}%)`}${obs?.compacting ? ' · compacting' : ''}`]] : []),
+      ...(cache ? [['Cache', `last read ${cache}`]] : [])
+    ]);
+    if ((inFlight || active) && activity.length) lines.push('', '## Activity', ...activity.map(([key, value]) => row(key, value)));
     lines.push('');
   }
   const waiting = summary.waitingReports || 0;
@@ -1293,25 +1775,70 @@ export function statusText(summary, native = null, now = Date.now()) {
     assert(c, 'Invalid Main context observation');
     lines.push(row('Context', `${tokenLabel(c.tokens)} of ${tokenLabel(c.contextWindow)} tokens`));
   }
-  lines.push(row('Cache', `last read ${lastCacheRead(summary.main?.lastUsage ?? null)}`), '');
-  lines.push('## Details', row('Session', summary.ownerSession));
+  // Rows without a reading are left out rather than printed as a placeholder.
+  const mainCache = lastCacheRead(summary.main?.lastUsage ?? null);
+  if (mainCache) lines.push(row('Cache', `last read ${mainCache}`));
+  lines.push('', '## Details', row('Session', summary.ownerSession));
   if (summary.mainPhase) lines.push(row('Main phase', `${summary.mainPhase.status} (explicit, non-authorizing)${summary.mainPhase.current ? '' : ' · stale binding: reports stay retained'}`));
-  lines.push(row('Delivery', summary.autoDeliverReports === false ? 'automatic delivery off' : 'automatic delivery on'),
-    row('Warming', `Pi's native idle refreshes, kept for Main while the worker works and for the worker while its report waits (models with a priced prompt cache, except Codex and ChatGPT sign-in models; ${DEFAULT_CACHE_LIFETIME_S} s lifetime where Pi knows none) · Pi through 1.3.0 sends none in a Pair session${native ? ` · native ${native.cacheWarming}${native.cacheWarming === 'idle' ? '' : ' (not warmed)'}` : ''} · Main can also use Fabric cache.hold (Fabric ${FABRIC_CACHE_VERSION}+ on a Pi with scoped warming) · Pair holds no leases`));
+  lines.push(row('Delivery', summary.autoDeliverReports === false ? 'automatic delivery off' : 'automatic delivery on'));
   for (const w of summary.workers) {
     lines.push(row(w.id, `PID ${w.pid || 'not running'} · session ${w.sessionId || 'not created'}`), row('Workspace', `${w.cwd}${w.workspaceGit === false ? ' · not a Git repository' : ''}`));
     if (w.usage) lines.push(row('Usage', `${w.usage.requests} responses · reported $${w.usage.reportedCost.toFixed(4)} · ${w.usage.unknownCostRequests} with unknown price (inference only)`));
     if (w.lastExchange) lines.push(row('Exchange', `${w.lastExchange.direction} · ${w.lastExchange.kind}`));
   }
-  lines.push(row('State dir', summary.directory), '',
-    '## Legend',
-    '> ● ready  ◉ working  ◐ waiting on Main  ○ stopped  ! needs attention',
-    '> Plan: ✔ approved  ▶ in progress  ◐ in review  ⏸ held  ○ not started',
-    '> Heartbeat: the live line above the editor shows the current step; the worker counts as stale after 5 minutes of silence.',
-    '> Cache: cacheRead ÷ (input + cacheRead + cacheWrite) of the last measured request, not task totals.',
-    '> Speed: weighted streaming output tokens per second, excluding request latency and tool time.',
-    `> ${summary.cacheNote}`);
+  // Status stays short: the legend and the cache-warming explanation live in /pair doctor,
+  // which has room for them, and one line here says where to find them.
+  lines.push(row('State dir', summary.directory));
+  if (summary.cacheNote) lines.push('', `> ${summary.cacheNote}`);
+  lines.push('', legendPointer());
   return lines.map(line => cleanText(line, 20000)).join('\n');
+}
+/**
+ * A rounded box drawn across the whole overlay columns, so a view reads as one panel over the chat that Pi's
+ * compositor only partly blanks. Every returned line is exactly `width` visible columns; a line wider than the
+ * interior is clipped with '…'. The top border carries an optional `title` (accent, bold) and `right` label.
+ * @param {string[]} lines interior lines, one per row
+ * @param {number} width @param {{title?: string, right?: string, theme?: PanelTheme | null}} [options]
+ * @returns {string[]}
+ */
+export function boxFrame(lines, width, { title = '', right = '', theme = null } = {}) {
+  const fg = painter(theme), bold = (/** @type {string} */ text) => (theme?.bold ? theme.bold(text) : text);
+  const w = Math.max(2, Math.floor(width)), span = w - 2;
+  /** @param {string} text @param {number} room */
+  const clip = (text, room) => truncateToWidth(text, Math.max(0, room), '…');
+  /** @param {string} line */
+  const exact = line => {
+    const now = visibleWidth(line);
+    if (now === w) return line;
+    return now > w ? truncateToWidth(line, w, '…', true) : line + ' '.repeat(w - now);
+  };
+  const dash = (/** @type {number} */ n) => '─'.repeat(Math.max(0, n));
+  /** @typedef {{color: PanelColor, text: string}} Segment */
+  // The top border shares its span between the title and the right label; when the span is too narrow the
+  // title gives way first, so the scope label (which explains what a save does) always stays readable.
+  /** @param {PanelColor} color @param {string} text @returns {Segment} */
+  const seg = (color, text) => ({ color, text });
+  /** @returns {Segment[]} */
+  const top = () => {
+    if (!right) {
+      if (!title) return [seg('borderAccent', dash(span))];
+      const t = clip(title, span - 3);
+      return [seg('borderAccent', ' '), seg('accent', bold(t)), seg('borderAccent', ` ${dash(span - visibleWidth(t) - 2)}`)];
+    }
+    const label = clip(right, Math.max(0, span - 3)), tail = ` ${label} `;
+    const left = span - visibleWidth(tail);
+    if (!title || left < 4) return [seg('borderAccent', `${dash(left)}${tail}`)];
+    const t = clip(title, left - 3);
+    return [seg('borderAccent', ' '), seg('accent', bold(t)), seg('borderAccent', ` ${dash(left - visibleWidth(t) - 2)}`), seg('muted', tail)];
+  };
+  const inner = span - 2;
+  const topLine = fg('borderAccent', '╭') + top().map(part => fg(part.color, part.text)).join('') + fg('borderAccent', '╮');
+  /** @param {string} line */
+  const row = line => {
+    const body = clip(line, inner);
+    return fg('borderAccent', '│ ') + body + ' '.repeat(Math.max(0, inner - visibleWidth(body))) + fg('borderAccent', ' │');
+  };
+  return [exact(topLine), ...lines.map(row).map(exact), exact(fg('borderAccent', `╰${dash(span)}╯`))];
 }
 /** @typedef {IndicatorColor | 'border' | 'borderMuted' | 'borderAccent' | 'text' | 'mdHeading'} PanelColor */
 /** @typedef {{fg(color: PanelColor, text: string): string, bold?(text: string): string}} PanelTheme */
@@ -1331,7 +1858,7 @@ function chrome(body, width, { title, subtitle = [], hints = '', theme }) {
 /** The default keys of the bindings Pair names in hints, for when Pi's own hint helpers are unavailable. */
 const DEFAULT_KEYS = /** @type {Readonly<Record<string, string>>} */ ({ 'tui.select.cancel': 'esc', 'tui.select.confirm': 'enter', 'app.tools.expand': 'ctrl+o' });
 /** @param {...[string, string]} pairs @returns {string} */
-function hints(...pairs) {
+export function hints(...pairs) {
   return pairs.map(([key, action]) => {
     // Pi's hint helpers read its theme; without one (a test, a host that never set it) the plain words still read.
     try { return key.includes('.') ? keyHint(/** @type {import('@earendil-works/pi-tui').Keybinding} */ (key), action) : rawKeyHint(key, action); } catch { return `${DEFAULT_KEYS[key] ?? key} ${action}`; }
@@ -1340,7 +1867,7 @@ function hints(...pairs) {
 /** @param {string} raw @param {string} styled @param {number} span @returns {string[]} */
 function wrapHanging(raw, styled, span) {
   const indent = /^ */.exec(raw)?.[0].length || 0;
-  const marker = /^ *(?:complete ✔|[•✔✖○▶◐⏸!-]|\d+\.) /.exec(raw);
+  const marker = /^ *(?:[•✔✖○▶◐⏸!-]|\d+\.) /.exec(raw);
   const row = indent <= 2 ? /^ *[A-Za-z][\w ./()-]{0,22}? {2,}(?=\S)/.exec(raw) : null;
   const hang = Math.min(Math.floor(span / 2), marker ? marker[0].length : row ? row[0].length : indent);
   const lead = /^ */.exec(styled)?.[0].length || 0;
@@ -1357,7 +1884,7 @@ function panelFormat(theme) {
     if (indent === 0 && body.startsWith('## ')) return fg('mdHeading', theme?.bold ? theme.bold(body.slice(3)) : body.slice(3));
     if (body.startsWith('> ')) return pad + fg('dim', body.slice(2));
     if (body.startsWith('! ')) return pad + fg('warning', body);
-    const step = /^(complete ✔|✔|✖|▶|◐|⏸|○) /.exec(body);
+    const step = /^(✔|✖|▶|◐|⏸|○) /.exec(body);
     if (step) return pad + fg(step[1] === '✖' ? 'error' : step[1].endsWith('✔') ? 'success' : step[1] === '▶' ? 'accent' : step[1] === '○' ? 'dim' : 'warning', body);
     const row = /^([A-Za-z][\w ./()-]{0,22}?)( {2,})(\S.*)$/.exec(body);
     if (row) return pad + fg('muted', row[1] + row[2]) + fg('text', row[3]);
@@ -1598,7 +2125,7 @@ export function dashboardHeader(summary) {
   const many = summary.workers.length > 1;
   const workers = summary.workers.map(w => {
     const stage = workerStage(summary, w, !!summary.main?.busy, Date.now());
-    return [`${many ? `${workerLabel(summary, w.id)} ` : ''}${stage.icon} ${stage.text}`, ...stage.details.map(detail => detail.text).filter(text => !text.startsWith('/pair'))].join(' · ');
+    return [`${many ? `${workerLabel(summary, w.id)} ` : ''}${stage.icon} ${stage.text}`, ...stage.details.map(detail => detail.text).filter(text => text && !text.startsWith('/pair'))].join(' · ');
   });
   const waiting = summary.waitingReports || 0;
   return [...workers, ...(waiting ? [`◐ ${waiting} report${waiting === 1 ? '' : 's'} not yet read by Main`] : [])];
@@ -1631,7 +2158,7 @@ export function dashboardItems(summary) {
     if (w.sessionId) items.push({ section, label: 'Transcript', action: 'transcript', workerId: w.id, hint: "Read the worker's recent conversation." });
     if (w.pid) items.push({ section, label: 'Stop worker', action: 'stop', workerId: w.id, hint: 'Stop the worker process. Its conversation is kept for next time.' });
     else items.push({ section, label: 'Start worker', action: 'start', workerId: w.id, hint: !hasModel(w) ? 'Choose a worker model in Settings first.'
-      : w.workspaceGit === false ? `${w.cwd} is not in a Git repository. Open Pi in a Git project, or set the worker workspace in Settings → Advanced.` : 'Launch the worker process. No model turn is requested.' });
+      : w.workspaceGit === false ? `${w.cwd} is not in a Git repository. Open Pi in a Git project, or set the worker workspace in Settings → Advanced settings… → Workspace.` : 'Launch the worker process. No model turn is requested.' });
   }
   items.push({ section: 'Pair', label: 'Status', action: 'status', hint: 'Worker, task, Main and cache details.' },
     { section: 'Pair', label: 'Inbox', action: 'inbox', hint: 'Reports Main has not read yet.' },
@@ -1668,10 +2195,10 @@ export function inboxText(entries, autoDeliver) {
   return lines.join('\n');
 }
 /**
- * @param {{main: {model?: {provider: string, id: string} | null, thinkingLevel?: unknown, trusted?: boolean, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}}, pair: PairSummary, configuration: {version?: unknown, scope?: unknown, pendingMigrations?: readonly unknown[]}, blockers: string[], raw: unknown, notes?: string[]}} data
+ * @param {{main: {model?: {provider: string, id: string} | null, thinkingLevel?: unknown, trusted?: boolean, capabilities: {fabric: boolean, fovea: boolean, pairReport: boolean}, versions: {fabric?: unknown, fovea?: unknown}}, pair: PairSummary, configuration: {version?: unknown, scope?: unknown, pendingMigrations?: readonly unknown[]}, blockers: string[], raw: unknown, notes?: string[], native?: Readonly<Awaited<ReturnType<typeof import('./native.js').nativeSettings>>> | null}} data
  * @returns {string}
  */
-export function doctorText({ main, pair, configuration, blockers, raw, notes = [] }) {
+export function doctorText({ main, pair, configuration, blockers, raw, notes = [], native = null }) {
   /** @param {boolean} ok @param {string} text */
   const check = (ok, text) => `  ${ok ? '✔' : '✖'} ${text}`;
   /** @param {unknown} version */
@@ -1689,6 +2216,8 @@ export function doctorText({ main, pair, configuration, blockers, raw, notes = [
     ...notes.map(note => check(false, note)), '',
     '## Workers', ...pair.workers.flatMap(w => [check(hasModel(w), `${w.id}: ${hasModel(w) ? `${w.model} · ${w.status.replace(/_/g, ' ')}` : 'no model chosen'}`),
       check(w.workspaceGit !== false, w.workspaceGit === false ? `${w.id}: ${w.cwd} is not in a Git repository` : `${w.id}: workspace is a Git repository`)]), '',
+    // The legend and the warming explanation live here, where there is room for them; /pair status only points at it.
+    ...legendLines(native, pair),
     '## Raw data', '> For bug reports.', ...JSON.stringify(raw, null, 2).split('\n').map(line => `    ${line}`)];
   return lines.join('\n');
 }
@@ -1706,9 +2235,9 @@ async function chooseValue(ctx, title, options, current) {
   return options.find(option => option.value === id)?.value;
 }
 /** @param {boolean} value @returns {string} */
-function onOff(value) { return value ? 'On' : 'Off'; }
+export function onOff(value) { return value ? 'On' : 'Off'; }
 /** @type {Readonly<Record<import('./config.js').Indicator, string>>} */
-const INDICATOR_LABEL = { minimal: 'badge + one live line above the editor', compact: 'badge only', board: 'badge + plan board above the editor', off: 'hidden' };
+export const INDICATOR_LABEL = { minimal: 'badge + one live line above the editor', compact: 'badge only', board: 'badge + plan board above the editor', off: 'hidden' };
 
 /** @typedef {Readonly<{optional?: boolean, scale?: number, accepts: (value: number) => boolean, expected: string}>} NumberInputOptions */
 /**
@@ -1745,8 +2274,18 @@ async function numberInput(ctx, title, current, { optional = false, scale = 1, a
   return value;
 }
 /** @typedef {{id: string, provider: string, name?: string, reasoning?: boolean, thinkingLevelMap?: Partial<Record<string, string | null>>}} EffortModel */
+/**
+ * The effort hint settingsUI shows for one level: what the chosen model does with it, or a note that the check
+ * happens when the worker starts. Shared so the settings screen and the select menu say the same thing.
+ * @param {EffortModel | undefined} known @param {import('./contracts.js').Effort} level @returns {string}
+ */
+export function effortHint(known, level) {
+  if (!known) return 'The worker model is not chosen or not in the registry, so this is checked when the worker starts.';
+  const sent = known.thinkingLevelMap?.[level];
+  return typeof sent === 'string' && sent !== level ? `Sent to ${known.provider} as "${sent}".` : `Supported by ${known.provider}/${known.id}.`;
+}
 /** @param {EffortModel} model @returns {import('./contracts.js').Effort[]} */
-function supportedEfforts(model) {
+export function supportedEfforts(model) {
   if (!model.reasoning) return ['off'];
   return EFFORT_LEVELS.filter(level => {
     const mapped = model.thinkingLevelMap?.[level];
@@ -1755,7 +2294,7 @@ function supportedEfforts(model) {
   });
 }
 /** @param {EffortModel} model @param {import('./contracts.js').Effort} effort @returns {import('./contracts.js').Effort} */
-function clampEffort(model, effort) {
+export function clampEffort(model, effort) {
   const levels = supportedEfforts(model), at = EFFORT_LEVELS.indexOf(effort);
   if (levels.includes(effort)) return effort;
   return EFFORT_LEVELS.slice(at + 1).find(level => levels.includes(level)) || EFFORT_LEVELS.slice(0, Math.max(0, at)).reverse().find(level => levels.includes(level)) || levels[0] || 'off';
@@ -1771,13 +2310,7 @@ export function workerModel(ctx, spec) {
 /** @param {UIContext} ctx @param {import('./contracts.js').WorkerSpec} worker @returns {Promise<void>} */
 async function pickEffort(ctx, worker) {
   const known = workerModel(ctx, worker), levels = known ? supportedEfforts(known) : EFFORT_LEVELS;
-  /** @param {import('./contracts.js').Effort} level */
-  const hint = level => {
-    if (!known) return 'The worker model is not chosen or not in the registry, so this is checked when the worker starts.';
-    const sent = known.thinkingLevelMap?.[level];
-    return typeof sent === 'string' && sent !== level ? `Sent to ${known.provider} as "${sent}".` : `Supported by ${known.provider}/${known.id}.`;
-  };
-  worker.effort = await chooseValue(ctx, `Worker effort · ${known ? `${known.provider}/${known.id}` : 'model not chosen'}`, levels.map(value => ({ value, hint: hint(value) })), worker.effort) || worker.effort;
+  worker.effort = await chooseValue(ctx, `Worker effort · ${known ? `${known.provider}/${known.id}` : 'model not chosen'}`, levels.map(value => ({ value, hint: effortHint(known, value) })), worker.effort) || worker.effort;
 }
 /**
  * @param {UIContext} ctx
@@ -1861,6 +2394,21 @@ async function pickModel(ctx, worker) {
     if (effort !== worker.effort) ctx.ui.notify(`Worker effort changed from ${worker.effort} to ${effort}: ${model.provider}/${model.id} supports ${supportedEfforts(model).join(', ')}.`, 'info');
     worker.effort = effort;
   }
+}
+/**
+ * Edits the trusted verification argv through Pi's editor, then asks for the authorization confirm when the
+ * list actually changed. Returns the validated list, or undefined when the edit or the confirmation was
+ * declined. Both settings UIs use this one flow, so the confirm can never be skipped on one route.
+ * @param {UIContext} ctx
+ * @param {import('./contracts.js').VerificationCommand[]} current the list the edit is compared with
+ * @param {import('./contracts.js').VerificationCommand[]} commands the edited list, already parsed
+ * @returns {Promise<import('./contracts.js').VerificationCommand[] | undefined>}
+ */
+export async function authorizeVerification(ctx, current, commands) {
+  const valid = validateConfig({ verification: { commands } }).verification.commands;
+  if (JSON.stringify(valid) === JSON.stringify(current)) return undefined;
+  const ok = await ctx.ui.confirm('Authorize verification commands', 'These commands execute automatically at review checkpoints with your OS permissions. Only add commands you trust.');
+  return ok ? valid : undefined;
 }
 /**
  * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx
@@ -1962,8 +2510,8 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
         const edited = await ctx.ui.editor('Trusted verification argv, run locally at checkpoints. Example: [{"name":"tests","command":"npm","args":["test"]}]', JSON.stringify(draft.verification.commands, null, 2));
         if (edited !== undefined) {
           /** @type {unknown} */ const commands = JSON.parse(edited);
-          const valid = validateConfig({ verification: { ...draft.verification, commands } }).verification.commands;
-          if (JSON.stringify(valid) !== JSON.stringify(saved.verification.commands) && await ctx.ui.confirm('Authorize verification commands', 'These commands execute automatically at review checkpoints with your OS permissions. Only add commands you trust.')) draft.verification.commands = valid;
+          const authorized = await authorizeVerification(ctx, saved.verification.commands, /** @type {import('./contracts.js').VerificationCommand[]} */ (commands));
+          if (authorized) draft.verification.commands = authorized;
         }
       }
       const next = validateConfig(draft);
@@ -1973,13 +2521,13 @@ export async function settingsUI(ctx, original, initialScope, onApply, options =
 }
 
 /** Whether input `data` is keybinding `id` (or one of the literal fallbacks). @param {{matches(data: string, id: string): boolean} | null | undefined} keys @param {string} data @param {string} id @param {string[]} fallbacks */
-function keyIs(keys, data, id, fallbacks) { return (keys?.matches(data, id) ?? false) || fallbacks.includes(data); }
+export function keyIs(keys, data, id, fallbacks) { return (keys?.matches(data, id) ?? false) || fallbacks.includes(data); }
 /**
  * Whether input `data` cancels: Pi's cancel binding, or Esc in any terminal encoding. Terminals with the Kitty
  * keyboard protocol send Esc as `\x1b[27u`, so comparing with `\x1b` alone misses it.
  * @param {KeyMatcher | null | undefined} keys @param {string} data @returns {boolean}
  */
-function isCancel(keys, data) { return keyIs(keys, data, 'tui.select.cancel', ['\x1b']) || matchesKey(data, 'escape'); }
+export function isCancel(keys, data) { return keyIs(keys, data, 'tui.select.cancel', ['\x1b']) || matchesKey(data, 'escape'); }
 /** @param {unknown} content @returns {string} */
 function messageText(content) {
   if (typeof content === 'string') return content;
@@ -2119,6 +2667,38 @@ export function pairMessageLines(text, expanded) {
   const card = [{ color: tone, text: `${icon} ${label}` }, ...shown.map(line => ({ color: /** @type {CardColor} */ (supervision ? 'warning' : 'muted'), text: `  ${inline(line, expanded ? 2000 : 400)}` }))];
   return card;
 }
+/**
+ * Wraps one card line, keeping that line's own leading indentation on every continuation line so wrapped
+ * text lines up under the first line. A suffix (the expand hint) is measured with the first line, so it
+ * counts toward that line's width before wrapping decides where to break.
+ * @param {string} painted the line as it will be rendered, indentation included
+ * @param {string[]} suffixes painted expand hints, longest first; the one that fits is appended
+ * @param {number} width the columns available
+ * @returns {string[]}
+ */
+function wrapKeepingIndent(painted, suffixes, width) {
+  const lead = /^ */.exec(plainOf(painted))?.[0] ?? '';
+  const indent = lead.length >= visibleWidth(painted) ? '' : lead;
+  const room = Math.max(10, width - visibleWidth(indent));
+  const body = painted.slice(indent.length);
+  const whole = wrapTextWithAnsi(body, room).map(part => indent + part);
+  // The hint always follows the end of the line's text, never a point inside it: the whole line plus the
+  // longest hint if that fits, else the whole line plus a shorter hint, else the wrapped line with the
+  // shortest hint after its last word when that fits, else no hint at all.
+  if (whole.length === 1) {
+    for (const candidate of suffixes) {
+      if (visibleWidth(plainOf(whole[0])) + visibleWidth(plainOf(candidate)) <= width) return [whole[0] + candidate];
+    }
+    return whole;
+  }
+  if (!suffixes.length) return whole;
+  const shortest = suffixes[suffixes.length - 1];
+  const last = whole[whole.length - 1];
+  if (visibleWidth(plainOf(last)) + visibleWidth(plainOf(shortest)) > width) return whole;
+  return [...whole.slice(0, -1), last + shortest];
+}
+/** The text of a string with SGR sequences removed, for measuring indentation. @param {string} text @returns {string} */
+function plainOf(text) { return text.replace(/\u001b\[[0-9;]*m/g, ''); }
 /** The key that expands collapsed chat output, as Pi shows it ("ctrl+o" unless rebound). @returns {string} */
 function expandKey() {
   try { return keyText('app.tools.expand') || DEFAULT_KEYS['app.tools.expand']; } catch { return DEFAULT_KEYS['app.tools.expand']; }
@@ -2137,7 +2717,10 @@ export function pairMessageComponent(message, options, theme) {
   const padding = Math.max(0, options.outputPad ?? 1);
   /** @param {CardLine[] | null} card */
   const words = card => (card ?? []).map(line => line.text).join('\n');
-  const hint = !options.expanded && words(pairMessageLines(text, true)) !== words(lines) ? ` (${expandKey()} to expand)` : '';
+  // Pi's own hint wording first; a narrower card falls back to just the key so the hint never takes a line
+  // of its own.
+  const fullHint = !options.expanded && words(pairMessageLines(text, true)) !== words(lines) ? ` (${expandKey()} to expand)` : '';
+  const shortHint = !options.expanded && words(pairMessageLines(text, true)) !== words(lines) ? ` (${expandKey()})` : '';
   /** @type {{color: CardColor, text: string}[]} */
   const card = lines;
   // With Pi's theme the Box pads the card; a theme without backgrounds gets plain side padding.
@@ -2149,8 +2732,10 @@ export function pairMessageComponent(message, options, theme) {
       const inner = Math.max(10, width - pad.length * 2);
       return card.flatMap(({ color, text: line }, index) => {
         const painted = color && theme ? theme.fg(color, line) : line;
-        const suffix = index === 0 && hint ? (theme ? theme.fg('dim', hint) : hint) : '';
-        return wrapTextWithAnsi(painted + suffix, inner).map(part => pad + part);
+        // The full hint first, then the bare key, then nothing: the wrapper picks the longest hint the
+        // first line can hold beside real text, so a hint never becomes a line of its own.
+        const candidates = index === 0 && fullHint ? [fullHint, shortHint] : [];
+        return wrapKeepingIndent(painted, candidates.map(candidate => (theme ? theme.fg('dim', candidate) : candidate)), inner).map(part => pad + part);
       });
     },
   };

@@ -70,7 +70,7 @@ export async function gitIgnores(cwd, relPath) {
 /** @param {string} cwd @returns {Promise<string>} */
 export async function repositoryRoot(cwd) {
   try { return canonical((await git(cwd, ['rev-parse', '--show-toplevel'])).trim()); }
-  catch { throw new Error(`Pair needs a Git repository to record review evidence, and ${cwd} is not inside one. Open Pi in a Git project, or set the worker workspace in /pair settings → Advanced.`); }
+  catch { throw new Error(`Pair needs a Git repository to record review evidence, and ${cwd} is not inside one. Open Pi in a Git project, or set the worker workspace in /pair settings → Worker → Workspace.`); }
 }
 /** @typedef {Map<string, 'dir' | 'gone'>} AncestorMemo */
 /** @param {string} root @param {string} name @param {AncestorMemo} [memo] @returns {Promise<WorkspaceEntry>} */

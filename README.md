@@ -92,14 +92,32 @@ policy asks for or denies some risk classes, classify Pair's tools in the same
 
 Open `/pair settings`:
 
-| Setting | First-run value |
+| Setting (page) | First-run value |
 | --- | --- |
-| Enabled for new work | On |
-| Autostart | Off |
-| Worker model and effort | An authenticated model and supported effort |
-| Review policy | `every-step`, with final review required |
+| Pair enabled (General) | On |
+| Start with each session (General) | Off |
+| Model and Thinking effort (Worker) | An authenticated model and a supported effort |
+| Review policy (Review) | `every-step`, with final review required |
 
-Settings save after each valid edit. Close with **Done** or Esc, then run:
+The settings screen is one framed panel over the chat, with four pages of tabs:
+
+| Page | What it holds |
+| --- | --- |
+| Worker | Model, thinking effort, read-only, workspace, and adding a worker slot. |
+| Review | Review policy, step size limit, revision limit, report detail, verification commands, and automatic report delivery. |
+| Display | The indicator above the editor and the terminal attention cue. |
+| General | Whether Pair is on, whether it starts with each session, and which settings file you are editing. |
+
+`Tab`/`→`/`l` and `Shift+Tab`/`←`/`h` move between the pages; `↑`/`↓` move
+between the rows. `Enter` changes the selected row: it opens a list of choices, a
+text field, or the model search (type to filter). `Space` is the quick change: it
+flips an on/off switch or steps to the next choice. Every change saves at once, so
+there is no separate save step: a setting that was written says so in the status
+line, and a change that cannot be saved says why, and the screen keeps showing the
+saved value. Esc closes the screen. Save to decides which file an edit goes to: this
+project, or the global defaults every project inherits.
+
+Then run:
 
 ```text
 /pair start worker
@@ -124,10 +142,10 @@ instruction.
 | Command | Purpose |
 | --- | --- |
 | `/pair` or alt+w | Open the live dashboard; it lists what needs you first. |
-| `/pair settings` | Choose the worker, review policy, and limits. |
-| `/pair status` | See activity, progress, and observed cache usage. |
+| `/pair settings` | Open the settings screen: worker, review, display and scope. |
+| `/pair status` | A short read-out of state, task progress and observed usage; the legend and cache-warming details live in `/pair doctor`. |
 | `/pair reload` | Reload saved Pair settings while Main stays open. |
-| `/pair restart worker` | Reload settings and restart only the worker, keeping its conversation. |
+| `/pair restart worker` | Reload settings and restart only the worker, keeping its conversation. Asks first while a task is running. |
 | `/pair start worker` | Start the worker and continue its conversation. |
 | `/pair pause worker` | Pause the task and hold the worker. |
 | `/pair resume worker` | Resume a paused or interrupted task. |
@@ -141,11 +159,13 @@ instruction.
 | `/pair stop worker` | Stop the worker process and retain its history. |
 | `/pair reset-worker worker` | Start the next task in a new conversation (old session files are archived, not deleted). |
 | `/pair indicator mode` | Choose the footer badge and live line: `minimal`, `compact`, `board` or `off`. |
-| `/pair doctor` | Diagnose Pair, Pi and Fabric setup. |
+| `/pair doctor` | Diagnose Pair, Pi and Fabric setup; also holds the key legend and the cache-warming explanation. |
 | `/pair import-backup global\|project file` | Import retained Pair V1 limits from a `.v1.bak` file. |
 
-Restart keeps Main's model and session open. Interrupted work waits for explicit
-resume; staged model changes require finishing or cancelling the current task.
+Restart keeps Main's model and session open. It asks first while the worker has an
+open task, because restarting interrupts the current step (a worker with no task
+restarts without a prompt). Interrupted work waits for explicit resume; staged
+model changes require finishing or cancelling the current task.
 Invalid configuration leaves the last valid settings in use.
 
 Pause and cancel ask first, from a command, the menu or the dashboard; stop asks
@@ -161,27 +181,34 @@ you mean /pair stop?`, or up to three when several are equally close.
 ## The dashboard
 
 Press **alt+w**, or type `/pair` with no arguments, to open the dashboard. It is
-one live screen over the chat: the worker's model and state, the plan with the
-current step marked, the last checkpoint's Pair checks, and the keys that apply
-right now. It updates in place — elapsed time, activity and state — while it
-stays open, so you never reopen it to see change. On a wide terminal it stays a
-readable column of at most 100 characters, and on a short one it sheds detail
-before it would hide the keys: first recent activity, then step history, then
-finished steps fold into one `✔ 1–3 approved` row, and last the plan is cut after
-the current step.
+one live, framed panel over the chat: a rounded box around the worker's model and
+state, the plan with the current step marked, the last checkpoint's Pair checks,
+and the keys that apply right now. It updates in place — elapsed time, activity and state — while it
+stays open, so you never reopen it to see change. The header line drops whole items
+rather than cutting a word: it keeps the model, the state and `step 2/4`, and gives
+up the context percentage, then the cost, then the elapsed time, then the effort,
+before it truncates anything. The context percentage is only shown while the worker
+process is running; a stopped or crashed worker's last reading would be stale, so
+it is left out. A finished task's header also drops `step N/M`, because the Last
+task line below already gives the count. On a wide terminal the overlay stays a readable
+column of at most 100 characters, and on a short one it sheds detail before it
+would hide the keys: first recent activity, then step history, then finished steps
+fold into one `✔ 1–3 approved` row, and last the plan is cut after the current
+step. The key hints wrap by whole hints, so a key never ends a line without its
+label.
 
 ```
-────────────────────────────────────────────────────────────────────────────────
- Pair
- claude-opus · high   ◉ working  3m12s · $0.14 · ctx 41% · step 2/3
-
- Add retry and backoff to the fetch client
- ✔ 1 Add retry policy type           approved
- ▶ 2 Wire retries into fetch client  editing src/http/client.js · rev 1/3
- ○ 3 Tests for backoff
-
-   t transcript  p pause  c cancel  s settings  m more  ? help
-────────────────────────────────────────────────────────────────────────────────
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Pair                                                                         │
+│ claude-opus · high   ◉ working  3m12s · $0.14 · ctx 41% · step 2/3           │
+│                                                                              │
+│ Add retry and backoff to the fetch client                                    │
+│ ✔ 1 Add retry policy type           approved                                 │
+│ ▶ 2 Wire retries into fetch client  editing src/http/client.js · rev 1/3     │
+│ ○ 3 Tests for backoff                                                        │
+│                                                                              │
+│   t transcript  p pause  c cancel  s settings  m more  ? help                │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 | Key | Action (offered only when it applies) |
@@ -193,16 +220,24 @@ the current step.
 | `p` | Pause a running task, or resume a paused or interrupted one; both ask first. |
 | `c` | Cancel the task; asks first, then for a reason. The conversation and file changes are kept. |
 | `w` | Show the next worker, when several are configured. The other keys act on the worker shown. |
-| `s` | Settings, including the indicator mode. |
-| `m` | More: `r` restart the worker, `x` stop it (while it runs), `i` status, `b` inbox, `l` reload settings, `d` doctor. |
-| `?` | List every key with what it does. |
+| `s` | Open the settings screen (the same one `/pair settings` opens). |
+| `m` | More: `r` restart the worker (asks first while a task runs), `x` stop it (while it runs), `i` status, `b` inbox, `l` reload settings, `d` doctor. |
+| `?` | List every key with what it does. Each description is a few words long, so it fits one line at the narrowest overlay. |
 | `esc` / `q` | Close. In More and in the key list they step back to the dashboard. |
 
 The plan also carries its short history: under each step you see what happened to
-its reports and decisions (`↻ revise: honour Retry-After on 429`, `✔ approved`,
-`↻ report checkpoint · 1 Pair check failed`), newest last and at most three per
-step, within a bounded per-task timeline of the last 60 entries. A **Recent
-activity** section lists the worker's last few tool calls, newest last.
+its reports and decisions, newest last and at most three per step, within a bounded
+per-task timeline of the last 60 entries:
+
+| History line | Meaning |
+| --- | --- |
+| `◐ Checkpoint · 2/2 Pair checks passed` | A report arrived and Pair's own checks passed. |
+| `◐ Checkpoint · 1 Pair check failed` | The same, in amber, when a check failed. |
+| `◐ Question` / `◐ Blocker` / `◐ Final review` | The report's kind, when no check ran. |
+| `↻ revise: honour Retry-After on 429` | Main asked for changes; `↻ answer: …` is the same for a question. |
+| `✔ approved` | Main approved the step. A finished step's own row already says "approved", so its history leaves this line out. |
+
+A **Recent activity** section lists the worker's last few tool calls, newest last.
 
 The transcript follows the worker's conversation as it happens: who speaks
 (`◆ Pair`, `◆ worker`), the worker's own words, one `→` line per tool call naming
@@ -214,14 +249,22 @@ stays at the bottom; scrolling up pauses it, and scrolling back to the end (or
 
 Read-only screens (report, diff, transcript, status, inbox, doctor) return you to
 the dashboard when they close, so two screens never stack. A single key is easy to
-hit by mistake, so pause, resume and cancel ask before they run (cancel then asks
-for a reason), and stop asks while a task is running. Without a task the
+hit by mistake, so pause, resume, cancel and restart ask before they run (cancel
+then asks for a reason), and stop asks while a task is running. Without a task the
 dashboard is a readiness screen: it says what the worker is doing and offers the
-next step (choose a model, start the worker, turn Pair on).
+next step as a key this screen actually has (choose a model, start the worker,
+turn Pair on) — never a bare `/pair` command you already ran, and never a start
+key that would fail: while Pair is off it offers only the settings key. `Pair is
+off` is stated exactly once on every screen that can show it — as the readiness
+sentence when there is no task, and as a line under the title when a plan or an
+empty worker list is on screen. A task that already
+ended leaves one line above it: `Last task  ✔ <objective> · 4/4 approved · 2m42s ·
+$0.14`, or `Last task  ✖ cancelled at step 2/4 · <objective>`; the objective is
+shortened before any number is.
 
 ### Attention cue (opt-in)
 
-Turn on **Settings > Attention cue** (`attentionCue: true`) if you want the
+Turn on **Settings → Display → Attention cue** (`attentionCue: true`) if you want the
 terminal to pull you back when a worker needs a person. While it is on, a state
 that needs you — a worker error or EXIT_UNCONFIRMED, a permission dialog, a
 stalled worker, a paused or interrupted task, or reports that cannot reach Main
@@ -295,42 +338,85 @@ title:
 | `pair ◐ 2/4 question` | The worker asked Main a question. |
 | `pair ◐ 2/4 blocked` | The worker is blocked; Main handles it. |
 | `pair ◐ 2/4 final` | Final review waits for Main. |
-| `pair ! attention` | The worker errored or vanished; run `/pair reconcile` when it asks. |
+| `pair ! attention` | The worker errored or vanished; the line above the editor says why and points at `/pair`. |
 | `pair ! permission` | The worker is waiting on a permission dialog. |
 | `pair ! idle 6m` | No worker activity for six minutes: read `/pair transcript`. |
 | `pair ! 2 reports` | Reports are retained and automatic delivery is off: run `/pair yield`. |
 | `pair ⏸ 2/4 paused` | The task is paused and waits for `/pair resume`. |
 | `pair ⏸ 2/4 interrupted` | The worker was interrupted (crash, stop or an external abort); `/pair resume` continues. |
-| `pair ✔ 4/4 done` | Every step is approved. It settles to `pair ● ready` after about ten minutes. |
+| `pair ✔ 4/4 done` | Every step is approved; its plan board folds them into one `✔ 1–4 approved` row. It settles to `pair ● ready` after about ten minutes. |
 | `pair ● ready` | The worker is idle and ready for the next task. |
 | `pair ○ set up` | No worker model is chosen yet: open `/pair`. |
 | `pair ○ off` | Pair is off or the worker is stopped. |
-| `pair W1 ◉2/4 W2 ●` | One short entry per worker once several are configured. |
+| `pair w1 ◉2/4 w2 ●` | One short entry per worker once several are configured, named by worker id (clipped at ten columns) and painted in that worker's own colour. A worker that needs you leads the badge, and the ones that do not fit under 32 columns fold into `+N`. |
 
 Amber and red are reserved for states that need you; review, question and blocked
 stay calm because Main handles them. Choose what sits above the editor with
-`/pair indicator <mode>` or **Settings > Indicator**:
+`/pair indicator <mode>` or **Settings → Display → Indicator**:
 
 | Mode | Shows |
 | --- | --- |
-| `minimal` (default) | The badge plus one live line with a progress bar, the step, activity, elapsed time, step revisions and cost. |
+| `minimal` (default) | The badge plus one live line with a progress bar, the labelled step (`step 2/4`), activity, elapsed time, step revisions and cost. |
 | `compact` | The badge only. |
-| `board` | The badge plus a plan board: one row per step, with finished steps collapsed when the plan is long. |
+| `board` | The badge plus a plan board: one row per step, with finished steps collapsed when the plan is long, then one compact row per other busy or attention-needing worker (`◐ w2 1/2 Split logger · review`). |
 | `off` | Nothing. Commands and the attention cue still work. |
 
 ```
-■■■▣▣□□□□□ 2/4 · ▶ Wire retries into fetch client · editing client.js · 3m12s · rev 1/3 · $0.14/$2.00
+■■■▣▣□□□□□ step 2/4 · ▶ Wire retries into fetch client · editing client.js · 3m12s · rev 1/3 · $0.14/$2.00
 ```
 
 The bar fills `■` for approved steps and `▣`, in the step's color, for the step
-under way. A finished plan's clock stops when the last step is approved, and the
-line clears with the `✔` badge about ten minutes later; a cancelled task clears at
-once. The step title flexes down to 16 columns first; only then does the line drop
-detail, lowest priority first: speed, cache, cost, step revisions, elapsed time,
-then activity. The `n/m` count stays last. An alert (stalled worker, permission
-dialog, near-full context, a reached limit, or failed Pair verification) keeps
-its place while anything else can go. Activity names the file rather than its
-path (`editing client.js`), and a command target stays as typed.
+under way. The count is labelled `step 2/4` so it cannot be read as `2 approved`;
+it falls back to the bare `2/4` only once the bar itself is gone, after every
+lower-ranked part has dropped. A finished plan's clock stops when the last step is
+approved, and it shows no activity, no step revisions and no streaming speed: only
+its elapsed time and cost stay, because nothing is in flight. A paused or interrupted
+task's clock stops while it is held, at the moment it was held, and the alert next to
+it counts the wait instead (`paused 12m · /pair resume`). Pair does not subtract the
+held time afterwards: once the task resumes, the clock again shows the time since the
+task started. The line clears with
+the `✔` badge about ten minutes later; a cancelled task clears at once.
+
+The step title is the point of the line, so it is protected: while the title would
+have to fall below 40 columns, the line drops a measured number instead, lowest
+priority first (speed, cache, cost, step revisions, elapsed time). Only then does
+the title shrink, down to its 16-column minimum, and only then do activity and the
+title go. An alert (stalled worker, permission dialog, near-full context, a reached
+limit, or failed Pair verification) keeps its place while anything else can go,
+and it outranks the bar itself: the line narrows the bar — down to the bare count —
+before it gives up an alert, and only then the step title.
+Activity names the file rather than its path (`editing client.js`), and a command
+target stays as typed.
+
+A step that waits says what it waits for, with the same words on the live line, the
+board and the dashboard: `review by Main`, `final review by Main`,
+`question for Main` and `blocker for Main`, and `paused` or `interrupted` for a
+held task. On the live line the word is its own part at the activity's rank, so it
+drops only after the measured numbers; a paused or interrupted task already carries
+an alert there and adds no word of its own.
+
+A worker that needs you and has no plan for you to watch still gets one line above
+the editor: `! worker needs attention · <short error> · open /pair` (`! w2 ...`
+when several workers are configured). Here a slash command is right, because the
+line sits above the editor rather than inside `/pair`. Board mode shows the same
+alert rows the live line raises — a failed Pair check, a reached limit, the step
+revision cap, a nearly full context, a crashed or stalled worker, a permission
+dialog — and an attention row adds the short error and the next step:
+`⚠ worker needs attention · Worker exited unexpectedly (code 1) · /pair`.
+
+### `/pair status` and `/pair doctor`
+
+Status is a short read-out, not a manual. It shows each worker's state and model,
+the task with its progress bar (`■■▣□ step 2 of 4 · 1 approved`), one row per step
+with the symbol alone (`✔ 2. Wire retries into fetch client`), Main's state, and the
+details worth keeping. Rows with no reading are left out: no `— tok/s`, no
+`last read unknown`, no context line without data. The Activity section describes
+work in flight, so an idle, stopped or crashed worker never shows the tool it ran
+minutes ago; the live line, the board and the dashboard drop the same stale tool. A
+stalled worker still shows what it is stuck on. One short
+line points at `/pair doctor`, which carries the key legend and the full native
+cache-warming explanation, and adds the Fabric, Fovea and configuration checks it
+needs for a bug report.
 
 ## Review you can inspect
 
@@ -354,7 +440,7 @@ branch navigation, Main re-inspects a pending report before deciding. Main
 inspects the checkpoint and approves, revises, or cancels. Revisions continue in the same worker session;
 final approval completes the task and retains that session.
 
-Add project checks under **Settings > Advanced > Verification commands**.
+Add project checks under **Settings → Review → Verification commands**.
 Failed checks block approval when `requirePassing` is enabled. An empty command
 list means no independent checks ran.
 
@@ -367,13 +453,16 @@ each work order; the worker does not inherit Main's private chat. Native Pi/Fabr
 manages compaction, while Pair retains task state separately.
 
 `/pair status` shows each role's **cache** reading (for example `last read 99.2%`):
-the share of measured input read from provider cache on that role's last request.
+the share of measured input read from provider cache on that role's last request. A role
+with no measurement simply has no row; status never prints a placeholder.
 The live line adds the worker's reading (`cache 31%`) only when it falls below 50%.
 The hero artwork's 99-100% values are examples; actual results vary.
 
 Native warming does nothing in a Pair session yet: Pi (through 1.3.0) stops its
 warmer once Pair's messages are in context, so it sends no refreshes for either
-role. Pair's support takes effect on a Pi that sends them.
+role. `/pair doctor` prints this explanation in full, along with the key legend
+and the native setting it read. Pair's support takes effect on a Pi that sends
+them.
 There, with `"cacheWarming": "idle"` in Pi's global settings, Pair keeps Main's
 cache warm while the worker works and the worker's cache warm while its report
 waits for Main, using Pi's own savings rule. Pi warms only models it knows a cache
