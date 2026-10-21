@@ -1,8 +1,8 @@
 import { assert, isArray, plain, safeId } from './util.js';
 /** @typedef {import('./contracts.js').Step} Step */
 /** @typedef {{workerId: string, requestId: string, objective: string, constraints?: string[], context?: string, steps: Step[]}} DispatchPayload */
-/** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel', feedback: string, checkpointHash?: string, steps?: Step[]}} DecisionShape */
-/** @typedef {DecisionShape & ({action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'cancel'})} DecisionPayload */
+/** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel' | 'fix' | 'fixed', feedback: string, checkpointHash?: string, steps?: Step[]}} DecisionShape */
+/** @typedef {DecisionShape & ({action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'cancel' | 'fix' | 'fixed'})} DecisionPayload */
 
 /** @typedef {{description?: string, enum?: readonly unknown[]}} SchemaOptions */
 /** @typedef {SchemaOptions & {type: 'string', minLength?: number, maxLength?: number}} StringSchema */
@@ -48,12 +48,14 @@ export const reportSchema = object({
 }, ['taskId', 'stepId', 'kind', 'summary']);
 export const decisionSchema = object({
   workerId: string('Configured worker ID', 80), taskId: string('Task ID', 80), reportId: string('The exact report being answered/reviewed', 80),
-  action: enumOf(['answer', 'approve', 'revise', 'cancel']),
+  action: enumOf(['answer', 'approve', 'revise', 'cancel', 'fix', 'fixed']),
   feedback: string('Answer, concrete changes required, or review rationale', 12000),
   checkpointHash: string('Exact current checkpoint hash, required for approval', 64),
   steps: { ...array(stepSchema, 32), minItems: 1, description: 'revise only: the complete replacement plan. Completed steps must be kept unchanged as its prefix; this starts a new plan revision.' }
 }, ['workerId', 'taskId', 'reportId', 'action', 'feedback']);
 export const inspectSchema = object({ workerId: string('Worker ID', 80), taskId: string('Optional; must be the current task ID', 80), reportId: string('Report ID; omit for latest', 80), file: string('Optional changed path to read from immutable evidence', 1024) }, ['workerId']);
+export const peekSchema = object({ workerId: string('Worker ID', 80) }, ['workerId']);
+export const steerSchema = object({ workerId: string('Worker ID', 80), taskId: string('Task ID', 80), message: string('Instruction for the running step (at most 4000 characters)', 4000) }, ['workerId', 'taskId', 'message']);
 export const statusSchema = object({}, []);
 export const yieldSchema = object({}, []);
 
@@ -95,6 +97,8 @@ function assertUniqueStepIds(steps) {
 function assertDecisionPayload(input) {
   assertDecisionShape(input); safeId(input.workerId, 'workerId'); safeId(input.taskId, 'taskId'); safeId(input.reportId, 'reportId');
   if (input.action === 'approve') assert(/^[a-f0-9]{64}$/.test(input.checkpointHash || ''), 'Approval requires the exact checkpointHash');
+  // A Main fix edits the live workspace itself, so it never carries a checkpoint hash or a plan.
+  if (input.action === 'fix' || input.action === 'fixed') assert(input.checkpointHash === undefined, `${input.action} takes no checkpointHash; Pair captures the workspace itself`);
   if (input.steps !== undefined) {
     assert(input.action === 'revise', 'Only revise may replace the plan steps');
     assertUniqueStepIds(input.steps);

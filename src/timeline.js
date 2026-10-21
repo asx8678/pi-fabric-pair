@@ -13,7 +13,12 @@ export const ACTIVITY_LIMIT = 8;
 
 /** @typedef {{type: 'report', reportId: string, step: number, kind: string, at: number, verification: {passed: number, failed: number}}} TimelineReport */
 /** @typedef {{type: 'decision', reportId: string, step: number, action: string, at: number, feedback: string}} TimelineDecision */
-/** @typedef {TimelineReport | TimelineDecision} TimelineEntry */
+/** @typedef {{type: 'note', kind: string, step: number, at: number, text: string}} TimelineNote */
+/** @typedef {TimelineReport | TimelineDecision | TimelineNote} TimelineEntry */
+/** Note kinds Pair records: a supervisor steer, a watchdog action, and a Main fix of a step. */
+export const NOTE_KINDS = ['steer', 'watchdog', 'main-fix'];
+/** Note text is one short line in the dashboard. */
+export const NOTE_TEXT_LIMIT = 160;
 /** @typedef {{tool: string, target: string, at: number}} ActivityEvent */
 
 /** @param {unknown} value @returns {boolean} */
@@ -47,7 +52,14 @@ export function normalizeTimeline(value) {
   const entries = [];
   for (const item of value) {
     if (!isObject(item)) continue;
-    const record = /** @type {{type?: unknown, reportId?: unknown, step?: unknown, kind?: unknown, at?: unknown, action?: unknown, feedback?: unknown, verification?: unknown}} */ (item);
+    const record = /** @type {{type?: unknown, reportId?: unknown, step?: unknown, kind?: unknown, at?: unknown, action?: unknown, feedback?: unknown, verification?: unknown, text?: unknown}} */ (item);
+    // Notes carry no report: they record who touched the step (a steer, a watchdog action, a Main fix).
+    if (record.type === 'note') {
+      const kind = shortText(record.kind, 40);
+      if (!kind) continue;
+      entries.push({ type: 'note', kind, step: Math.max(1, Math.trunc(finite(record.step))), at: finite(record.at), text: shortText(record.text, NOTE_TEXT_LIMIT) });
+      continue;
+    }
     if (typeof record.reportId !== 'string' || !record.reportId) continue;
     if (record.type === 'report') {
       const check = isObject(record.verification) ? /** @type {{passed?: unknown, failed?: unknown}} */ (record.verification) : {};
@@ -83,6 +95,15 @@ export function reportEntry({ reportId, kind, step, at, verification = [] }) {
  */
 export function decisionEntry({ reportId, step, action, at, feedback = '' }) {
   return { type: 'decision', reportId, step, action, at, feedback: excerpt(feedback) };
+}
+
+/**
+ * A one-line note: a supervisor steer, a watchdog action or a Main fix.
+ * @param {{kind: string, step: number, at: number, text: string}} input
+ * @returns {TimelineNote}
+ */
+export function noteEntry({ kind, step, at, text }) {
+  return { type: 'note', kind: shortText(kind, 40), step: Math.max(1, Math.trunc(finite(step))), at: finite(at), text: shortText(text, NOTE_TEXT_LIMIT) };
 }
 
 /**

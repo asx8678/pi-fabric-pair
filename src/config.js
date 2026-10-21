@@ -16,9 +16,10 @@ export function isIndicator(value) { return INDICATORS.some(mode => mode === val
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
 /** @typedef {{enabled: boolean, provider: string, model: string, on: 'final' | 'checkpoints', timeoutMs: number}} PeerReviewConfig */
-/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, peerReview: PeerReviewConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean, autoCheckIdle: boolean, mainSupervision: boolean, attentionCue: boolean, maxMainRecoveries: number}} PairConfig */
-/** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence' | 'peerReview'} NestedConfigKey */
-/** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>, peerReview?: Partial<PeerReviewConfig>}} ConfigLayer */
+/** Supervision budgets and thresholds. Never part of configHash(): tuning them must not interrupt a running worker. @typedef {{watchdog: boolean, silentMs: number, pingTimeoutMs: number, toolMaxMs: number, stepNudgeMs: number, maxAutoRecoveriesPerStep: number, noReportNudges: number, maxSteersPerStep: number, providerCooldownMs: number, quotaCooldownMs: number, maxProviderWaits: number, compactionMaxMs: number, mainHeartbeat: 'off' | 'note' | 'wake', mainHeartbeatMs: number}} ControlConfig */
+/** @typedef {{version: 2, enabled: boolean, autoStart: boolean, indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, peerReview: PeerReviewConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean, autoCheckIdle: boolean, mainSupervision: boolean, attentionCue: boolean, maxMainRecoveries: number, control: ControlConfig}} PairConfig */
+/** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence' | 'peerReview' | 'control'} NestedConfigKey */
+/** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>, peerReview?: Partial<PeerReviewConfig>, control?: Partial<ControlConfig>}} ConfigLayer */
 /** @typedef {{scope: ConfigScope, kind: 'fabric-pair-v1' | 'handoff-v1', sourceFile: string, targetFile: string, fromVersion: 1, toVersion: 2, warnings: string[]}} ConfigMigration */
 /** @typedef {{migration?: ConfigMigration | null, layer?: boolean}} SaveConfigOptions */
 /** @typedef {{layer: ConfigLayer, migration: ConfigMigration | null}} ConfigLayerResult */
@@ -50,13 +51,25 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   mainReadOnlyDuringTasks: true,
   autoDeliverReports: true,
   autoCheckIdle: true,
+  // Supervision controls: every automatic action Pair takes has a budget and a threshold here, and none of
+  // them is part of configHash(), so tuning them never interrupts a running worker.
+  control: {
+    watchdog: true,
+    silentMs: 300000, pingTimeoutMs: 20000, toolMaxMs: 900000, stepNudgeMs: 1200000,
+    maxAutoRecoveriesPerStep: 2, noReportNudges: 1, maxSteersPerStep: 6,
+    providerCooldownMs: 60000, quotaCooldownMs: 900000, maxProviderWaits: 4,
+    // How long a between-run compaction (Fabric compacts right after a run settles) may run before Pair stops
+    // it. 0 restores the old behaviour of refusing compaction outside a lease.
+    compactionMaxMs: 600000,
+    mainHeartbeat: 'off', mainHeartbeatMs: 900000
+  },
   mainSupervision: false,
   // Opt-in terminal attention cue: a title prefix and one bell when a worker needs the human.
   attentionCue: false,
   maxMainRecoveries: 3
 }));
 /** @type {NestedConfigKey[]} */
-const NESTED = ['supervision', 'runtime', 'requirements', 'limits', 'verification', 'evidence', 'peerReview'];
+const NESTED = ['supervision', 'runtime', 'requirements', 'limits', 'verification', 'evidence', 'peerReview', 'control'];
 /** @type {Record<string, import('./contracts.js').ReviewMode | undefined>} */
 const POLICY_ALIASES = { final: 'final-only', strict: 'every-step', 'final-only': 'final-only', milestones: 'milestones', 'every-step': 'every-step' };
 /** Removed top-level settings: accepted for existing files, then dropped. Warming is Fabric's cache provider now. */
@@ -140,6 +153,20 @@ function assertMergedConfig(c) {
   const positiveFields = [[c.runtime, ['startupTimeoutMs', 'requestTimeoutMs', 'shutdownTimeoutMs']], [c.limits, ['activeStepTimeoutMs']], [c.evidence, ['maxFiles', 'maxTotalBytes', 'maxArtifactBytes']]];
   for (const [obj, keys] of positiveFields) {
     for (const key of keys) assert(typeof obj[key] === 'number' && Number.isSafeInteger(obj[key]) && obj[key] > 0, `${key} must be a positive integer`);
+  }
+  assert(plain(c.control), 'control must be an object');
+  assert(typeof c.control.watchdog === 'boolean', 'control.watchdog must be boolean');
+  assert(c.control.mainHeartbeat === 'off' || c.control.mainHeartbeat === 'note' || c.control.mainHeartbeat === 'wake', 'control.mainHeartbeat must be off, note or wake');
+  /** @type {Record<string, [number, number]>} */
+  const boundedControl = {
+    silentMs: [10000, 3600000], pingTimeoutMs: [1000, 300000], toolMaxMs: [60000, 86400000], stepNudgeMs: [60000, 86400000],
+    maxAutoRecoveriesPerStep: [0, 20], noReportNudges: [0, 5], maxSteersPerStep: [0, 20],
+    providerCooldownMs: [1000, 3600000], quotaCooldownMs: [60000, 86400000], maxProviderWaits: [0, 20],
+    // 0 is meaningful here: it turns the maintenance-compaction allowance off.
+    compactionMaxMs: [0, 86400000], mainHeartbeatMs: [60000, 86400000]
+  };
+  for (const [key, [minimum, maximum]] of Object.entries(boundedControl)) {
+    assert(typeof c.control[key] === 'number' && Number.isSafeInteger(c.control[key]) && c.control[key] >= minimum && c.control[key] <= maximum, `control.${key} must be ${minimum}–${maximum}`);
   }
   /** @type {Record<string, [number, number]>} */
   const boundedLimits = { maxReportsPerTask: [1, 1000], maxReportBytes: [1, 1048576], maxAutomaticReportRepairs: [0, 20] };
@@ -253,7 +280,7 @@ function migrateHandoffV1(raw, sourceFile, scope, targetFile) {
   };
   const warnings = ['Handoff provider identity is not inferred; choose the canonical provider/model before enabling.'];
   if (raw.enabled === true) warnings.push('Handoff enabled:true was reset to false; migration never grants new consent.');
-  if ((raw.limits && Object.keys(raw.limits).some(key => key.startsWith('maxQueued') || key.startsWith('maxReport') || key.startsWith('maxAutomatic') || key === 'activeStepTimeoutMs')) || raw.collaboration?.maxRevisionsPerStep !== undefined) warnings.push('Report, repair, active-step and per-step limits are migrated and enforced. Queue and automatic-recovery limits are deprecated (Pair V1 runs one assignment and never recovers automatically) and are dropped.');
+  if ((raw.limits && Object.keys(raw.limits).some(key => key.startsWith('maxQueued') || key.startsWith('maxReport') || key.startsWith('maxAutomatic') || key === 'activeStepTimeoutMs')) || raw.collaboration?.maxRevisionsPerStep !== undefined) warnings.push('Report, repair, active-step and per-step limits are migrated and enforced. Queue and automatic-recovery limits are deprecated and are dropped: Pair runs one assignment at a time, and its own bounded recovery is configured in the control section (watchdog, retry budgets and cooldowns) rather than by these legacy limits.');
   assertConfigLayer(layer);
   return { layer, migration: { scope, kind: 'handoff-v1', sourceFile, targetFile, fromVersion: 1, toVersion: CONFIG_VERSION, warnings } };
 }

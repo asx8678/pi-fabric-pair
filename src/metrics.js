@@ -60,6 +60,37 @@ export function addUsage(total = {}, usage) {
   out.cacheRatio = out.totalInput ? out.cacheRead / out.totalInput : null;
   return out;
 }
+/** The configured, task-scoped figures a per-task cap is derived from. @typedef {{policy?: {maxRevisions?: unknown, maxRevisionsPerStep?: unknown} | null, limits?: object | null, steps?: unknown}} CapSources */
+/** The caps in force for one task. @typedef {{maxRevisions: number, maxReportsPerTask: number}} EffectiveCaps */
+const FALLBACK_MAX_REVISIONS = 20;
+const FALLBACK_MAX_REVISIONS_PER_STEP = 3;
+const FALLBACK_MAX_REPORTS_PER_TASK = 40;
+/** @param {unknown} value @param {number} fallback @returns {number} */
+const capNumber = (value, fallback) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+/**
+ * The per-task caps in force, scaled to the length of the current plan.
+ *
+ * Configured values are floors, never ceilings: a plan Main has revised to be longer than the configured
+ * revision budget may still be revised and delivered, so a long plan cannot stall on a cap written for a
+ * short one. A call site with no task at hand (no steps) falls back to the configured value.
+ * @param {CapSources | null | undefined} task
+ * @returns {EffectiveCaps}
+ */
+export function effectiveCaps(task) {
+  const steps = Array.isArray(task?.steps) ? task.steps.length : 0;
+  const policy = task?.policy;
+  const configuredRevisions = capNumber(policy?.maxRevisions, FALLBACK_MAX_REVISIONS);
+  const configuredPerStep = capNumber(policy?.maxRevisionsPerStep, FALLBACK_MAX_REVISIONS_PER_STEP);
+  const limits = task?.limits;
+  // maxReportsPerTask is a config/limit field, not part of BaseTaskLimits; read it defensively.
+  const configuredReports = capNumber(limits && Object.hasOwn(limits, 'maxReportsPerTask') ? /** @type {Record<string, unknown>} */ (limits).maxReportsPerTask : undefined, FALLBACK_MAX_REPORTS_PER_TASK);
+  return {
+    maxRevisions: Math.max(configuredRevisions, steps * 2),
+    // Every step may be revised its per-step allowance, and each revision is a report that must reach Main.
+    maxReportsPerTask: Math.max(configuredReports, steps * (configuredPerStep + 2))
+  };
+}
+
 /** @param {{usage?: Partial<UsageTotals> | null}} task @param {import('./contracts.js').BaseTaskLimits} limits @returns {string | null} */
 export function limitExceeded(task, limits) {
   if (limits.maxReportedCostUsd !== null && (task.usage?.reportedCost || 0) >= limits.maxReportedCostUsd) return 'Reported inference-cost budget reached';

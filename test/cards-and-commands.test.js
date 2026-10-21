@@ -159,7 +159,8 @@ test('notice, supervision and check cards use the state vocabulary, decided by k
     assert.equal(/✔|⚠/.test(plain(lines)), false, `${name}: notices never claim success or a problem`);
   }
   // The real CHECK text describes unfinished Pair work: waiting for Main, not a failure and not a success.
-  const CHECK = 'FABRIC PAIR CHECK — your turn ended with unfinished Pair work and no worker running:' + NL + '- worker w1, task task-1 (Add retries) is review, step 2/3' + NL + 'Call pair_status and handle what is yours.';
+  // It fires after a turn and from a task settling with no Main turn, so it cannot claim a turn ended.
+  const CHECK = 'FABRIC PAIR CHECK — Pair work is waiting and no worker is running:' + NL + '- worker w1, task task-1 (Add retries) is review, step 2/3' + NL + 'Call pair_status and handle what is yours.';
   const check = /** @type {any[]} */ (pairMessageLines(CHECK, false));
   assert.equal(check[0].text, '◐ Pair check');
   assert.equal(check[0].color, 'accent');

@@ -17,6 +17,33 @@ const MAX_PATCH_BYTES = MAX_PATCH_CHARS * 3;
 /** @typedef {{path: string, kind: 'missing' | 'file' | 'symlink', sha: string | null, size: number, executable: boolean}} SnapshotEntry */
 /** @typedef {{root: string, head: string | null, entries: SnapshotEntry[], hash: string, capturedAt: number, totalBytes: number}} Snapshot */
 /** @typedef {{path: string, before: SnapshotEntry | null, after: SnapshotEntry | null}} CheckpointFile */
+/**
+ * The paths whose content or mode differs between two snapshots of the same tree — the delta one writer
+ * added on top of the other. Pure and tolerant: a missing, odd or duplicated entry never throws.
+ * @param {{entries?: unknown} | null | undefined} before
+ * @param {{entries?: unknown} | null | undefined} after
+ * @returns {string[]} sorted changed paths, including added and removed ones
+ */
+export function snapshotDelta(before, after) {
+  /** @param {{entries?: unknown} | null | undefined} snapshot @returns {Map<string, string>} */
+  const index = snapshot => {
+    /** @type {Map<string, string>} */
+    const paths = new Map();
+    const entries = Array.isArray(snapshot?.entries) ? snapshot.entries : [];
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
+      const record = /** @type {{path?: unknown, kind?: unknown, sha?: unknown, executable?: unknown}} */ (entry);
+      if (typeof record.path !== 'string' || !record.path) continue;
+      // A missing entry is the absence of a path, the same as no entry at all.
+      if (record.kind === 'missing') continue;
+      paths.set(record.path, JSON.stringify([record.kind ?? null, record.sha ?? null, record.executable === true]));
+    }
+    return paths;
+  };
+  const old = index(before), next = index(after);
+  const changed = new Set([...new Set([...old.keys(), ...next.keys()])].filter(name => old.get(name) !== next.get(name)));
+  return [...changed].sort();
+}
 /** @typedef {{version: 1, taskId: string, reportId: string, baseHash: string, checkpointHash: string, root: string, changed: string[], changedBytes: number, files: CheckpointFile[], snapshot?: Snapshot, verification: import('./contracts.js').VerificationResult[], patchTruncated: boolean, createdAt: number}} CheckpointManifest */
 /** @typedef {{absolute: string, missing: true} | {absolute: string, missing: false, stat: import('node:fs').BigIntStats}} WorkspaceEntry */
 /**

@@ -14,9 +14,10 @@ Do not arm native Prewalk for a Pair assignment.
 
 With Fabric active, Pair's tools are captured extension tools with the refs
 `extensions.pair_status`, `extensions.pair_dispatch`, `extensions.pair_inspect`,
-`extensions.pair_decide`, `extensions.pair_cancel`, `extensions.pair_recover` and
-`extensions.pair_yield`. The worker role exposes `extensions.pair_report`. Call
-them directly inside `fabric_exec`; do not search the catalog first:
+`extensions.pair_decide`, `extensions.pair_peek`, `extensions.pair_steer`,
+`extensions.pair_cancel`, `extensions.pair_recover` and `extensions.pair_yield`.
+The worker role exposes `extensions.pair_report`. Call them directly inside
+`fabric_exec`; do not search the catalog first:
 
 ```ts
 return await extensions.pair_status({});
@@ -27,6 +28,47 @@ The same direct form works in the Python kernel
 error, read the schema once with `tools.describe({ ref: "extensions.pair_dispatch" })`
 (or the tool you called). When Fabric is not capturing tools, ordinary Pi tool
 names are `pair_status`, etc.
+
+### Looking at and steering a running worker
+
+`pair_peek({workerId})` reads a worker without disturbing it: what it is doing now
+(liveness, including a running tool and how long it has run), the current step and
+its elapsed time, recent tool activity, the worker's last words, context usage, and
+the steers and Main recoveries left. It makes no RPC request. Call it when a
+SUPERVISION or CHECK notice arrives, or when the user asks how the worker is doing.
+Do not poll it.
+
+`pair_steer({workerId, taskId, message})` queues an instruction into the run that is
+already going: redirect the worker, or ask it to report now with a checkpoint and
+`stepComplete:false`. It never starts a run and never cancels anything. A steer is
+accepted only for the current running lease, the message is at most 4000 characters,
+and each step accepts at most six; every steer is recorded as a note in the task
+timeline. The worker is told the steer comes from the supervisor and applies only
+within the authorized step. `/pair steer <workerId> <text>` is the human's door to
+the same fence.
+
+### Supervision notices
+
+Pair watches its worker on its own, and it tells Main when something needs looking at.
+
+- **FABRIC PAIR SUPERVISION** — a task stopped or stalled (no report, crash, hung tool,
+  frozen or silent process, spent provider waits, a limit). It carries the reason, a
+  liveness line (state, last event age, tool, retry) and the last provider error. The
+  advice line says how many `pair_recover` calls are left; when they are gone, or the
+  exit is unconfirmed, tell the user instead. With `mainSupervision` off you get the
+  same facts as a non-waking **FABRIC PAIR NOTICE** and cannot recover: say so.
+- **FABRIC PAIR CHECK** — Pair is idle with unfinished work, or holds a report it will
+  not deliver by itself (spent delivery cap or failed attempts). Call `pair_yield` to
+  receive the report, or `pair_status` and then handle what is yours.
+- **FABRIC PAIR HEARTBEAT** — only if the human turned it on: a display-only line about
+  a worker that is still running. Nothing to answer; call `pair_peek` only if the line
+  shows a problem.
+
+Pair recovers within budgets on its own: a missing report is re-prompted, a long step
+is nudged, a hung tool is stopped, a frozen worker restarted, a stalled request
+aborted, a provider limit waited out, and a proven crash recovered. Each action is
+recorded in the task timeline, and the dashboard shows it. Do not duplicate those
+recoveries; do not poll.
 
 Do not poll status. With `autoDeliverReports` on (the default), each finalized
 report is delivered to Main once Main's current work is done: at the end of the
@@ -124,6 +166,26 @@ Those capitalized placeholders must be replaced with real returned values.
 A stale checkpoint, failed configured check, or unresolved issue is not approvable.
 Final review is required. Model approval never substitutes for a human permission
 prompt. Escalate exhausted limits, missing requirements or uncertain recovery.
+
+### A step that reached its revision limit
+
+When a report carries `revisionLimitNotice`, that step already used its per-step
+revisions. It is not a dead end:
+
+- **Re-plan it.** Send `action:"revise"` with `steps` whose entry at the current
+  position replaces the reported step (split it, or rewrite it). The current step
+  starts with a fresh per-step count, at most twice per step position, and the
+  task-wide revision allowance still applies.
+- **Fix it yourself.** Send `action:"fix"` on a review or blocked report after
+  `pair_inspect`. The workspace must still match the checked-out report. Pair marks
+  the task as a Main fix: you may edit files, the worker gets no lease, and every
+  other decision on that report is refused until you finish. Then send
+  `action:"fixed"` with the same `reportId` and feedback describing what you
+  changed and why. Pair runs the configured verification, refuses (keeping the fix
+  open) if a required check fails, otherwise freezes your change as the new
+  checkpoint, advances the step and continues the worker with a note listing the
+  files you touched. A Main fix always completes the current step.
+- **Approve or cancel** as usual.
 
 ## Worker rules
 

@@ -48,6 +48,22 @@
     "maxReportedCostUsd": null,
     "maxOutputTokens": null
   },
+  "control": {
+    "watchdog": true,
+    "silentMs": 300000,
+    "pingTimeoutMs": 20000,
+    "toolMaxMs": 900000,
+    "stepNudgeMs": 1200000,
+    "maxAutoRecoveriesPerStep": 2,
+    "noReportNudges": 1,
+    "maxSteersPerStep": 6,
+    "providerCooldownMs": 60000,
+    "quotaCooldownMs": 900000,
+    "maxProviderWaits": 4,
+    "compactionMaxMs": 600000,
+    "mainHeartbeat": "off",
+    "mainHeartbeatMs": 900000
+  },
   "verification": {
     "commands": [],
     "requirePassing": true,

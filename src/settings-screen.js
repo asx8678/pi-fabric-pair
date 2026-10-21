@@ -153,6 +153,32 @@ class SettingsView {
         hint: `Commands Pair runs itself at every checkpoint, with your permissions (for example your tests). Enter opens the editor.${names.length ? ` Configured: ${names.join(', ')}.` : ''}` });
       rows.push({ id: 'autoDeliver', label: 'Deliver reports automatically', value: onOff(saved.autoDeliverReports), kind: 'toggle',
         hint: "On: each worker report reaches Main as soon as Main's current work is done. Off: Main collects reports with pair_yield, or send them with /pair yield." });
+      // Supervision: what Pair does on its own when the worker stalls, and how far it may go.
+      rows.push({ id: 'mainSupervision', label: 'Main supervision', value: onOff(saved.mainSupervision), kind: 'toggle',
+        hint: 'On: Pair tells Main when a task stops, and Main may recover it with pair_recover. Off: Main is told the facts but cannot resume; only the human can, with /pair resume.' });
+      rows.push({ id: 'maxMainRecoveries', label: 'Main recoveries per task', value: String(saved.maxMainRecoveries), kind: 'number',
+        hint: 'How many times Main may recover one task (0–20). One is given back each time it approves a step.' });
+      rows.push({ id: 'autoCheckIdle', label: 'Check in when Main is idle', value: onOff(saved.autoCheckIdle), kind: 'toggle',
+        hint: 'On: Pair asks idle Main to look at a task nobody is working on, and at reports it will not deliver by itself. Once per task state.' });
+      rows.push({ id: 'stepTimeout', label: 'Step time limit', value: minutesLabel(saved.limits.activeStepTimeoutMs), kind: 'number',
+        hint: 'Minutes a step may run before Pair pauses it for review. The watchdog nudges and, when it can, recovers before this is reached.' });
+      rows.push({ id: 'watchdog', label: 'Watchdog', value: onOff(saved.control.watchdog), kind: 'toggle',
+        hint: 'On: Pair itself re-prompts a run that ended without a report, nudges long steps, stops hung tools, restarts frozen workers and waits out provider limits — each within the budgets below.' });
+      rows.push({ id: 'silentMs', label: 'Silence before a ping', value: durationLabel(saved.control.silentMs), kind: 'number',
+        hint: 'How long a running worker may go without any event before Pair asks whether it is still alive. Twice this, the request is treated as stalled.' });
+      rows.push({ id: 'toolMaxMs', label: 'Tool time limit', value: durationLabel(saved.control.toolMaxMs), kind: 'number',
+        hint: 'How long one tool call may run before the watchdog stops it (watch modes, dev servers and interactive prompts never end).' });
+      rows.push({ id: 'stepNudgeMs', label: 'Step nudge', value: durationLabel(saved.control.stepNudgeMs), kind: 'number',
+        hint: 'How long a step may run before Pair asks the worker to report what is left. Once per step attempt; it does not pause anything.' });
+      rows.push({ id: 'maxAutoRecoveries', label: 'Watchdog recoveries per step', value: String(saved.control.maxAutoRecoveriesPerStep), kind: 'number',
+        hint: 'How many times the watchdog may restart a step on its own (0–20). Provider waits and nudges do not count.' });
+      rows.push({ id: 'compactionMaxMs', label: 'Compaction time limit', value: durationLabel(saved.control.compactionMaxMs), kind: 'number',
+        hint: 'How long a between-run compaction may take before Pair stops it. 0 refuses compaction outside a run. A generous limit lets a 1M-token worker compact instead of cancelling it.' });
+      rows.push({ id: 'mainHeartbeat', label: 'Main heartbeat', value: saved.control.mainHeartbeat, kind: 'choice',
+        options: [{ value: 'off', label: 'off', hint: 'Nothing extra is sent to Main.' }, { value: 'note', label: 'note', hint: 'One display-only line with the worker state, every interval.' }, { value: 'wake', label: 'wake', hint: 'A line and a short prompt asking Main to pair_peek and act only on problems.' }],
+        hint: 'While a task runs and Main is idle: how often Main is reminded of the worker, and whether that starts a turn.' });
+      rows.push({ id: 'mainHeartbeatMs', label: 'Heartbeat interval', value: durationLabel(saved.control.mainHeartbeatMs), kind: 'number',
+        hint: 'How often the heartbeat fires while a task runs. Off costs nothing.' });
       return rows;
     }
     if (page === 'display') {
@@ -462,6 +488,9 @@ class SettingsView {
     else if (row.id === 'autoDeliver') next.autoDeliverReports = on;
     else if (row.id === 'enabled') next.enabled = on;
     else if (row.id === 'autoStart') next.autoStart = on;
+    else if (row.id === 'mainSupervision') next.mainSupervision = on;
+    else if (row.id === 'autoCheckIdle') next.autoCheckIdle = on;
+    else if (row.id === 'watchdog') next.control.watchdog = on;
     else return;
     this.commit(next, row.label, onOff(on));
   }
@@ -510,6 +539,7 @@ class SettingsView {
     else if (row.id === 'policy') next.supervision.mode = /** @type {PairConfig['supervision']['mode']} */ (value);
     else if (row.id === 'detail') next.supervision.summaryDetail = /** @type {PairConfig['supervision']['summaryDetail']} */ (value);
     else if (row.id === 'indicator') next.indicator = /** @type {PairConfig['indicator']} */ (value);
+    else if (row.id === 'mainHeartbeat') next.control.mainHeartbeat = /** @type {PairConfig['control']['mainHeartbeat']} */ (value);
     else { this.refresh(); return; }
     this.commit(next, row.label, value);
   }
@@ -556,12 +586,34 @@ class SettingsView {
     if (!row) { this.cancelInput(); return; }
     const next = clone(this.session.saved), worker = this.nextWorker(next);
     if (row.kind === 'number') {
+      /** @type {[number, number]} */
       const [low, high] = row.id === 'stepFiles' ? [1, 1000] : [0, 20], value = Number(trimmed);
+      // The supervision rows are edited in seconds, minutes or hours and stored in milliseconds.
+      /** @type {Record<string, {unit: 'ms' | 'min' | 'minOrOff', low: number, high: number}>} */
+      const durations = { stepTimeout: { unit: 'min', low: 60000, high: 86400000 }, silentMs: { unit: 'ms', low: 10000, high: 3600000 },
+        toolMaxMs: { unit: 'ms', low: 60000, high: 86400000 }, stepNudgeMs: { unit: 'ms', low: 60000, high: 86400000 },
+        compactionMaxMs: { unit: 'minOrOff', low: 0, high: 86400000 }, mainHeartbeatMs: { unit: 'ms', low: 60000, high: 86400000 } };
+      const duration = durations[row.id];
+      if (duration) {
+        const ms = parseDuration(trimmed, duration.unit);
+        if (ms === null || ms < duration.low || ms > duration.high) {
+          this.session.status = `Enter a duration like 60 s, 5 min or 1 h (${Math.round(duration.low / 1000)}–${Math.round(duration.high / 1000)} s).`; this.session.tone = 'error'; this.refresh(); return;
+        }
+        if (row.id === 'stepTimeout') next.limits.activeStepTimeoutMs = ms;
+        // These row ids are exactly the millisecond fields of control.
+        else Reflect.set(next.control, row.id, ms);
+        this.mode = 'list'; this.input = null; this.editing = null;
+        this.commit(next, row.label, durationLabel(ms));
+        return;
+      }
       if (trimmed === '' || !Number.isInteger(value) || value < low || value > high) {
         this.session.status = `Enter a whole number from ${low} to ${high}.`; this.session.tone = 'error'; this.refresh(); return;
       }
       if (row.id === 'stepFiles') next.supervision.maxStepFiles = value;
-      else next.supervision.maxRevisions = value;
+      else if (row.id === 'revisions') next.supervision.maxRevisions = value;
+      else if (row.id === 'maxMainRecoveries') next.maxMainRecoveries = value;
+      else if (row.id === 'maxAutoRecoveries') next.control.maxAutoRecoveriesPerStep = value;
+      else { this.refresh(); return; }
       this.mode = 'list'; this.input = null; this.editing = null;
       this.commit(next, row.label, row.id === 'stepFiles' ? `${value} ${value === 1 ? 'file' : 'files'}` : String(value));
       return;
@@ -661,6 +713,28 @@ function prefilled(value, placeholder) {
   return input;
 }
 /** @param {ScreenModel | undefined} model @returns {readonly Effort[]} */
+/** @param {number} ms @returns {string} a duration in the unit that reads best (s, min or h) */
+function durationLabel(ms) {
+  const minutes = Math.round(ms / 60000);
+  if (ms >= 3600000 && ms % 3600000 === 0) return `${ms / 3600000} h`;
+  if (ms > 0 && ms < 60000) return `${Math.round(ms / 1000)} s`;
+  return `${minutes} min`;
+}
+/** @param {number} ms @returns {string} minutes, the unit the step limit is edited in */
+function minutesLabel(ms) { return `${Math.max(1, Math.round(ms / 60000))} min`; }
+/** Parse a duration the human typed back into milliseconds, in the unit the row shows. @param {string} value @param {'ms' | 'min' | 'minOrOff'} unit @returns {number | null} */
+function parseDuration(value, unit) {
+  const text = String(value).trim().toLowerCase().replace(/\s+/g, ' ');
+  if (unit === 'minOrOff' && (text === '0' || text === 'off')) return 0;
+  const match = /^(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)?$/.exec(text);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const suffix = match[2] || (unit === 'min' || unit === 'minOrOff' ? 'min' : 'min');
+  const factor = suffix.startsWith('s') ? 1000 : suffix.startsWith('h') ? 3600000 : 60000;
+  const ms = Math.round(amount * factor);
+  return Number.isSafeInteger(ms) && ms >= 0 ? ms : null;
+}
+/** @param {ScreenModel | undefined} model */
 function levelsFor(model) { return model ? supportedEfforts(model) : EFFORT_LEVELS; }
 /** @param {number} index @param {number} delta @param {number} length @returns {number} */
 function wrapIndex(index, delta, length) { return length ? ((index + delta) % length + length) % length : 0; }

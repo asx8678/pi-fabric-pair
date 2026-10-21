@@ -477,11 +477,117 @@ uses one. Pi stops 30 minutes after a session's last request. Fabric's
 paid opt-in for Main. Pair holds no leases and never changes Pi's settings. Pair's
 inference budgets exclude Main usage and warming.
 
+## Supervision, watchdog and steering
+
+Main owns review, but it is not the only thing watching the worker. Every scan asks
+the same questions in the same order, and each answer has a bounded, configurable
+action attached to it.
+
+**Liveness.** The runtime records the last event time (streaming deltas, tool updates,
+dialogs and appended entries all count), the oldest running tool with its start time,
+any provider retry in flight, the last provider error, and the start of a compaction.
+Pair projects that into one state per worker: `starting`, `streaming`, `tool`,
+`retrying`, `compacting`, `dialog`, `silent`, `idle` or `stopped`. `silent` means
+the task is running, the runtime says it is not idle, nothing has arrived for
+`control.silentMs`, and no tool, retry, compaction or dialog is in progress. The
+dashboard's activity line uses the same projection, so a busy worker reads `running
+bash 15m` and a genuinely quiet one reads "no activity".
+
+**What each scan checks.** After every scan, `pair_status` reports for each worker its
+liveness (state, last event age, tool in flight, retry, last provider error) alongside
+the task, and `pair_peek` adds the live detail: the step and its elapsed time, recent
+activity, its last words, context usage, and the steer and recovery budget left. The
+scan also:
+
+- delivers a finalized report, or holds it when the delivery cap is spent and asks
+  Main to `pair_yield` it instead;
+- checks a due provider retry (in the task, so it survives a restart);
+- pauses a step that reaches `limits.activeStepTimeoutMs` (30 min by default);
+- interrupts a run that ended without a report;
+- leaves a task unresolved but visible: idle Main is woken once per task state.
+
+**The recovery ladder.** Every rung below is recorded as a timeline note and a
+notification, and each is bounded. None of them touches a human pause, a spent cost or
+token budget, or an unconfirmed process exit.
+
+| Trigger (default) | Action | Budget | When the budget is spent |
+| --- | --- | --- | --- |
+| No `pair_report` at the end of a run | interrupt, then re-prompt the worker | 1 re-prompt per step (`control.noReportNudges`) | interrupt is held, human warned, Main supervised |
+| Step runs 20 min (`control.stepNudgeMs`) | steer: report what remains | once per step attempt, no recovery spent | hard pause below takes over |
+| One tool runs 15 min (`control.toolMaxMs`) | abort the tool, re-activate with guidance | 1 recovery | Main supervised |
+| No event for 5 min (`control.silentMs`) | one `get_state` ping | 1 ping per silence episode | — |
+| Ping unanswered | stop the process, restart, re-activate | 1 recovery | Main supervised, exit unconfirmed for the human |
+| Silent for 10 min but answering (2 × silentMs) | abort the stalled request, re-activate | 1 recovery | Main supervised |
+| Rate-limit or quota error with no report | wait, then resume on its own | 4 waits (`control.maxProviderWaits`); transient 60 s doubling to at most 15 min, quota 15 min | Main supervised |
+| Process gone, exit proven | re-activate with recovery guidance | 1 recovery | Main supervised |
+| Step reaches `activeStepTimeoutMs` (30 min) | pause for review | — | human decides |
+
+Automatic recoveries are capped at 2 per step (`control.maxAutoRecoveriesPerStep`);
+nudges and provider waits do not count against it. A crash, or an exit that cannot be
+proven to have happened, is never recovered automatically: `pair_recover` tries to
+prove it first, and otherwise the task stays held for you and `/pair reconcile`.
+
+**Compaction between runs.** Fabric compacts its worker context right after a run
+settles. Pair treats that compaction as maintenance, not stray work: it lets it finish
+(`control.compactionMaxMs`, 10 min by default; `0` refuses it) and the report settle
+clocks, checkpoint freezing and the next prompt all wait for it. Stopping it would mean
+a 1M-token worker never compacts and every request stays slow.
+
+**What reaches Main, and what reaches you.** Every stop reaches both.
+
+| Message | Sent when | To |
+| --- | --- | --- |
+| `FABRIC PAIR SUPERVISION` | a task stopped or stalled and Main may recover it | Main |
+| `FABRIC PAIR NOTICE` | the same, with `mainSupervision` off: facts only, no recovery | Main, without waking it |
+| `FABRIC PAIR CHECK` | idle Main has unfinished work, or Pair holds a report it will not deliver | Main |
+| `FABRIC PAIR HEARTBEAT` | opt-in, while a task runs and Main is idle | Main |
+| warning toast | every automatic stop, pause, wait, nudge and recovery | you |
+
+**Looking and steering.** `pair_peek({workerId})` reads a worker without disturbing
+it: live state, step and elapsed time, recent tool activity, its last words, context
+usage, and the steer and recovery budgets left. `pair_steer({workerId, taskId, message})` queues an
+instruction into the run that is already going — redirect it, or ask it to report now —
+fenced to the current running lease and bounded per step (`control.maxSteersPerStep`,
+6). `/pair steer <workerId> <text>` is the human's door to the same fence. Neither
+starts a run or cancels one; do not poll them.
+
+**Caps scale with the plan.** `policy.maxRevisions` (20) and
+`limits.maxReportsPerTask` (40) are floors, not ceilings: a task gets at least two
+revisions per step and enough deliveries for every step's per-step allowance
+(`maxRevisionsPerStep` + 2 each), so a long plan cannot stall on a cap written for a
+short one. The dashboard and `pair_status` show the effective numbers.
+
+**Escaping a step limit.** At a step's per-step revision limit (3 by default) Main can
+re-plan that step — `pair_decide` `revise` with `steps` that replace it, at most twice
+per step position — or fix it directly: `action: "fix"` hands the workspace to Main,
+and `action: "fixed"` runs the configured verification, freezes the result and
+continues the worker with a note listing the files Main changed.
+
+**The heartbeat** is opt-in and off by default. `control.mainHeartbeat: "note"`
+appends one display-only line every `control.mainHeartbeatMs` (15 min) while a task
+runs and Main is idle — state, step, step time, last event age and context — and
+`"wake"` also starts a turn asking Main to `pair_peek` and act only on problems.
+
+**Where the settings live.** Everything above is in `/pair settings` → Review:
+Main supervision, Main recoveries per task, Check in when Main is idle, Step time
+limit, Watchdog, Silence before a ping, Tool time limit, Step nudge, Watchdog
+recoveries per step, Compaction time limit, Main heartbeat and Heartbeat interval.
+They are stored under `control` in [the config](fabric-pair.example.json) and none of
+them changes `configHash()`, so tuning them never interrupts a running worker.
+
 ## More details
 
 Pair provides workflow controls; OS and tool permissions remain your security
-boundary. Unattended operation, automatic crash recovery, and multiple writers
-are outside this MVP.
+boundary. Bounded automatic recovery exists (see above): each rung has a configurable
+budget, is recorded in the task timeline and reaches either Main or you. Unattended
+operation without any human — multiple concurrent writers included — remains outside
+this MVP.
+
+A worker model with a ~1M-token context compacts late, so its requests get slower and
+more expensive for a long time before Fabric's threshold fires. Lower the threshold
+with Pi's `compaction.modelOverrides` rather than waiting for it, and keep
+`control.compactionMaxMs` generous enough for the compaction to finish.
+
 
 `npm test` runs the repository's own suites (plain `node --test` over
 `test/**/*.test.js`; nothing outside `test/` is collected) offline, in temporary

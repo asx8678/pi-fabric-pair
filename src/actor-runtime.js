@@ -11,7 +11,7 @@ import { checkReadiness, meshRootFor } from './native.js';
 /** @typedef {import('./rpc.js').RpcExit} RpcExit */
 /** @typedef {import('./contracts.js').WorkerSpec} WorkerSpec */
 /** @typedef {import('./contracts.js').StoredProbeV1} Probe */
-/** @typedef {{runtime: {startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number, mcp?: boolean}, requirements: {fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}}} RuntimeConfig */
+/** @typedef {{runtime: {startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number, mcp?: boolean}, requirements: {fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}, control?: {compactionMaxMs?: number}}} RuntimeConfig */
 /** @typedef {{taskId: string, attemptId: string, leaseId: string, workerGeneration: number}} ActivationIdentity */
 /** @typedef {Readonly<ActivationIdentity & {serial: number}>} Activation */
 /** @typedef {{token: Activation, controller: AbortController, prepared: boolean, attempted: boolean, accepted: boolean, settled: boolean}} ActivationState */
@@ -33,6 +33,8 @@ const MAX_TIMEOUT = 300_000, UI_TIMEOUT = 120_000;
 function promptTaken(data, expected) { return isRpcRecord(data) && data.disposition === expected; }
 /** @param {unknown} data */
 function disposition(data) { return isRpcRecord(data) && typeof data.disposition === 'string' ? data.disposition : 'unknown'; }
+/** Events a between-lease compaction may raise: compaction_start/end and the summarization retries inside it. */
+const MAINTENANCE_EVENTS = new Set(['compaction_start', 'compaction_end', 'summarization_retry_scheduled', 'summarization_retry_attempt_start', 'summarization_retry_finished']);
 const THINKING = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const COMPACTION_REASONS = new Set(['manual', 'threshold', 'overflow']);
 
@@ -297,7 +299,7 @@ export class PiRuntime {
   /** @type {RuntimeState | null} */ #state = null;
   /** @type {string | null} */ #fault = null;
   /** @type {RpcExit | null} */ #exit = null;
-  /** @type {Map<string, string>} */ #tools = new Map();
+  /** @type {Map<string, {name: string, startedAt: number}>} */ #tools = new Map();
   /** @type {Map<string, Dialog>} */ #dialogs = new Map();
   /** @type {RuntimeObservation[]} */ #observations = [];
   /** @type {Map<string, number>} */ #compactions = new Map();
@@ -308,6 +310,14 @@ export class PiRuntime {
   #ready = false; #started = false; #provenUnspawned = false; #closing = false; #revokedStartup = false;
   #streaming = false; #unsettled = false; #retrying = false; #summaryRetrying = false; #overflowRecovery = false;
   #steering = 0; #followUp = 0; #idleKnown = false; #promptPending = false; #bridge = false; #rejecting = false; #reportSettling = false; #settledAborted = false;
+  // Liveness: when anything last arrived, the provider retry in flight, the last provider error and how long a compaction has run.
+  #lastEventAt = 0;
+  /** @type {{attempt: number | null, maxAttempts: number | null, delayMs: number | null, errorMessage: string | null, at: number} | null} */ #retry = null;
+  /** @type {{message: string, at: number, source: 'assistant' | 'retry' | 'compaction'} | null} */ #lastError = null;
+  /** @type {Map<string, number>} */ #compactingSince = new Map();
+  // A compaction between leases is Fabric's maintenance, not a stray run: it is allowed to finish.
+  #maintenanceCompaction = false;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */ #compactionTimer;
   /** @type {Set<string>} */ #strayTools = new Set();
   #startupController = new AbortController();
   /** @type {Set<() => void>} */ #waiters = new Set();
@@ -335,7 +345,9 @@ export class PiRuntime {
   get fault() { return this.#fault; }
   get exit() { return this.#exit; }
   get permission() { return this.#dialogs.size > 0; }
-  get currentTool() { return this.#tools.values().next().value || null; }
+  get currentTool() { return this.#tools.values().next().value?.name || null; }
+  /** The last provider error the worker reported, cleared when a new activation is accepted. */
+  get lastError() { return this.#lastError; }
 
   #wake() {
     for (const wake of this.#waiters) wake();
@@ -625,10 +637,51 @@ export class PiRuntime {
       // No run follows a prompt an inherited extension's input handler or command consumed, so no agent_settled either.
       if (!promptTaken(sent, 'started')) throw new RpcUncertainError(`The worker's Pi did not start a run for the work prompt (prompt ${disposition(sent)}); an inherited extension probably consumed it. List it in runtime.excludeExtensions.`);
       active.accepted = true;
+      // A new run supersedes the previous failure: it is history, not the current state.
+      this.#lastError = null;
     } catch (error) {
       this.#assertCurrent(activation); this.#hold(error); throw error;
     }
     finally { this.#promptPending = false; this.#wake(); }
+  }
+  /**
+   * Queue a steer into the run that is going, addressed by identity rather than by token.
+   *
+   * The controller never holds this runtime's activation token (only the reservation that minted it does), so
+   * it names the work and the runtime matches that against its own current token. The fence is exactly as
+   * strong: the identity must be the current, accepted, unsettled activation or nothing is sent, and the send
+   * itself goes through #send with the runtime's real token.
+   * @param {{taskId: string, attemptId: string, leaseId: string, workerGeneration: number}} identity
+   * @param {string} message
+   * @returns {Promise<'queued' | 'unknown'>}
+   */
+  async steerCurrent(identity, message) {
+    this.#assertCurrent(null);
+    const active = this.#activation;
+    requireValue(active && active.accepted && !active.settled, 'STEER_REFUSED: no accepted, unsettled activation to steer');
+    const token = active.token;
+    requireValue(token.taskId === identity.taskId && token.attemptId === identity.attemptId && token.leaseId === identity.leaseId && token.workerGeneration === identity.workerGeneration,
+      'STEER_REFUSED: the current activation belongs to a different task, attempt or lease');
+    return this.steer(token, message);
+  }
+  /**
+   * Queue a message into the run that is already going, the way a human typing during a run would.
+   *
+   * A steer never starts work: it is refused unless this activation is current, its prompt was accepted and
+   * the run has not settled. Nothing is written when there is no lease to write into.
+   * @param {Activation} activation @param {string} message
+   * @returns {Promise<'queued' | 'unknown'>}
+   */
+  async steer(activation, message) {
+    this.#assertCurrent(activation);
+    const active = this.#activation;
+    requireValue(active && active === this.#activation && active.accepted && !active.settled, 'STEER_REFUSED: no accepted, unsettled activation to steer');
+    requireValue(typeof message === 'string' && message.trim().length > 0 && message.length <= 6000, 'Steer message must be 1–6000 characters');
+    requireValue(!this.#lifecycleIdle(), 'STEER_REFUSED: the worker is idle; a steer never starts a run');
+    const result = await this.#rpc.send('steer', { message }, this.#requestTimeout(), { signal: active.controller.signal, guard: () => this.#current(activation) && !!this.#activation?.accepted && !this.#activation.settled });
+    this.#assertCurrent(activation);
+    // The worker's own queue_update events follow; queue bookkeeping stays the worker's word, not an assumption.
+    return promptTaken(result, 'queued') ? 'queued' : 'unknown';
   }
   /** @param {string} reason */
   revoke(reason) {
@@ -646,7 +699,11 @@ export class PiRuntime {
       pendingMessageCount: Math.max(this.#steering + this.#followUp, this.#state?.pendingMessageCount || 0), steering: this.#steering, followUp: this.#followUp,
       tools: this.#tools.size, dialogs: this.#dialogs.size, displayedDialog: this.#displayed, permission: this.permission, currentTool: this.currentTool,
       activation: this.#activation?.token || null, accepted: this.#activation?.accepted || false, awaitingSettlement: this.#unsettled, promptPending: this.#promptPending,
-      settledSequence: this.settledSequence, settledAt: this.settledAt, settledAborted: this.#settledAborted, fault: this.fault, exit: this.exit });
+      settledSequence: this.settledSequence, settledAt: this.settledAt, settledAborted: this.#settledAborted, fault: this.fault, exit: this.exit,
+      // Liveness for supervision: no paths, no pids beyond the one this runtime already exposes.
+      lastEventAt: this.#lastEventAt || null, tool: this.#oldestTool(), retry: this.#retry || null, lastError: this.#lastError,
+      compactingSince: this.#compactingSince.size ? Math.min(...this.#compactingSince.values()) : null,
+      maintenanceCompaction: this.#maintenanceCompaction });
   }
   /** @returns {RuntimeObservation[]} */
   takeObservations() {
@@ -660,9 +717,61 @@ export class PiRuntime {
     if (this.#observations.length >= OBS_COUNT || this.#observationBytes + bytes > OBS_BYTES) { this.#hold(new RpcUncertainError('Runtime observation capacity exceeded; activation held')); return; }
     this.#observations.push(event); this.#observationBytes += bytes; this.#wake();
   }
+  /**
+   * Keep the last provider error, whatever the event looked like: an odd or missing field never faults the runtime.
+   * @param {unknown} value @param {'assistant' | 'retry' | 'compaction'} source
+   */
+  #noteError(value, source) {
+    const message = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, 2000) : '';
+    if (message) this.#lastError = { message, at: Date.now(), source };
+  }
+  /** @param {unknown} value @param {number} [fallback] @returns {number | null} a bounded positive integer, or null */
+  #retryNumber(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 && n <= 1e9 ? Math.trunc(n) : (fallback === undefined ? null : fallback);
+  }
+  /**
+   * How long a between-run compaction may take, or 0 when the allowance is off.
+   * @returns {number}
+   */
+  #maintenanceAllowance() {
+    const value = this.#options.config.control?.compactionMaxMs;
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+  }
+  /** Whether a compaction outside a lease is maintenance here. @returns {boolean} */
+  #maintenanceAllowed() { return this.#maintenanceAllowance() > 0; }
+  /** Start (or refresh) the maintenance deadline: past it the compaction is stopped and reported. */
+  #armCompactionDeadline() {
+    const allowance = this.#maintenanceAllowance();
+    clearTimeout(this.#compactionTimer); this.#compactionTimer = undefined;
+    if (!allowance || !this.#maintenanceCompaction) return;
+    this.#compactionTimer = setTimeout(() => {
+      this.#compactionTimer = undefined;
+      if (!this.#maintenanceCompaction || !this.#compactions.size) return;
+      // Bounded maintenance: stop it and say so, rather than letting a stuck compaction hold the worker forever.
+      this.#enqueue({ type: 'notify', at: Date.now(), error: `A between-run compaction ran longer than ${Math.round(allowance / 1000)}s; Pair stopped it. The next run continues from an uncompacted context.`, notifyType: 'warning' });
+      this.#maintenanceCompaction = false;
+      void (async () => {
+        try {
+          await this.#rpc.send('abort', {}, this.#requestTimeout(), { control: true, guard: () => this.#current(null, true) });
+        } catch (error) { this.#hold(error); }
+        finally { this.#wake(); }
+      })();
+    }, allowance);
+    this.#compactionTimer.unref?.();
+  }
+  /** The oldest running tool, i.e. the one most likely to be stuck. @returns {{name: string, startedAt: number} | null} */
+  #oldestTool() {
+    /** @type {{name: string, startedAt: number} | null} */
+    let oldest = null;
+    for (const tool of this.#tools.values()) if (!oldest || tool.startedAt < oldest.startedAt) oldest = tool;
+    return oldest;
+  }
   /** @param {RecordValue} event */
   #observe(event) {
     const type = String(event.type);
+    // Every event is activity, including streaming deltas, tool updates, dialogs and appended entries.
+    this.#lastEventAt = Date.now();
     if (!['message_update', 'tool_execution_update', 'extension_ui_request', 'entry_appended', 'session_info_changed'].includes(type)) this.#revision++;
     const activity = /^(agent_|turn_|message_|tool_execution_|compaction_|auto_retry_|summarization_retry_)/.test(type);
     if (type === 'extension_error') {
@@ -672,7 +781,11 @@ export class PiRuntime {
       this.#hold(new RpcUncertainError(`Worker extension_error: ${reasonOf(event.error)}`)); return;
     }
     const startsWork = ['agent_start', 'turn_start', 'tool_execution_start', 'compaction_start', 'auto_retry_start', 'summarization_retry_scheduled', 'summarization_retry_attempt_start'].includes(type);
-    const unauthorizedActivity = (activity && this.#bridge) || (startsWork && !this.#closing && !this.#abortPromise && (!this.#activation?.attempted || this.#activation.settled || !this.#current(this.#activation.token)));
+    // Agent work needs a live lease. Compaction between leases is maintenance (Fabric compacts right after a
+    // run settles), so with the allowance on it is neither rejected nor aborted — only bounded by control.compactionMaxMs.
+    const outsideLease = !this.#closing && !this.#abortPromise && (!this.#activation?.attempted || this.#activation.settled || !this.#current(this.#activation.token));
+    const compactionMaintenance = MAINTENANCE_EVENTS.has(type) && outsideLease && this.#maintenanceAllowed();
+    const unauthorizedActivity = (activity && this.#bridge) || (startsWork && outsideLease && !compactionMaintenance);
     const activityError = () => this.#rejectActivity(type, event);
     if (type === 'extension_ui_request') { this.#handleUI(event); return; }
     /** @type {RuntimeObservation} */ const observation = { type, at: Date.now() };
@@ -691,6 +804,8 @@ export class PiRuntime {
       case 'compaction_start': {
         requireValue(typeof event.reason === 'string' && COMPACTION_REASONS.has(event.reason), 'Invalid compaction reason');
         this.#compactions.set(event.reason, (this.#compactions.get(event.reason) || 0) + 1); this.#idleKnown = false; observation.reason = event.reason;
+        if (!this.#compactingSince.has(event.reason)) this.#compactingSince.set(event.reason, Date.now());
+        if (compactionMaintenance) { this.#maintenanceCompaction = true; this.#armCompactionDeadline(); }
         if (this.#state) this.#state = { ...this.#state, isCompacting: true }; break;
       }
       case 'compaction_end': {
@@ -700,13 +815,27 @@ export class PiRuntime {
         const exhausted = n === 0 && this.#overflowRecovery && event.reason === 'overflow' && event.result === undefined && event.aborted === false && event.willRetry === false && text(event.errorMessage);
         requireValue(n > 0 || exhausted, 'Unmatched compaction end');
         if (n === 1) this.#compactions.delete(event.reason); else if (n > 1) this.#compactions.set(event.reason, n - 1);
+        if (!this.#compactions.has(event.reason)) this.#compactingSince.delete(event.reason);
+        if (!this.#compactions.size) { this.#maintenanceCompaction = false; clearTimeout(this.#compactionTimer); this.#compactionTimer = undefined; }
+        if (typeof event.errorMessage === 'string' && event.errorMessage) this.#noteError(event.errorMessage, 'compaction');
         if (event.willRetry) { this.#unsettled = true; if (event.reason === 'overflow') this.#overflowRecovery = true; }
         if (typeof event.errorMessage === 'string') observation.error = event.errorMessage.slice(0, 2000);
         observation.reason = event.reason;
         if (this.#state) this.#state = { ...this.#state, isCompacting: this.#compactions.size > 0 }; break;
       }
-      case 'auto_retry_start': this.#retrying = true; this.#unsettled = true; this.#idleKnown = false; break;
-      case 'auto_retry_end': this.#retrying = false; break;
+      case 'auto_retry_start':
+        this.#retrying = true; this.#unsettled = true; this.#idleKnown = false;
+        // What the provider said and how long Pi will wait are only useful while the retry is in flight.
+        this.#retry = { attempt: this.#retryNumber(event.attempt), maxAttempts: this.#retryNumber(event.maxAttempts), delayMs: this.#retryNumber(event.delayMs),
+          errorMessage: typeof event.errorMessage === 'string' ? event.errorMessage.replace(/\s+/g, ' ').trim().slice(0, 500) || null : null, at: Date.now() };
+        if (this.#retry.errorMessage) this.#noteError(this.#retry.errorMessage, 'retry');
+        break;
+      case 'auto_retry_end':
+        this.#retrying = false;
+        // A failed retry series is the provider's final word; a successful one clears the transient text it replaced.
+        if (event.success === false) this.#noteError(typeof event.finalError === 'string' ? event.finalError : (this.#retry?.errorMessage ?? ''), 'retry');
+        else if (this.#lastError?.source === 'retry') this.#lastError = null;
+        this.#retry = null; break;
       case 'summarization_retry_scheduled': this.#summaryRetrying = true; this.#idleKnown = false; break;
       case 'summarization_retry_attempt_start':
         requireValue(event.source === 'branchSummary' || (event.source === 'compaction' && typeof event.reason === 'string' && COMPACTION_REASONS.has(event.reason)), 'Invalid summarization retry source');
@@ -721,9 +850,9 @@ export class PiRuntime {
       case 'tool_execution_start':
         requireValue(text(event.toolCallId) && text(event.toolName) && !this.#tools.has(event.toolCallId), 'Invalid/duplicate tool start');
         requireValue(this.#tools.size < TOOL_COUNT, 'Runtime tool capacity exceeded');
-        this.#tools.set(event.toolCallId, event.toolName); this.#idleKnown = false; observation.toolCallId = event.toolCallId; observation.toolName = event.toolName; break;
+        this.#tools.set(event.toolCallId, { name: event.toolName, startedAt: Date.now() }); this.#idleKnown = false; observation.toolCallId = event.toolCallId; observation.toolName = event.toolName; break;
       case 'tool_execution_end': {
-        requireValue(text(event.toolCallId) && this.#tools.has(event.toolCallId) && event.toolName === this.#tools.get(event.toolCallId), 'Unmatched/mismatched tool end');
+        requireValue(text(event.toolCallId) && this.#tools.get(event.toolCallId)?.name === event.toolName, 'Unmatched/mismatched tool end');
         requireValue(typeof event.isError === 'boolean', 'Invalid tool outcome');
         validateContent(record(event.result, 'Tool result').content, 'toolResult');
         this.#tools.delete(event.toolCallId); observation.toolCallId = event.toolCallId;
@@ -738,6 +867,8 @@ export class PiRuntime {
       case 'message_end': {
         const message = record(event.message, 'Message event');
         if (message.role !== 'assistant') return;
+        // The common shape of a provider failure in this setup: the turn ends with stopReason 'error'.
+        if (message.stopReason === 'error') this.#noteError(message.errorMessage, 'assistant');
         observation.message = { role: 'assistant', usage: usageOf(message.usage) }; break;
       }
       case 'turn_start': this.#idleKnown = false; break;
@@ -864,6 +995,19 @@ export class PiRuntime {
     try { await this.#waitIdle(graceMs, null); } catch { await this.abortCurrent(reason); }
     finally { this.#reportSettling = false; }
   }
+  /**
+   * Check that the process still answers, without touching the run: a get_state on the control path, the same
+   * way abortCurrent issues its own control requests. Used by the watchdog to tell a quiet worker from a dead one.
+   * @param {number} [timeoutMs]
+   * @returns {Promise<boolean>} whether the worker answered
+   */
+  async ping(timeoutMs) {
+    if (this.closed || !this.ready) return false;
+    try {
+      await this.#rpc.send('get_state', {}, boundedTimeout(timeoutMs, this.#requestTimeout()), { control: true, guard: () => this.#current(null, true) });
+      return true;
+    } catch { return false; }
+  }
   /** @param {string} reason @returns {Promise<void>} */
   abortCurrent(reason) {
     this.revoke(reason);
@@ -894,6 +1038,7 @@ export class PiRuntime {
   /** @param {string} reason @returns {Promise<void>} */
   abortAndStop(reason) {
     this.revoke(reason); this.#closing = true; this.#ready = false;
+    clearTimeout(this.#compactionTimer); this.#compactionTimer = undefined; this.#maintenanceCompaction = false;
     if (this.#stopPromise) return this.#stopPromise;
     this.#stopPromise = Promise.resolve().then(async () => {
       if (!this.#started) { this.#provenUnspawned = true; this.#exit = { code: null, signal: null, expected: true, error: null, spawnFailed: true }; this.#wake(); return; }

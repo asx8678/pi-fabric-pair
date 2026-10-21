@@ -14,7 +14,60 @@ history incrementally.
   `controller-restart`, `controller-scan-recovery`, `efficiency`,
   `evidence-deletion`, `evidence-replacement`, `handoff-safety`, `main-settings`,
   `message-cards`, `native-profile`, `removed-limits`, `rpc-framing`,
-  `runtime-startup`, `worker-speed`.
+  `liveness`, `peek-steer`, `runtime-startup`, `step-limit-escape`,
+  `supervision-notices`, `watchdog-core`, `worker-speed`.
+- `heartbeat-docs`: the opt-in Main heartbeat (off adds nothing; `note` appends one
+  display-only line with state, step, step time, event age and context; `wake` also
+  starts a turn), that every supervision setting has an editable `/pair settings` row,
+  and that the example config documents `control.mainHeartbeat` and
+  `control.compactionMaxMs`.
+- `provider-recover`: the provider error classifier (quota vs transient, exponential
+  backoff capped at 15 min, bounded waits per step), a scheduled retry that survives a
+  Main restart (checked over retained records, so it fires for a record parked in
+  `error` and with no live handle at all), escalation when the waits are spent, a
+  crash recovered only with a proven exit, `pair_recover` proving the exit before refusing or proceeding, the
+  per-approved-step recovery refill, and the liveness/provider error in a supervision
+  notice.
+- `watchdog-hangs`: a tool past `control.toolMaxMs` is stopped and the step
+  re-activated with guidance (and a tool in flight is never treated as silence); a
+  frozen worker (no answer to `get_state`) is stopped and re-activated; a silent but
+  responsive one gets exactly one ping per episode and is aborted at 2 x `silentMs`;
+  once recoveries are spent Main is supervised; none of it fires while a report
+  settles, a checkpoint is frozen or a latch exists; `PiRuntime.ping` answers through
+  the control path; and the live badge shows a running tool's duration.
+- `compaction-window`: a between-run compaction (Fabric compacts right after a
+  run settles) is maintenance, not stray agent work: it is not aborted, no
+  "began without a Pair lease" notice is sent, agent work outside a lease is still
+  rejected, `control.compactionMaxMs` bounds it (and 0 restores the old refusal),
+  retained-history verification accepts a between-lease compaction entry and still
+  refuses any other, the settle clocks and checkpoint freezing wait for it, the next
+  activation waits before prompting, and the dashboard says "compacting".
+- `watchdog-core`: the `control` settings (defaults, bounds, and that they never
+  change `configHash()`), `autoRecover` (bounded per step; refuses human pauses,
+  spent budgets and unconfirmed exits; records a timeline note and a toast), the
+  missing-report re-prompt then escalation, the soft step nudge once per step
+  (steered with `by: 'watchdog'`, never spending a recovery, once per step
+  attempt), the pending-retry CHECK suppression, and that old state without
+  `t.watchdog` loads. Two are ordering tests: the re-prompt resume runs only
+  after `scheduleScan`'s containment jobs have settled (slow `abortCurrent`,
+  real sequencing, no stubbed resume), and a revised attempt of the same step
+  gets its own nudge.
+- `peek-steer`: `pair_peek` (bounded, no RPC) and `pair_steer` (fenced to the
+  current running lease, bounded per step, recorded in the timeline), their schemas
+  and registration, and `/pair steer`. Three of them drive a real `PiRuntime`
+  over an in-process fake host, so the activation fence is exercised as it is in
+  production: a mid-run steer reaches the host, a previous attempt and a settled run
+  are refused with no `steer` command sent.
+- `liveness`: the runtime's last event, running tool, provider retry, last error and
+  compaction start; the pure `classifyLiveness` projection (including `silent`), its
+  presence in `pair_status`/`summary()`, the provider error in the no-report
+  interruption, and the stale warning ignoring tools and retries.
+- `supervision-notices`: scaled per-task caps, the pure delivery predicate, Main
+  checks for reports Pair will not deliver itself, the once-per-state idle wake,
+  the human toasts and the supervision-off notice.
+- `step-limit-escape`: re-planning a step past its per-step revision limit, and
+  Main's own fix of a step (`fix` → edit → `fixed`) including the verification
+  refusal, the fencing and the worker continuation note.
 
 ## History
 

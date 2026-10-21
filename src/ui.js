@@ -5,6 +5,7 @@ import { INDICATORS, validateConfig } from './config.js';
 import { EFFORT_LEVELS } from './contracts.js';
 import { validateUsageObservation } from './observations.js';
 import { DEFAULT_CACHE_LIFETIME_S, FABRIC_CACHE_VERSION } from './native.js';
+import { livenessActive } from './liveness.js';
 
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} UIContext */
 /** @typedef {Readonly<ReturnType<import('./controller.js').PairController['summary']>>} PairSummary */
@@ -81,6 +82,9 @@ const BOARD_ROW_CAP = 8;
 const ROW_TITLE_MIN = 16;
 /** @param {PairSummary['workers'][number]} worker @param {number} [now] @returns {number} */
 function activityAge(worker, now = Date.now()) {
+  // The runtime sees every event (including streaming deltas), so its last-event age is fresher than the
+  // telemetry file, which the worker only rewrites at turn/tool/message boundaries.
+  if (typeof worker.liveness?.lastEventAgoMs === 'number' && Number.isFinite(worker.liveness.lastEventAgoMs)) return Math.max(0, worker.liveness.lastEventAgoMs);
   const last = Math.max(worker.observation?.at || 0, worker.lastExchange?.at || 0);
   return last > 0 ? Math.max(0, now - last) : 0;
 }
@@ -95,6 +99,9 @@ export function ageLabel(ageMs) {
 export function staleWorkers(summary, now = Date.now()) {
   return summary.workers
     .filter(w => ['working', 'settling', 'starting'].includes(w.status) && activityAge(w, now) >= STALE_AGE_MS)
+    // A running tool, a provider retry, a compaction or a dialog is progress, not silence: those are never stale,
+    // whatever the age. A worker without liveness keeps the old telemetry-only behaviour.
+    .filter(w => !w.liveness || !['tool', 'retrying', 'compacting', 'dialog'].includes(String(w.liveness.state)))
     .map(w => ({ id: w.id, ageMs: activityAge(w, now) }));
 }
 
@@ -205,7 +212,7 @@ export function workerState(summary, w, mainBusy, now = Date.now()) {
   // Escalations the worker cannot clear itself; each one is raised into details and the badge reason.
   const alerts = [
     ...(t?.limitNotice ? [{ text: `⚠ ${t.limitNotice}`, color: /** @type {const} */ ('warning') }] : []),
-    ...(t && limits?.maxRevisionsPerStep !== null && limits?.maxRevisionsPerStep !== undefined && (t.stepRevisions ?? 0) >= limits.maxRevisionsPerStep ? [{ text: `⚠ step revision limit reached (${t.stepRevisions}/${limits.maxRevisionsPerStep})`, color: /** @type {const} */ ('warning') }] : []),
+    ...(t && limits?.maxRevisionsPerStep !== null && limits?.maxRevisionsPerStep !== undefined && (t.stepRevisions ?? 0) >= limits.maxRevisionsPerStep ? [{ text: `⚠ step revision limit reached (${t.stepRevisions}/${limits.maxRevisionsPerStep}) — Main can re-plan or fix it`, color: /** @type {const} */ ('warning') }] : []),
     ...(t?.lastVerification?.some(check => !check.passed) ? [{ text: `⚠ Pair verification failed: ${t.lastVerification.filter(check => !check.passed).map(check => check.name).join(', ')}`, color: /** @type {const} */ ('warning') }] : [])
   ];
   const title = t ? inline(t.stepList?.find(s => ['active', 'review', 'held'].includes(s.state))?.title, 400) : '';
@@ -240,17 +247,21 @@ export function workerState(summary, w, mainBusy, now = Date.now()) {
   if (t && ['running', 'awaiting_settle'].includes(t.status) && ['working', 'settling', 'starting', 'ready'].includes(w.status)) {
     const finishing = t.status === 'awaiting_settle' || w.status === 'settling';
     const verb = finishing ? 'finishing' : t.lastDecision === 'revise' ? 'revising' : t.lastDecision === 'answer' ? 'continuing' : 'working on';
-    const age = activityAge(w, now), obs = w.observation, percent = obs?.context?.percent;
-    const activity = obs?.compacting ? 'compacting its context' : activityLabel(obs?.currentTool, obs && 'currentTarget' in obs ? /** @type {string | null | undefined} */ (obs.currentTarget) : null);
+    const age = activityAge(w, now), obs = w.observation, percent = obs?.context?.percent, live = w.liveness;
+    // A running tool, a provider retry or a compaction is progress: say so instead of calling the worker stale.
+    // A tool's duration is shown too: a hung tool must be visible before the watchdog has to stop it.
+    const busy = live ? (live.tool ? `running ${live.tool.name} ${compactAge(live.tool.forMs)}` : live.retry ? `provider retry ${live.retry.attempt ?? '?'}/${live.retry.maxAttempts ?? '?'}` : live.state === 'compacting' ? 'compacting its context' : live.state === 'dialog' ? 'asking for permission' : null) : null;
+    const stalled = live ? !livenessActive(live.state) && age >= STALE_AGE_MS : age >= STALE_AGE_MS;
+    const activity = busy || (obs?.compacting ? 'compacting its context' : activityLabel(obs?.currentTool, obs && 'currentTarget' in obs ? /** @type {string | null | undefined} */ (obs.currentTarget) : null));
     const base = { active: true, details: [
       ...(title ? [d(title, 'text')] : []),
-      ...(age >= STALE_AGE_MS ? [d(`no activity for ${ageLabel(age)}`, 'warning')] : activity ? [d(activity, 'accent')] : []),
+      ...(stalled ? [d(`no activity for ${ageLabel(age)}`, 'warning')] : activity ? [d(activity, 'accent')] : []),
       // Only a measured speed: an empty detail would render as a trailing separator.
       ...(speedLabel(observedSpeed(obs)) ? [d(speedLabel(observedSpeed(obs)))] : []),
       ...(typeof percent === 'number' && percent > 75 ? [d(`context ${Math.round(percent)}%`, percent > 90 ? 'error' : 'warning')] : []),
       ...cost] };
     // A silent worker needs the human, so it is not merely 'working'.
-    if (age >= STALE_AGE_MS) return state('attention', '!', 'warning', `idle ${compactAge(age)}`, `Worker idle ${ageLabel(age)}`, { ...base, reason: `no activity ${compactAge(age)}`, next: '/pair transcript' });
+    if (stalled) return state('attention', '!', 'warning', `idle ${compactAge(age)}`, `Worker idle ${ageLabel(age)}`, { ...base, reason: `no activity ${compactAge(age)}`, next: '/pair transcript' });
     return unlessYield(state('working', '◉', 'success', verb, `Worker ${verb} step ${t.step}/${t.steps}`, { ...base, details: [...alerts, ...base.details], ...(alerts.length ? { reason: alerts[0].text.replace(/^⚠ /, '') } : {}) }));
   }
   if (t?.status === 'question') return unlessYield(state('waiting', '◐', 'accent', 'question', `Question for Main · step ${t.step}/${t.steps}`, { details: [withMain('answering'), ...cost] }));
@@ -1107,6 +1118,11 @@ function nextWorker(summary, workerId) {
  */
 export function timelineLine(entry) {
   const step = Math.max(1, Math.trunc(entry.step));
+  if (entry.type === 'note') {
+    // A note is one line: who touched the step and why, never more.
+    const label = entry.kind === 'main-fix' ? 'Main fixed this step' : entry.kind === 'steer' ? 'steered' : entry.kind;
+    return { step, color: /** @type {const} */ ('accent'), text: `✎ ${label}${entry.text ? `: ${entry.text}` : ''}` };
+  }
   if (entry.type === 'report') {
     // A report is a checkpoint, question, blocker or final review; Pair's own checks ride with it.
     const label = kindLabel(entry.kind);

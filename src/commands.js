@@ -6,7 +6,7 @@
 /** @typedef {{value: string, label: string, description: string}} PairCompletion */
 
 /** The /pair subcommands, in the order completion lists them. @type {readonly string[]} */
-export const PAIR_COMMANDS = ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'yield', 'reconcile', 'indicator', 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup'];
+export const PAIR_COMMANDS = ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'steer', 'yield', 'reconcile', 'indicator', 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup'];
 
 /** @type {Record<string, string>} */
 const COMMAND_DESCRIPTION = {
@@ -21,6 +21,7 @@ const COMMAND_DESCRIPTION = {
   pause: 'Pause the task and hold the worker',
   resume: 'Resume a paused or interrupted task',
   cancel: 'Cancel the task and keep the conversation',
+  steer: 'Send a running worker an instruction without cancelling',
   yield: 'Send retained reports to Main now',
   reconcile: 'Prove an old worker process exited',
   indicator: 'Choose the footer badge and live line',
@@ -32,7 +33,7 @@ const COMMAND_DESCRIPTION = {
 };
 
 /** Subcommands whose second token is a worker ID. */
-export const WORKER_COMMANDS = ['start', 'stop', 'pause', 'resume', 'cancel', 'restart', 'report', 'diff', 'transcript', 'reconcile', 'reset-worker'];
+export const WORKER_COMMANDS = ['start', 'stop', 'pause', 'resume', 'cancel', 'steer', 'restart', 'report', 'diff', 'transcript', 'reconcile', 'reset-worker'];
 
 /** @type {Record<string, string>} */
 export const INDICATOR_DESCRIPTION = {

@@ -43,11 +43,11 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {{id: string, provider: string, model: string, effort: Effort, cwd: string | null, readOnly: boolean}} WorkerSpec */
 /** @typedef {{name: string, command: string, args: string[]}} VerificationCommand */
 /** @typedef {{commands: VerificationCommand[], requirePassing: boolean, timeoutMs: number}} VerificationPolicy */
-/** @typedef {'answer' | 'approve' | 'revise'} ContinuationAction */
+/** @typedef {'answer' | 'approve' | 'revise' | 'fixed'} ContinuationAction */
 /** @typedef {'pending' | 'accepted' | 'not_required' | 'not_sent_budget'} DecisionDelivery */
 /** @typedef {{hash: string, action: 'cancel', at: number}} CancelDecision */
 /** @typedef {{hash: string, feedback: string, ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string, at: number, reviewerModel: string | null, delivery: DecisionDelivery}} ContinuationDecisionFields */
-/** @typedef {{action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise', checkpointHash: string | null}} DecisionCheckpoint */
+/** @typedef {{action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'fixed', checkpointHash: string | null}} DecisionCheckpoint */
 /** @typedef {ContinuationDecisionFields & DecisionCheckpoint} ContinuationDecision */
 /** @typedef {CancelDecision | ContinuationDecision} StoredDecision */
 /** @typedef {{action: ContinuationAction, feedback: string, reportId: string}} LastDecision */
@@ -82,7 +82,7 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {HistoricalProbeV1 & {ownerEpoch: number, workerGeneration: number, meshRoot?: string}} StoredProbeV1 */
 /** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, summaryDetail: SummaryDetail}} PreDeferredPolicyV1 */
 /** @typedef {PreDeferredPolicyV1 & {maxRevisionsPerStep: number}} StoredPolicyV1 */
-/** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number, pausedBy?: 'human', mainRecoveries?: number, timeline?: import('./timeline.js').TimelineEntry[]}} StoredTaskFieldsV1 */
+/** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number, pausedBy?: 'human', mainRecoveries?: number, timeline?: import('./timeline.js').TimelineEntry[], mainFix?: {reportId: string, startedAt: number}, stepReplans?: {index: number, count: number}, changeKind?: 'main-fix', stepSteers?: {index: number, count: number}, watchdog?: {step: number, recoveries: number, noReportNudges: number, steers: number, nudged: boolean, nudgedAttemptId?: string, pingedAt?: number, providerWaits: number, retryAt: number | null, retryReason: string | null}}} StoredTaskFieldsV1 */
 /** @typedef {StoredTaskFieldsV1 & {workerId: string, attemptId: string, attemptNumber: number, pendingReport: ReportEnvelope | null, report: FinalizedReport | null, decisions: Record<string, StoredDecision>} & ({policy: StoredPolicyV1, limits: TaskLimits} | {policy: PreDeferredPolicyV1, limits: BaseTaskLimits})} StoredTaskV1 */
 /** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null, pid?: number, spawnedAt?: number}} StoredWorkerFieldsV1 */
 /** @typedef {StoredWorkerFieldsV1 & {workerGeneration: number, task: StoredTaskV1 | null}} StoredWorkerV1 */
@@ -188,14 +188,17 @@ function knownVersion(value, label, supported) {
 function reference(condition, path, message) { invariant(condition, message, path, 'inconsistent-reference'); }
 /** @param {unknown} value @param {string} label */
 function checkDecision(value, label) {
-  const decision = object(value, label), action = choice(required(decision, 'action', label), ['answer', 'approve', 'revise', 'cancel'], `${label}.action`);
+  const decision = object(value, label), action = choice(required(decision, 'action', label), ['answer', 'approve', 'revise', 'cancel', 'fixed'], `${label}.action`);
   const identity = ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'];
   keys(decision, action === 'cancel' ? ['hash', 'action', 'at'] : ['hash', 'action', 'feedback', 'checkpointHash', 'at', 'reviewerModel', 'delivery', ...identity], label);
   hash(required(decision, 'hash', label), `${label}.hash`); integer(required(decision, 'at', label), `${label}.at`);
   if (action === 'cancel') return;
   const feedback = text(required(decision, 'feedback', label), `${label}.feedback`, 12000); invariant(feedback.length > 0, `${label}.feedback must not be empty`, `${label}.feedback`);
   const checkpoint = required(decision, 'checkpointHash', label);
+  // A Main fix advances the task past a report the worker is not re-submitting, so it records the
+  // immutable checkpoint Pair froze for it, like an approval does.
   if (action === 'approve') hash(checkpoint, `${label}.checkpointHash`);
+  else if (action === 'fixed') hash(checkpoint, `${label}.checkpointHash`);
   else if (checkpoint !== null) invariant(text(checkpoint, `${label}.checkpointHash`, 64).length > 0, `${label}.checkpointHash must not be empty`, `${label}.checkpointHash`);
   for (const key of ['ownerEpoch', 'workerGeneration']) integer(required(decision, key, label), `${label}.${key}`, 1);
   for (const key of ['attemptId', 'deliveryOperationId']) id(required(decision, key, label), `${label}.${key}`);
@@ -210,7 +213,7 @@ function validateStoredDecision(value, label) { assertStoredDecision(value, labe
 function assertLastDecision(value, label) {
   if (value === null) return;
   const decision = object(value, label); keys(decision, ['action', 'feedback', 'reportId'], label);
-  choice(required(decision, 'action', label), ['answer', 'approve', 'revise'], `${label}.action`);
+  choice(required(decision, 'action', label), ['answer', 'approve', 'revise', 'fixed'], `${label}.action`);
   invariant(text(required(decision, 'feedback', label), `${label}.feedback`, 12000).length > 0, `${label}.feedback must not be empty`, `${label}.feedback`);
   id(required(decision, 'reportId', label), `${label}.reportId`);
 }
@@ -508,7 +511,8 @@ function validateTaskReportIdentity(report, label, task, workerId, stepIds, curr
 function checkTimeline(value, label) {
   for (const [index, entry] of array(value, label).entries()) {
     const at = `${label}[${index}]`, record = object(entry, at);
-    const type = choice(record.type, ['report', 'decision'], `${at}.type`);
+    const type = choice(record.type, ['report', 'decision', 'note'], `${at}.type`);
+    if (type === 'note') { text(record.kind, `${at}.kind`, 40); integer(record.step, `${at}.step`, 1); integer(record.at, `${at}.at`); text(record.text, `${at}.text`, 160); continue; }
     id(record.reportId, `${at}.reportId`);
     integer(record.step, `${at}.step`, 1); integer(record.at, `${at}.at`);
     if (type === 'report') text(record.kind, `${at}.kind`, 40), object(record.verification, `${at}.verification`);
@@ -526,7 +530,7 @@ function keptTimeline(value, label) {
 /** @param {unknown} value @param {string} label @param {string} workerId @param {ProfileFacts} facts */
 function checkStoredTask(value, label, workerId, facts) {
   const task = object(value, label);
-  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', 'pausedBy', 'mainRecoveries', 'timeline', 'workerId', 'attemptId', 'attemptNumber'], label);
+  keys(task, ['id', 'requestId', 'objective', 'context', 'constraints', 'steps', 'stepIndex', 'planRevision', 'status', 'leaseId', 'policy', 'limits', 'verification', 'startedAt', 'updatedAt', 'revisions', 'turns', 'usage', 'baseSnapshotRef', 'pendingReport', 'report', 'decisions', 'lastDecision', 'dispatchSettleSequence', 'pendingSince', 'abortRequested', 'interruption', 'previousStatus', 'completedAt', 'cancelReason', 'stepRevisions', 'pausedBy', 'mainRecoveries', 'timeline', 'workerId', 'attemptId', 'attemptNumber', 'mainFix', 'stepReplans', 'changeKind', 'stepSteers', 'watchdog'], label);
   for (const key of ['id', 'requestId', 'leaseId']) id(required(task, key, label), `${label}.${key}`);
   reference(id(required(task, 'workerId', label), `${label}.workerId`) === workerId, `${label}.workerId`, 'Task targets a different worker');
   id(required(task, 'attemptId', label), `${label}.attemptId`); integer(required(task, 'attemptNumber', label), `${label}.attemptNumber`, 1);
@@ -581,6 +585,39 @@ function checkStoredTask(value, label, workerId, facts) {
   if (Object.hasOwn(task, 'timeline')) checkTimeline(task.timeline, `${label}.timeline`);
   if (Object.hasOwn(task, 'abortRequested')) bool(task.abortRequested, `${label}.abortRequested`);
   if (Object.hasOwn(task, 'pausedBy')) choice(task.pausedBy, ['human'], `${label}.pausedBy`);
+  // A Main fix in progress: Main owns the workspace until it reports 'fixed'.
+  if (Object.hasOwn(task, 'mainFix')) {
+    const fix = object(task.mainFix, `${label}.mainFix`); keys(fix, ['reportId', 'startedAt'], `${label}.mainFix`);
+    const fixReportId = id(required(fix, 'reportId', `${label}.mainFix`), `${label}.mainFix.reportId`);
+    const retained = task.report;
+    const retainedId = retained !== null && typeof retained === 'object' ? id(Reflect.get(retained, 'reportId'), `${label}.report.reportId`) : null;
+    reference(fixReportId === retainedId, `${label}.mainFix.reportId`, 'A Main fix targets a different report than the retained one');
+    integer(required(fix, 'startedAt', `${label}.mainFix`), `${label}.mainFix.startedAt`);
+  }
+  // Re-plans of the current step position, bounded by the controller.
+  if (Object.hasOwn(task, 'stepReplans')) {
+    const replans = object(task.stepReplans, `${label}.stepReplans`); keys(replans, ['index', 'count'], `${label}.stepReplans`);
+    integer(required(replans, 'index', `${label}.stepReplans`), `${label}.stepReplans.index`, 0, steps.length - 1);
+    integer(required(replans, 'count', `${label}.stepReplans`), `${label}.stepReplans.count`, 0, 2);
+  }
+  if (Object.hasOwn(task, 'changeKind')) choice(task.changeKind, ['main-fix'], `${label}.changeKind`);
+  // The watchdog's bounded per-step bookkeeping. Absent means none yet; a record for another step is reset on use.
+  if (Object.hasOwn(task, 'watchdog')) {
+    const watchdog = object(task.watchdog, `${label}.watchdog`); keys(watchdog, ['step', 'recoveries', 'noReportNudges', 'steers', 'nudged', 'nudgedAttemptId', 'pingedAt', 'providerWaits', 'retryAt', 'retryReason'], `${label}.watchdog`);
+    if (Object.hasOwn(watchdog, 'nudgedAttemptId')) id(watchdog.nudgedAttemptId, `${label}.watchdog.nudgedAttemptId`);
+    if (Object.hasOwn(watchdog, 'pingedAt')) integer(watchdog.pingedAt, `${label}.watchdog.pingedAt`, 0);
+    integer(required(watchdog, 'step', `${label}.watchdog`), `${label}.watchdog.step`, 0);
+    for (const key of ['recoveries', 'noReportNudges', 'steers', 'providerWaits']) integer(required(watchdog, key, `${label}.watchdog`), `${label}.watchdog.${key}`, 0);
+    bool(required(watchdog, 'nudged', `${label}.watchdog`), `${label}.watchdog.nudged`);
+    if (required(watchdog, 'retryAt', `${label}.watchdog`) !== null) integer(watchdog.retryAt, `${label}.watchdog.retryAt`, 0);
+    if (required(watchdog, 'retryReason', `${label}.watchdog`) !== null) text(watchdog.retryReason, `${label}.watchdog.retryReason`, 500);
+  }
+  // Steers into the current step: bounded, and only for a step position the plan actually has.
+  if (Object.hasOwn(task, 'stepSteers')) {
+    const steers = object(task.stepSteers, `${label}.stepSteers`); keys(steers, ['index', 'count'], `${label}.stepSteers`);
+    integer(required(steers, 'index', `${label}.stepSteers`), `${label}.stepSteers.index`, 0, steps.length - 1);
+    integer(required(steers, 'count', `${label}.stepSteers`), `${label}.stepSteers.count`, 0, 1000);
+  }
   for (const key of ['interruption', 'previousStatus', 'cancelReason']) if (Object.hasOwn(task, key)) text(task[key], `${label}.${key}`, TASK_NOTE_LIMIT);
 }
 /**
