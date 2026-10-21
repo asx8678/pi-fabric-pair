@@ -15,6 +15,9 @@ const sessions = path.join(home, '.low', 'sessions');
 const log = entry => fs.appendFileSync(path.join(home, 'fake-low.jsonl'), `${JSON.stringify({ ...entry, at: Date.now() })}\n`);
 const flag = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Inbox files appear whole, as low writes them: the server polls the inbox, and a file it reads half-written would
+// crash it with a JSON error that looks like a real server failure (and makes Pair restart it).
+const writeWhole = (file, text) => { fs.writeFileSync(`${file}.part`, text); fs.renameSync(`${file}.part`, file); };
 
 async function serve() {
   fs.mkdirSync(sessions, { recursive: true });
@@ -38,7 +41,7 @@ async function serve() {
     if (!tasks.length) { status(idle); await sleep(50); continue; }
     const name = tasks[0].slice(0, -5), task = JSON.parse(fs.readFileSync(path.join(inbox, tasks[0]), 'utf8')).task;
     fs.rmSync(path.join(inbox, tasks[0]));
-    if (task === '/stop') { fs.writeFileSync(path.join(inbox, `${name}.result`), JSON.stringify({ stopped: true, status: 'stopped server', exit: 0 })); log({ kind: 'stop' }); await sleep(200); fs.rmSync(inbox, { recursive: true, force: true }); process.exit(0); }
+    if (task === '/stop') { writeWhole(path.join(inbox, `${name}.result`), JSON.stringify({ stopped: true, status: 'stopped server', exit: 0 })); log({ kind: 'stop' }); await sleep(200); fs.rmSync(inbox, { recursive: true, force: true }); process.exit(0); }
     log({ kind: 'task', task });
     fs.appendFileSync(file, `${JSON.stringify({ role: 'user', content: task })}\n`);
     const step = plan[next++] || { result: { status: 'done', exit: 0, verdict: 'NO CHANGES', good: true, answer: 'Nothing to do.', changes: [] } };
@@ -82,10 +85,10 @@ async function send() {
   const name = `${String(process.hrtime.bigint()).padStart(24, '0')}-${process.pid}`;
   const control = task === '/abort' ? ['abort', ''] : task.startsWith('/steer ') ? ['steer', task.slice(7).trim()] : null;
   if (control) {
-    fs.writeFileSync(path.join(inbox, `${name}.${control[0]}`), JSON.stringify({ text: control[1] }));
+    writeWhole(path.join(inbox, `${name}.${control[0]}`), JSON.stringify({ text: control[1] }));
     process.stdout.write(`${JSON.stringify({ status: `${control[0]} sent`, exit: 0 })}\n`); return;
   }
-  fs.writeFileSync(path.join(inbox, `${name}.task`), JSON.stringify({ task }));
+  writeWhole(path.join(inbox, `${name}.task`), JSON.stringify({ task }));
   const done = path.join(inbox, `${name}.result`);
   for (;;) {
     if (fs.existsSync(done)) { const text = fs.readFileSync(done, 'utf8'); fs.rmSync(done); process.stdout.write(`${text.trim()}\n`); process.exit(JSON.parse(text).exit ?? 3); }

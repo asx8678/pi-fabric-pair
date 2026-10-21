@@ -830,6 +830,17 @@ test('the dashboard lists every worker with its default, model, effort and state
   assert.ok(selected.some(line => /^ {2}w1 /.test(line)), selected.join('\n'));
 });
 
+test('the roster says which backend a worker runs on, apart from its effort', () => {
+  // Effort and backend can both be "low": "low · low" read as one value said twice.
+  const two = summary({ workers: [
+    worker({ id: 'w1', model: 'test/one', effort: 'low', backend: 'low' }),
+    worker({ id: 'w2', model: 'test/two', effort: 'high', backend: 'pi', status: 'not_started', task: null, pid: null, sessionId: null }),
+  ] });
+  const text = dashboardLines(two, 100, NOW).map(strip).join('\n');
+  assert.match(text, /test\/one · low · via low/, text);
+  assert.match(text, /test\/two · high · via pi/, text);
+});
+
 test('a single worker shows no roster: the screen stays the compact plan it was', () => {
   const text = dashboardLines(CASES.working, 100, NOW).map(strip).join('\n');
   assert.equal(/▸/.test(text), false, text);
@@ -966,9 +977,9 @@ test('a worker on a provider fallback shows the fallback model in the roster and
     assert.ok(lines.every(line => visibleWidth(line) <= width), lines.join('\n'));
   }
   const wide = dashboardLines(two, 100, NOW).map(strip).find(line => line.includes('w1') && line.includes('working'));
-  assert.match(String(wide), /openai\/gpt-backup · fallback · low/);
+  assert.match(String(wide), /openai\/gpt-backup · fallback · via low/);
   assert.doesNotMatch(String(wide), /claude-opus/);
   const text = statusText(two, null, NOW);
-  assert.match(text, /Fallback\s+openai\/gpt-backup · low for the rest of this task/);
+  assert.match(text, /Fallback\s+openai\/gpt-backup · via low for the rest of this task/);
   assert.doesNotMatch(statusText(summary(), null, NOW), /Fallback/);
 });

@@ -22,7 +22,7 @@ import { duplicateWorker, makeDefault, moveWorker } from './worker-config.js';
  * One settings row. `choiceValue` is the value the row is *on* when it differs from the text it shows: a worker that
  * follows the project default shows 'pi (project default)' but is on 'inherit', and the choice list must mark that,
  * not the resolved value it happens to have.
- * @typedef {{id: string, label: string, value: string, hint: string, kind: 'toggle' | 'choice' | 'number' | 'nullable' | 'text' | 'list' | 'model' | 'peer-model' | 'add' | 'open' | 'action' | 'note', options?: readonly RowOption[], tone?: 'warning', work?: 'verification' | 'migrate' | 'json', restart?: boolean, choiceValue?: string}} SettingsRow */
+ * @typedef {{id: string, label: string, value: string, hint: string, kind: 'toggle' | 'choice' | 'number' | 'nullable' | 'text' | 'list' | 'model' | 'peer-model' | 'add' | 'open' | 'action' | 'pick' | 'note', options?: readonly RowOption[], tone?: 'warning', work?: 'verification' | 'migrate' | 'json', restart?: boolean, choiceValue?: string}} SettingsRow */
 /** @typedef {'ok' | 'error' | 'info' | 'none'} StatusTone */
 /** @typedef {{saved: PairConfig, scope: ConfigScope, workerId: string, page: SettingsPage, rowId: string, status: string, tone: StatusTone}} ScreenSession */
 /** @typedef {{run: 'verification'} | {run: 'migrate'} | {run: 'json'} | {run: 'save', next: PairConfig, label: string, value: string} | {run: 'remove', workerId: string} | {run: 'duplicate', workerId: string, newId: string}} ScreenAnswer */
@@ -188,10 +188,11 @@ class SettingsView {
     const rows = [];
     if (page === 'workers') {
       // The list itself, in order: the first entry is the default, so order is the one source of truth. One row per
-      // configured worker, whatever the selection, because managing them is what this page is for.
+      // configured worker, whatever the selection, because managing them is what this page is for. Enter on a worker
+      // picks it for the rows below, and its row says editing.
       saved.workers.forEach((slot, index) => rows.push({ id: `slot:${slot.id}`, label: `${index === 0 ? '★' : '·'} ${slot.id}`,
-        value: `${slot.provider && slot.model ? `${slot.provider}/${slot.model}` : 'no model yet'} · ${slot.effort}`, kind: 'note',
-        hint: index === 0 ? `${slot.id} is the default: a bare /pair start and a dispatch to a worker use the first entry.` : `${slot.id} is not the default. Make default moves it first.` }));
+        value: `${slot.id === worker.id ? 'editing · ' : ''}${slot.provider && slot.model ? `${slot.provider}/${slot.model}` : 'no model yet'} · ${slot.effort}`, kind: 'pick',
+        hint: `${slot.id === worker.id ? `The rows below edit ${slot.id}.` : `Enter: edit ${slot.id} in the rows below.`} ${index === 0 ? `${slot.id} is the default: a bare /pair start and a dispatch to a worker use the first entry.` : `${slot.id} is not the default. Make default moves it first.`}` }));
       if (saved.workers.length > 1) rows.push({ id: 'worker', label: 'Editing', value: worker.id, kind: 'choice',
         options: saved.workers.map(slot => ({ value: slot.id, label: slot.id, hint: slot.id === worker.id ? 'The worker slot you are editing now.' : 'Edit this worker slot instead.' })),
         hint: 'Which worker slot this page edits. Only one worker runs at a time.' });
@@ -883,10 +884,21 @@ class SettingsView {
     if (row.kind === 'action') { this.rowAction(row.id); return; }
     if (row.kind === 'toggle') { this.toggle(row); return; }
     if (row.kind === 'note') return;
+    if (row.kind === 'pick') { this.pickWorker(row.id.slice('slot:'.length)); return; }
     if (row.kind === 'model' || row.kind === 'peer-model') { this.openPicker(row.kind === 'peer-model'); return; }
     if (row.kind === 'number' || row.kind === 'nullable' || row.kind === 'text' || row.kind === 'list' || row.kind === 'add') { this.openInput(row); return; }
     if (how.quick) this.cycle(row);
     else this.openOptions(row);
+  }
+
+  /**
+   * Pick the worker the page edits, from its row in the list. The cursor stays on the list so another can be picked.
+   * @param {string} workerId
+   */
+  pickWorker(workerId) {
+    this.session.workerId = workerId;
+    this.session.status = `Editing ${workerId}: the rows below are its settings.`; this.session.tone = 'info';
+    this.refresh();
   }
 
   /** @param {SettingsRow} row */

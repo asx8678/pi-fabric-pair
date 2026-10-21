@@ -8,7 +8,7 @@ plus an in-process host in `runtime-startup.test.js`). The fakes honour
 `get_entries { since }` the way Pi does, because `PiRuntime` verifies retained
 history incrementally.
 
-- UI and pure-module suites: `cards-and-commands`, `dashboard`, `glance`,
+- UI and pure-module suites: `cards-and-commands`, `dashboard`, `dashboard-e2e`, `glance`,
   `history-and-cue`, `task-summary`, `transcript`, `ui-smoke`.
 - Controller, worker, runtime and safety suites: `cache-observation`,
   `controller-restart`, `controller-scan-recovery`, `efficiency`,
@@ -250,6 +250,11 @@ Re-derived from the current behaviour at the same time:
 - `low-runtime`: the `runtime.backend === 'low'` path against
   `helpers/fake-low.mjs`, which speaks low's inbox protocol, so the low worker starts,
   takes a turn and stops without Pi RPC or a model request.
+- `dashboard-e2e`: the `/pair` dashboard end to end through `main.js`, with fake low
+  workers that really start and stop: start, switch, stop, make default, add, remove
+  a running worker (keep, discard after a confirmation, or cancel), restart, reload, the status, inbox and doctor views, help, and
+  picking a worker in settings; worker-list edits notify once, without the generic
+  "settings saved" line.
 - `settings-screen`: the TUI settings screen driven by keypresses against a fake
   `ctx.ui.custom`: one framed overlay whose every line is exactly the render width,
   page movement wrapping both ways, and one row kind at a time (toggle on Enter and on

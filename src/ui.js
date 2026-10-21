@@ -1484,7 +1484,8 @@ function workerRowText(summary, w, selected, room, fg, now) {
   const roomForMeta = room - visibleWidth(head) - visibleWidth(tail);
   // The backend belongs in the roster: with a mixed project the same model name can be a Pi worker or a low one.
   const backend = w.fallback ? w.fallback.backend : w.backend;
-  const meta = [model, w.fallback ? 'fallback' : w.effort, backend === 'low' ? 'low' : backend === 'pi' ? 'pi' : null].filter(Boolean).join(' · ');
+  // "via" keeps it apart from the effort, which can also read "low".
+  const meta = [model, w.fallback ? 'fallback' : w.effort, backend === 'low' ? 'via low' : backend === 'pi' ? 'via pi' : null].filter(Boolean).join(' · ');
   // The meta column is what gets clipped; the state word and the step must always be readable.
   return truncateToWidth(head + fg('muted', truncateToWidth(meta, Math.max(2, roomForMeta), '…')) + tail, room, '…');
 }
@@ -1841,7 +1842,7 @@ export function statusText(summary, _native = null, now = Date.now()) {
     if (next) lines.push(row('Next', next === '/pair to set up' ? 'open /pair and choose the worker model'
       : next === 'not a Git repo' ? 'open Pi in a Git repository, or set the worker workspace in /pair settings → Worker → Workspace'
       : next === '/pair' ? 'open /pair for this worker' : next));
-    if (w.fallback) lines.push(row('Fallback', `${w.fallback.model}${w.fallback.backend === 'low' ? ' · low' : ''} for the rest of this task`));
+    if (w.fallback) lines.push(row('Fallback', `${w.fallback.model}${w.fallback.backend === 'low' ? ' · via low' : ''} for the rest of this task`));
     if (w.pendingConfiguration) lines.push(row('Settings', 'change pending; applied before the next task'));
     if (w.task) {
       const cost = typeof w.task.reportedCost === 'number' && w.task.reportedCost > 0 ? ` · ${costLabel(w.task.reportedCost)}` : '';

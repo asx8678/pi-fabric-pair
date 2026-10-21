@@ -105,7 +105,7 @@ the file cannot drift apart:
 
 | Page | What it holds |
 | --- | --- |
-| Workers | The roster first — one row per worker, the default starred — then, for the worker being edited, model, thinking effort, read-only and workspace, followed by Make default, Move up, Move down, Duplicate, Remove and Add a worker… last. With more than one worker an Editing row at the top of that block chooses which one the page edits. The roster rows are read-only: order and membership change through the rows below it. |
+| Workers | The roster first — one row per worker, the default starred — then, for the worker being edited, model, thinking effort, read-only and workspace, followed by Make default, Move up, Move down, Duplicate, Remove and Add a worker… last. Press Enter on a worker in the roster to edit it; the one being edited says `editing` before its model. With more than one worker an Editing row at the top of that block also chooses it. Order and membership change through the rows below the roster. |
 | Review | Review policy, step size limit, revision limit, revisions per step, final review, report detail, and automatic report delivery. |
 | Supervision | Main supervision, Main recoveries per task, the idle check-in, the step time limit, and the nineteen `control` rows: watchdog, silence before a ping, ping answer limit, tool time limit, step nudge, watchdog recoveries per step, auto-repairs per step, waits before a fallback, shell timeout limit, compaction time limit, compact before a task above, fresh session above, Main heartbeat and its interval, nudges without a report, steers per step, provider cooldown, quota cooldown and provider waits per step. |
 | Limits | Step time limit, reports per task, report size limit, report repairs, and the optional cost and output-token ceilings (`none` by default). |
@@ -344,7 +344,7 @@ label.
 | `n` | Start the selected worker. If another worker's idle process is live it is stopped first, after asking; a worker holding a task is never displaced. |
 | `x` | Stop the selected worker's process; asks while a task runs. Its conversation is kept. |
 | `a` | Add a worker: asks for an id, then the model picker, then the effort. |
-| `D` | Remove the selected worker after confirming — then keep its conversation (adding the same id later resumes it) or discard it. Never the last worker. |
+| `D` | Remove the selected worker: choose to keep its conversation (adding the same id later resumes it) or discard it, which asks once more because it cannot be undone. A running worker is stopped first and its task cancelled; files it changed stay. Never the last worker. |
 | `*` | Make the selected worker the default, which moves it first; a bare `/pair start` and a dispatch both use the first entry. |
 | `!` | Reconcile: prove an old worker process exited after a Main crash, so the worker can be used again. Shown only when the last exit is unconfirmed. |
 | `o` | Turn Pair on. Shown only while it is off, and the screen's own sentence names the same key. |

@@ -610,7 +610,7 @@ These reports will not be delivered automatically: call pair_yield to receive th
    */
   async function removeWorkerSlot(c, id, keepConversation) {
     const target = workersScope();
-    return c.removeWorker(id, { keepConversation, stopFirst: true, save: async () => apply(removeWorkerEntry(await readScope(target), id), target) });
+    return c.removeWorker(id, { keepConversation, stopFirst: true, save: async () => apply(removeWorkerEntry(await readScope(target), id), target, false, { quiet: true }) });
   }
   /**
    * What removing this worker will also do, said before the human confirms. Empty for an idle, stopped worker.
@@ -632,9 +632,11 @@ These reports will not be delivered automatically: call pair_yield to receive th
    * @param {import('./config.js').PairConfig} next
    * @param {import('./config.js').ConfigScope} targetScope
    * @param {boolean} [explicitMigration]
+   * @param {{quiet?: boolean}} [options] quiet: the caller says what changed itself (a worker-list edit), so the
+   * generic "settings saved" line is left out unless it carries a staging, merge or archive note
    * @returns {Promise<import('./config.js').PairConfig>}
    */
-  async function apply(next, targetScope, explicitMigration = false) {
+  async function apply(next, targetScope, explicitMigration = false, { quiet = false } = {}) {
     assert(ctxRef && controller && config && configState, 'Pair configuration is not loaded');
     const before = await readScope(targetScope), files = configPaths(ctxRef.cwd);
     const behaviorChanged = digest({ ...before, indicator: null }) !== digest({ ...next, indicator: null });
@@ -666,7 +668,7 @@ These reports will not be delivered automatically: call pair_yield to receive th
       await controller.updateConfig(config); render();
       const boundary = controller.pendingConfig ? ' Runtime settings staged: finish/cancel the current task, then /pair start to reconcile the retained worker. No work is replayed.' : behaviorChanged ? ' Used for new tasks; /pair start when ready. Existing tasks keep their authorization.' : '';
       const mergeNote = lastSaveMerged ? ' The file changed outside this screen; your change was merged.' : '';
-      ctxRef.ui.notify(`Pair settings saved.${backup}${boundary}${mergeNote}`, 'info');
+      if (!quiet || controller.pendingConfig || mergeNote || backup) ctxRef.ui.notify(`Pair settings saved.${backup}${boundary}${mergeNote}`, 'info');
       return configForScope(loaded, targetScope);
     } catch (error) {
       ctxRef.ui.notify(`Pair settings saved.${backup} Runtime reload/reconciliation required: ${briefError(error)}`, 'warning');
@@ -712,7 +714,7 @@ These reports will not be delivered automatically: call pair_yield to receive th
         assert(config, 'Pair configuration is not loaded');
         const listScope = workersScope();
         const next = duplicateWorker(await readScope(listScope), workerId, newId);
-        await apply(next, listScope);
+        await apply(next, listScope, false, { quiet: true });
         ctx.ui.notify(`Copied worker ${workerId} to ${newId}.`, 'info');
         return config ?? null;
       },
@@ -853,16 +855,15 @@ These reports will not be delivered automatically: call pair_yield to receive th
       const { positionals, backend: explicitBackend } = readWorkerTokens(rest.slice(1));
       const model = splitModel(current, positionals[0]), effort = positionals[1] || 'medium';
       const next = addWorker(current, { id: first, provider: model.provider, model: model.model, effort, ...(explicitBackend ? { backend: explicitBackend } : {}) });
-      await apply(next, listScope);
+      await apply(next, listScope, false, { quiet: true });
       const added = next.workers.find(worker => worker.id === first);
-      const on = explicitBackend ? `, ${explicitBackend}` : '';
-      ctx.ui.notify(`Added worker ${first}${model.model ? ` (${model.provider}/${model.model}, ${effort}${on})` : ''}. ${added ? describeWorker(added) : ''}`, 'info');
+      ctx.ui.notify(`Added worker ${added ? describeWorker(added) : first}${explicitBackend ? `, via ${explicitBackend}` : ''}.`, 'info');
       return;
     }
     if (verb === 'default') {
       assert(first, 'Use /pair worker default <id>');
       const next = makeDefault(current, first);
-      if (next !== current) await apply(next, listScope);
+      if (next !== current) await apply(next, listScope, false, { quiet: true });
       ctx.ui.notify(`Worker ${first} is now first: /pair start and a dispatch to a worker both use it.`, 'info');
       return;
     }
@@ -882,8 +883,23 @@ These reports will not be delivered automatically: call pair_yield to receive th
 ${busy ? `${busy}
 
 ` : ''}${detail}`)) return;
-    const removed = await removeWorkerSlot(c, first, keepConversation);
-    ctx.ui.notify(`Removed worker ${first}${removed.archived ? ' (its state record was archived)' : ''}; ${removed.conversation === 'kept' ? 'its conversation was kept' : 'its conversation was discarded'}.`, 'info');
+    ctx.ui.notify(removedText(first, await removeWorkerSlot(c, first, keepConversation)), 'info');
+  }
+  /** @param {string} id @param {{archived: boolean, conversation: string}} removed */
+  function removedText(id, removed) {
+    return `Removed worker ${id}${removed.archived ? ' (its state record was archived)' : ''}; ${removed.conversation === 'kept' ? 'its conversation was kept' : 'its conversation was discarded'}.`;
+  }
+  /**
+   * Remove from the dashboard or the menu: one choice that says what happens to the conversation, so a key press
+   * can discard it too. Keeping needs no second prompt; discarding cannot be undone, so it still confirms.
+   * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx @param {PairController} c @param {string} id
+   */
+  async function removeWorkerPicked(ctx, c, id) {
+    const keep = 'Remove, keep its conversation', discard = 'Remove and discard its conversation';
+    const busy = removalNote(c, id);
+    const picked = await ctx.ui.select(`Remove worker ${id}?${busy ? ` ${busy}` : ''}`, [keep, discard]);
+    if (picked === keep) ctx.ui.notify(removedText(id, await removeWorkerSlot(c, id, true)), 'info');
+    else if (picked === discard) await workerCommand(ctx, c, 'remove', [id, 'discard']);
   }
   /**
    * Restarting interrupts the step in flight, so a worker with a current task asks first — on every route,
@@ -1193,7 +1209,7 @@ ${busy ? `${busy}
           if (action === 'default-worker') { await workerCommand(ctx, c, 'default', [target]); return { reopen: true, notice: `Worker ${target} is now the default.` }; }
           if (action === 'remove-worker') {
             const before = c.summary().workers.length;
-            await workerCommand(ctx, c, 'remove', [target]);
+            await removeWorkerPicked(ctx, c, target);
             const after = c.summary().workers.length;
             return { reopen: true, ...(after < before ? { notice: `Removed worker ${target}.` } : {}) };
           }
@@ -1256,7 +1272,7 @@ ${busy ? `${busy}
           }
           if (item.action === 'remove-worker') {
             const chosen = item.workerId || await ctx.ui.select('Remove which worker?', c.config.workers.map(worker => worker.id));
-            if (chosen) await workerCommand(ctx, c, 'remove', [chosen]);
+            if (chosen) await removeWorkerPicked(ctx, c, chosen);
             return;
           }
         };

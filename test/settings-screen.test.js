@@ -437,7 +437,7 @@ test('the worker page can make a worker the default, move it up and remove it', 
     { id: 'second', provider: 'beta', model: 'two', effort: 'high', cwd: null, readOnly: false }] });
   await open(host, { start });
   // The Workers page opens on the roster: one row per worker, the default starred, then the editing selector.
-  assert.match(text(host), /★ worker +alpha\/one · medium/);
+  assert.match(text(host), /★ worker +editing · alpha\/one · medium/);
   assert.match(text(host), /· second +beta\/two · high/);
   assert.match(text(host), /Make default +already first/);
   assert.match(text(host), /Move up +at the top/);
@@ -765,11 +765,31 @@ test('the Workers page lists every worker with its model and effort, the default
     { id: 'second', provider: 'beta', model: 'two', effort: 'high', cwd: null, readOnly: false },
     { id: 'third', provider: '', model: '', effort: 'low', cwd: null, readOnly: false }] });
   await open(host, { start });
-  assert.match(text(host), /★ worker +alpha\/one · medium/, 'the default is starred and shows its model');
+  assert.match(text(host), /★ worker +editing · alpha\/one · medium/, 'the default is starred, shows its model and is the one edited');
   assert.match(text(host), /· second +beta\/two · high/);
   assert.match(text(host), /· third +no model yet · low/, 'a worker without a model says so');
   const rows = host.state.component.view.rowsFor('workers');
-  assert.deepEqual(rows.filter(row => row.kind === 'note').map(row => row.id), ['slot:worker', 'slot:second', 'slot:third']);
+  assert.deepEqual(rows.filter(row => row.kind === 'pick').map(row => row.id), ['slot:worker', 'slot:second', 'slot:third']);
+  await quit(host);
+});
+test('Enter on a worker in the list picks it for the rows below, and the cursor stays on the list', async () => {
+  const host = screenHost();
+  const start = base({ workers: [
+    { id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: null, readOnly: false },
+    { id: 'second', provider: 'beta', model: 'two', effort: 'high', cwd: null, readOnly: false }] });
+  await open(host, { start });
+  for (let step = 0; step < 40 && host.state.component.view.currentRow().id !== 'slot:second'; step++) press(host, 'k');
+  assert.equal(host.state.component.view.currentRow().id, 'slot:second', 'the worker rows can be selected');
+  press(host, '\r'); await tick();
+  assert.equal(host.state.component.view.currentRow().id, 'slot:second', 'the cursor stays on the list');
+  assert.match(text(host), /· second +editing · beta\/two · high/, 'the picked worker says editing');
+  assert.doesNotMatch(text(host), /★ worker +editing/);
+  assert.match(text(host), /Editing second: the rows below are its settings/);
+  assert.match(text(host), /Editing +second/, 'the Editing selector agrees');
+  openRow(host, 'readOnly'); await tick();
+  assert.equal(host.state.applied.length, 1);
+  assert.equal(host.state.applied[0][0].workers[1].readOnly, true, 'the rows below edit the picked worker');
+  assert.equal(host.state.applied[0][0].workers[0].readOnly, false);
   await quit(host);
 });
 test('a worker can be duplicated under a new id, right after the original', async () => {
