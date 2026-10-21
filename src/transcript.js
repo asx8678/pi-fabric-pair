@@ -45,6 +45,37 @@ export function callLabel(name, args) {
   return typeof target === 'string' ? `${name} ${oneLine(target, 120)}` : name;
 }
 /**
+ * A low session log's entries as the messages transcriptText reads. low keeps OpenAI-style messages (`role`,
+ * `content`, `tool_calls`) beside its header, events and report lines, which have no role and are left out. A run's
+ * call is labelled with the first line of its code that says what it does.
+ * @param {readonly unknown[]} entries
+ * @returns {Record<string, unknown>[]}
+ */
+export function lowMessages(entries) {
+  /** @type {Record<string, unknown>[]} */
+  const messages = [];
+  for (const entry of entries) {
+    if (!isRpcRecord(entry) || typeof entry.role !== 'string') continue;
+    const meta = isRpcRecord(entry.meta) ? entry.meta : {};
+    const content = typeof entry.content === 'string' ? entry.content : '';
+    if (entry.role === 'assistant') {
+      /** @type {Record<string, unknown>[]} */
+      const blocks = content.trim() ? [{ type: 'text', text: content }] : [];
+      for (const call of Array.isArray(entry.tool_calls) ? entry.tool_calls : []) {
+        const fn = isRpcRecord(call) && isRpcRecord(call.function) ? call.function : {};
+        /** @type {unknown} */ let args = null;
+        try { args = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments) : null; } catch { args = null; }
+        const code = isRpcRecord(args) && typeof args.code === 'string' ? args.code : '';
+        const headline = code.split('\n').map(line => line.trim()).find(line => line && !line.startsWith('#') && !/^(?:import|from) /.test(line));
+        blocks.push({ type: 'toolCall', name: typeof fn.name === 'string' ? fn.name : 'run', arguments: headline ? { display: { name: headline } } : {} });
+      }
+      messages.push({ role: 'assistant', content: blocks });
+    } else if (entry.role === 'tool') messages.push({ role: 'toolResult', toolName: 'run', isError: meta.error === true, content });
+    else if (entry.role === 'user') messages.push({ role: 'user', content });
+  }
+  return messages;
+}
+/**
  * The transcript text the follow view shows. Lines start with a marker the view styles: `◆` who speaks,
  * `→` a tool call, `←` its result, `✖` a failed one, `…` what was folded away.
  * @param {readonly unknown[]} messages the session's messages, oldest first

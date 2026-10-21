@@ -12,7 +12,7 @@ const readJSON = readUntypedJSON;
 export const INDICATORS = ['minimal', 'compact', 'board', 'off'];
 /** @param {unknown} value @returns {value is Indicator} */
 export function isIndicator(value) { return INDICATORS.some(mode => mode === value); }
-/** @typedef {{command: string, commandArgs: string[], extraExtensions: string[], excludeExtensions: string[], extraSkills: string[], inheritExtensions: boolean, mcp: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
+/** @typedef {{backend: 'pi' | 'low', lowCommand: string, lowArgs: string[], command: string, commandArgs: string[], extraExtensions: string[], excludeExtensions: string[], extraSkills: string[], inheritExtensions: boolean, mcp: boolean, startupTimeoutMs: number, requestTimeoutMs: number, shutdownTimeoutMs: number}} RuntimeConfig */
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
 /** @typedef {{enabled: boolean, provider: string, model: string, on: 'final' | 'checkpoints', timeoutMs: number}} PeerReviewConfig */
@@ -38,7 +38,7 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   maxWorkers: 1,
   workers: [{ id: 'worker', provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }],
   supervision: { mode: 'milestones', finalReview: true, maxRevisions: 20, maxRevisionsPerStep: 3, summaryDetail: 'normal', maxStepFiles: 5 },
-  runtime: { command: 'pi', commandArgs: [], extraExtensions: [], excludeExtensions: [], extraSkills: [], inheritExtensions: true, mcp: true, startupTimeoutMs: 120000, requestTimeoutMs: 30000, shutdownTimeoutMs: 5000 },
+  runtime: { backend: 'pi', lowCommand: 'low', lowArgs: [], command: 'pi', commandArgs: [], extraExtensions: [], excludeExtensions: [], extraSkills: [], inheritExtensions: true, mcp: true, startupTimeoutMs: 120000, requestTimeoutMs: 30000, shutdownTimeoutMs: 5000 },
   requirements: { fabric: true, fovea: true, prewalkDisabled: true, autoCompaction: true },
   limits: {
     activeStepTimeoutMs: 1800000,
@@ -143,11 +143,13 @@ function assertMergedConfig(c) {
   assert(typeof c.supervision.maxStepFiles === 'number' && Number.isSafeInteger(c.supervision.maxStepFiles) && c.supervision.maxStepFiles >= 1 && c.supervision.maxStepFiles <= 1000, 'maxStepFiles must be 1–1000');
   assert(typeof c.supervision.summaryDetail === 'string' && ['minimal', 'normal', 'detailed'].includes(c.supervision.summaryDetail), 'Invalid summary detail');
   assert(typeof c.runtime.command === 'string' && c.runtime.command.length > 0 && !c.runtime.command.includes('\0'), 'runtime.command is required');
+  assert(c.runtime.backend === 'pi' || c.runtime.backend === 'low', 'runtime.backend must be "pi" or "low"');
+  assert(typeof c.runtime.lowCommand === 'string' && c.runtime.lowCommand.length > 0 && !c.runtime.lowCommand.includes('\0'), 'runtime.lowCommand is required');
   assert(typeof c.runtime.inheritExtensions === 'boolean', 'runtime.inheritExtensions must be boolean');
   assert(typeof c.runtime.mcp === 'boolean', 'runtime.mcp must be boolean');
   assert(typeof c.verification.requirePassing === 'boolean', 'verification.requirePassing must be boolean');
   assert(typeof c.verification.timeoutMs === 'number' && Number.isSafeInteger(c.verification.timeoutMs) && c.verification.timeoutMs > 0, 'verification.timeoutMs must be a positive integer');
-  for (const key of ['commandArgs', 'extraExtensions', 'excludeExtensions', 'extraSkills']) assert(isArray(c.runtime[key]) && c.runtime[key].every(v => typeof v === 'string' && !v.includes('\0')), `runtime.${key} must be a string array`);
+  for (const key of ['commandArgs', 'lowArgs', 'extraExtensions', 'excludeExtensions', 'extraSkills']) assert(isArray(c.runtime[key]) && c.runtime[key].every(v => typeof v === 'string' && !v.includes('\0')), `runtime.${key} must be a string array`);
   for (const key of ['fabric', 'fovea', 'prewalkDisabled', 'autoCompaction']) assert(typeof c.requirements[key] === 'boolean', `requirements.${key} must be boolean`);
   /** @type {[Record<string, unknown>, string[]][]} */
   const positiveFields = [[c.runtime, ['startupTimeoutMs', 'requestTimeoutMs', 'shutdownTimeoutMs']], [c.limits, ['activeStepTimeoutMs']], [c.evidence, ['maxFiles', 'maxTotalBytes', 'maxArtifactBytes']]];

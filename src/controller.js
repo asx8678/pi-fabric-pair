@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events';
 import { isDeepStrictEqual } from 'node:util';
 import { PiRpc, isRpcRecord } from './rpc.js';
 import { PiRuntime } from './actor-runtime.js';
+import { LowRuntime } from './low-runtime.js';
 import { Evidence, repositoryRoot, snapshotDelta, verifyConfigured, withoutPairOwned } from './evidence.js';
 import { validateConfig } from './config.js';
 import { peerReviewSummary, readPeerReview, runPeerReview } from './peer-review.js';
@@ -13,7 +14,7 @@ import { assertReportSize, validateDecision, validateDispatch } from './schema.j
 import { incrementCounter, migrateStoredState, STATE_VERSION, TASK_NOTE_LIMIT, validateAuthority, validateCurrentTelemetry, validateLatch, validateReportEnvelope, validateReportPayload, validateStoredState } from './contracts.js';
 import { addUsage, effectiveCaps, limitExceeded, normalizedUsage } from './metrics.js';
 import { decisionEntry, noteEntry, normalizeActivity, normalizeTimeline, reportEntry } from './timeline.js';
-import { transcriptText } from './transcript.js';
+import { lowMessages, transcriptText } from './transcript.js';
 import { classifyLiveness, livenessLine } from './liveness.js';
 import { classifyProviderError, providerWaitText, providerWaitsLeft, retryClock } from './provider.js';
 import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonical, clone, digest, inside, mkdirPrivate, processStartedAt, processState, PROTOCOL, signalGroup, signallablePid, readJSON, readJsonlTail, safeId, Serial, stableDigest, uid } from './util.js';
@@ -22,13 +23,14 @@ import { acquireLock, agentDir, assert, atomicJSON, bounded, briefError, canonic
  * @typedef {import('./contracts.js').StoredWorkerV1} WorkerRecord
  * @typedef {import('./contracts.js').StoredTaskV1} TaskRecord
  * @typedef {ReturnType<PiRuntime['reserveActivation']>} Activation
+ * @typedef {PiRuntime | LowRuntime} WorkerRuntime
  * @typedef {{configHash: string, specHash: string, activationIntent: number, pendingControls: number, failureHandled: boolean, telemetry: import('./contracts.js').StoredTelemetryV1 | null, verificationAbort: AbortController | null, acceptDrain?: Promise<void>, telemetryKey?: string | null}} RuntimeData
- * @typedef {{id: string, record: WorkerRecord, runtime: PiRuntime, intent: number, configHash: string}} Launch
+ * @typedef {{id: string, record: WorkerRecord, runtime: WorkerRuntime, intent: number, configHash: string}} Launch
  * @typedef {Launch & {task: TaskRecord, attemptId: string, leaseId: string, activation: Activation}} Work
- * @typedef {{id: string, record: WorkerRecord, runtime: PiRuntime | undefined, intent: number, generation: number}} Control
+ * @typedef {{id: string, record: WorkerRecord, runtime: WorkerRuntime | undefined, intent: number, generation: number}} Control
  * @typedef {{control: Control, disposition: 'accepted' | 'duplicate' | 'stale' | 'unproven' | 'revoked'}} ReportAcceptance
  */
-/** @typedef {import('./actor-runtime.js').RuntimeConfig & {version: number, enabled: boolean, autoStart: boolean, indicator: string, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: {maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}, mainReadOnlyDuringTasks: boolean, autoDeliverReports?: boolean, autoCheckIdle?: boolean, peerReview: import('./config.js').PeerReviewConfig, mainSupervision: boolean, maxMainRecoveries: number, control: import('./config.js').ControlConfig, runtime: {command: string, commandArgs: string[], inheritExtensions: boolean, extraExtensions: string[], excludeExtensions: string[], extraSkills: string[]}}} PairConfig */
+/** @typedef {import('./actor-runtime.js').RuntimeConfig & {version: number, enabled: boolean, autoStart: boolean, indicator: string, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: {maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}, mainReadOnlyDuringTasks: boolean, autoDeliverReports?: boolean, autoCheckIdle?: boolean, peerReview: import('./config.js').PeerReviewConfig, mainSupervision: boolean, maxMainRecoveries: number, control: import('./config.js').ControlConfig, runtime: {backend: 'pi' | 'low', lowCommand: string, lowArgs: string[], command: string, commandArgs: string[], inheritExtensions: boolean, extraExtensions: string[], excludeExtensions: string[], extraSkills: string[]}}} PairConfig */
 /** @typedef {{reportId: string, workerId: string, taskId: string, ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string}} NoticeDetails */
 /** @typedef {{notice: import('./contracts.js').StoredNoticeV1, channel: 'manual' | 'auto', control: Control, message: string, details: NoticeDetails}} Delivery */
 /** @typedef {{notifyUser?: (message: string, level: 'info'|'warning'|'error') => void, notifyMain?: (message: string, details: NoticeDetails, options: {requireIdle: boolean}) => void | Promise<void>, reportReady?: (notice: import('./contracts.js').StoredNoticeV1) => void, promptUser?: import('./actor-runtime.js').RuntimeOptions['promptUser'], mainBusy?: () => boolean, mainHasDelivery?: (deliveryOperationId: string) => boolean, noticeMain?: (message: string) => void, superviseMain?: (message: string) => void, checkMain?: (message: string, details: {reportId: string, workerId: string, taskId: string}) => void, taskSettled?: () => void}} ControllerCallbacks */
@@ -204,15 +206,15 @@ export async function currentWorkspace(live, report, load) {
 }
 
 export class PairController extends EventEmitter {
-  /** @param {{config: Parameters<typeof validateConfig>[0], cwd: string, ownerSession: string, sourcePaths?: string[], storageDir?: string, scanIntervalMs?: number, callbacks?: ControllerCallbacks, rpcFactory?: (options: import('./rpc.js').RpcOptions) => PiRpc}} options */
-  constructor({ config, cwd, ownerSession, sourcePaths = [], storageDir, scanIntervalMs = 2000, callbacks = {}, rpcFactory = opts => new PiRpc(opts) }) {
+  /** @param {{config: Parameters<typeof validateConfig>[0], cwd: string, ownerSession: string, sourcePaths?: string[], storageDir?: string, scanIntervalMs?: number, callbacks?: ControllerCallbacks, rpcFactory?: (options: import('./rpc.js').RpcOptions) => PiRpc, spawnLow?: import('./low-runtime.js').LowRuntimeOptions['spawnLow']}} options */
+  constructor({ config, cwd, ownerSession, sourcePaths = [], storageDir, scanIntervalMs = 2000, callbacks = {}, rpcFactory = opts => new PiRpc(opts), spawnLow }) {
     super();
     /** @type {PairConfig} */ this.config = validateConfig(config);
     /** @type {PairConfig | null} */
     this.pendingConfig = null; this.cwd = cwd; this.ownerSession = String(ownerSession);
     /** @type {import('./contracts.js').StoredStateV1} */ this.state = { version: STATE_VERSION, ownerSession: this.ownerSession, ownerEpoch: 0, cwd, workers: {}, requests: {}, notices: {} };
     /** @type {Evidence | null} */ this._evidence = null;
-    this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory;
+    this.sources = sourcePaths; this.callbacks = callbacks; this.rpcFactory = rpcFactory; this.spawnLow = spawnLow;
     /** @type {Map<string, boolean>} */
     this.workspaceGit = new Map();
     /** Worker tool activity, refreshed from each worker's activity.json. Missing means none yet. @type {Map<string, import('./timeline.js').ActivityEvent[]>} */
@@ -223,9 +225,9 @@ export class PairController extends EventEmitter {
     /** @type {Set<string>} reports Main was already asked to retrieve by hand */ this.checkAsked = new Set();
     this.storageDir = storageDir; this.dir = storageDir || '';
     this.scanIntervalMs = Number.isFinite(scanIntervalMs) && scanIntervalMs > 0 ? scanIntervalMs : 2000;
-    /** @type {Map<string, PiRuntime>} */ this.handles = new Map();
+    /** @type {Map<string, WorkerRuntime>} */ this.handles = new Map();
     /** @type {Map<string, Promise<WorkerRecord>>} */ this.restarts = new Map();
-    /** @type {WeakMap<PiRuntime, RuntimeData>} */ this.runtimeData = new WeakMap();
+    /** @type {WeakMap<WorkerRuntime, RuntimeData>} */ this.runtimeData = new WeakMap();
     /** @type {Map<string, number>} */ this.intents = new Map();
     /** @type {Promise<void> | null} */ this.scanPromise = null;
     /** @type {Array<() => void>} supervision notices held until the scan's containment jobs finish */ this.scanNotices = [];
@@ -438,7 +440,7 @@ export class PairController extends EventEmitter {
     const h = this.handles.get(id);
     if (h?.ready && !h.closed) void h.abortCurrent(reason).catch(() => {}); // a confirmed exit needs no RPC abort
   }
-  /** @param {PiRuntime} runtime @param {Activation | null} activation @returns {boolean} */
+  /** @param {WorkerRuntime} runtime @param {Activation | null} activation @returns {boolean} */
   runtimeCurrent(runtime, activation) {
     const entry = [...this.handles].find(([, h]) => h === runtime);
     if (!entry || this.closing) return false;
@@ -458,7 +460,8 @@ export class PairController extends EventEmitter {
     assert(continuing || !this.pendingConfig, 'Saved runtime settings are pending. Finish/cancel the task, then run /pair start before new work.');
     const intent = this.intent(id), config = clone(this.config), configHash = this.configHash(config), spec = clone(this.workerSpec(id));
     assert(spec.provider && spec.model, 'Choose the worker provider/model in /pair settings first');
-    assert(!(spec.readOnly && config.requirements.fabric), 'UNSUPPORTED_PROFILE: read-only Pair workers cannot safely expose generic Fabric providers without a pre-effect authorization seam. Use the qualified single-writer profile.');
+    assert(!(spec.readOnly && config.runtime.backend === 'low'), 'UNSUPPORTED_PROFILE: a low worker cannot be read-only; low always edits its working tree.');
+    assert(!(spec.readOnly && config.requirements.fabric && config.runtime.backend === 'pi'), 'UNSUPPORTED_PROFILE: read-only Pair workers cannot safely expose generic Fabric providers without a pre-effect authorization seam. Use the qualified single-writer profile.');
     const existing = this.handles.get(id), r0 = this.state.workers[id];
     if (existing) {
       assert(!existing.closed && !existing.fault && r0?.status !== 'error', 'Stop the held generation before starting it again');
@@ -470,7 +473,7 @@ export class PairController extends EventEmitter {
     assert([...this.handles.values()].every(h => h.closed), 'UNSUPPORTED_PROFILE: Fabric Pair V1 supports one live/starting/stopping worker.');
     const cwd = await canonical(spec.cwd ? path.resolve(this.cwd, spec.cwd) : this.cwd);
     assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked');
-    if (config.requirements.fabric && config.runtime.command === 'pi' && config.runtime.commandArgs.length === 0) {
+    if (config.runtime.backend === 'pi' && config.requirements.fabric && config.runtime.command === 'pi' && config.runtime.commandArgs.length === 0) {
       const preflight = await preflightNativeProfile(cwd, config.requirements);
       assert(!preflight.blocked, preflight.message);
       assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked during profile preflight');
@@ -503,26 +506,21 @@ export class PairController extends EventEmitter {
       await Promise.all(['sessions', 'inbox', 'archive', 'fabric/mesh'].map(name => mkdirPrivate(path.join(dir, name))));
       assert(intent === this.intent(id) && !this.closing && configHash === this.configHash(), 'Start was revoked before runtime construction');
       const nonce = uid('instance');
-      const args = [...config.runtime.commandArgs, '--mode', 'rpc', '--provider', spec.provider, '--model', spec.model, '--session-dir', path.join(dir, 'sessions'), '--session', r.sessionFile];
-      if (!config.runtime.inheritExtensions) args.push('--no-extensions');
-      if (config.runtime.mcp === false) args.push('--no-mcp'); // Pi 1.0.4+: no MCP servers or tool roster in the worker
-      const inherited = config.runtime.inheritExtensions ? this.sources.filter(source => !excludedExtension(source, config.runtime.excludeExtensions)) : [];
-      for (const extension of new Set([...inherited, ...config.runtime.extraExtensions, ENTRY])) args.push('-e', extension);
-      for (const skill of config.runtime.extraSkills) args.push('--skill', skill);
-      const runtime = new PiRuntime({ rpcOptions: { command: config.runtime.command, args, cwd, requestTimeoutMs: config.runtime.requestTimeoutMs, shutdownTimeoutMs: config.runtime.shutdownTimeoutMs,
-        env: { PI_FABRIC_MESH_ROOT: meshRootFor(dir), PI_FABRIC_THINKING_BOUNDS: JSON.stringify({ min: spec.effort, max: spec.effort }), PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: id, PI_FABRIC_PAIR_WORKER_DIR: dir, PI_FABRIC_PAIR_OWNER: this.ownerSession, PI_FABRIC_PAIR_OWNER_EPOCH: String(this.state.ownerEpoch), PI_FABRIC_PAIR_WORKER_GENERATION: String(r.workerGeneration), PI_FABRIC_PAIR_NONCE: nonce, PI_FABRIC_PAIR_PARENT_PID: String(process.pid) } },
-        rpcFactory: this.rpcFactory, ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch, workerId: id, workerGeneration: r.workerGeneration, nonce, dir, cwd,
+      const shared = { ownerSession: this.ownerSession, ownerEpoch: this.state.ownerEpoch, workerId: id, workerGeneration: r.workerGeneration, nonce, dir, cwd,
         sessionFile: r.sessionFile, sessionId: r.sessionId, freshSession, config, spec, entryPath: ENTRY,
-        promptUser: (workerId, event, options) => this.callbacks.promptUser?.(workerId, event, options) || Promise.resolve({ cancelled: true }),
-        onWake: () => this.scheduleScan(), isCurrent: (h, activation) => this.runtimeCurrent(h, activation),
-        onSpawn: pid => {
+        promptUser: /** @type {import('./actor-runtime.js').RuntimeOptions['promptUser']} */ ((workerId, event, options) => this.callbacks.promptUser?.(workerId, event, options) || Promise.resolve({ cancelled: true })),
+        onWake: () => this.scheduleScan(),
+        onSpawn: (/** @type {number} */ pid) => {
           const spawnedAt = Date.now();
           const work = this.transaction(async () => {
             if (this.state.workers[id] !== r || r.workerGeneration !== generation) return;
             r.pid = pid; r.spawnedAt = spawnedAt; await this.persist();
           }).catch(error => this.notifyUser(`[${id}] Could not record the worker process ID: ${briefError(error)}`, 'warning')).finally(() => this.containmentWork.delete(work));
           this.containmentWork.add(work);
-        } });
+        } };
+      const runtime = config.runtime.backend === 'low'
+        ? new LowRuntime({ ...shared, low: { command: config.runtime.lowCommand, args: config.runtime.lowArgs }, spawnLow: this.spawnLow, isCurrent: (h, activation) => this.runtimeCurrent(h, activation) })
+        : this.piRuntime(config, spec, r, shared);
       this.runtimeData.set(runtime, { configHash, specHash: digest(spec), activationIntent: intent, pendingControls: 0, failureHandled: false, telemetry: null, verificationAbort: null });
       this.handles.set(id, runtime);
       return { id, record: r, runtime, intent, configHash };
@@ -533,6 +531,25 @@ export class PairController extends EventEmitter {
         catch (failure) { throw new AggregateError([error, failure], 'Unspawned launch cleanup could not be persisted'); }
       }
       throw error;
+    }
+  }
+  /**
+   * The Pi RPC worker: Pi in RPC mode with Pair's worker extension.
+   * @param {PairConfig} config @param {import('./contracts.js').WorkerSpec} spec @param {WorkerRecord} r
+   * @param {Omit<import('./actor-runtime.js').RuntimeOptions, 'rpcOptions' | 'rpcFactory' | 'isCurrent'>} shared
+   */
+  piRuntime(config, spec, r, shared) {
+    const { dir, cwd, nonce } = shared, id = shared.workerId;
+    {
+      const args = [...config.runtime.commandArgs, '--mode', 'rpc', '--provider', spec.provider, '--model', spec.model, '--session-dir', path.join(dir, 'sessions'), '--session', shared.sessionFile];
+      if (!config.runtime.inheritExtensions) args.push('--no-extensions');
+      if (config.runtime.mcp === false) args.push('--no-mcp'); // Pi 1.0.4+: no MCP servers or tool roster in the worker
+      const inherited = config.runtime.inheritExtensions ? this.sources.filter(source => !excludedExtension(source, config.runtime.excludeExtensions)) : [];
+      for (const extension of new Set([...inherited, ...config.runtime.extraExtensions, ENTRY])) args.push('-e', extension);
+      for (const skill of config.runtime.extraSkills) args.push('--skill', skill);
+      return new PiRuntime({ ...shared, rpcOptions: { command: config.runtime.command, args, cwd, requestTimeoutMs: config.runtime.requestTimeoutMs, shutdownTimeoutMs: config.runtime.shutdownTimeoutMs,
+        env: { PI_FABRIC_MESH_ROOT: meshRootFor(dir), PI_FABRIC_THINKING_BOUNDS: JSON.stringify({ min: spec.effort, max: spec.effort }), PI_FABRIC_PAIR_ROLE: 'worker', PI_FABRIC_PAIR_WORKER_ID: id, PI_FABRIC_PAIR_WORKER_DIR: dir, PI_FABRIC_PAIR_OWNER: this.ownerSession, PI_FABRIC_PAIR_OWNER_EPOCH: String(this.state.ownerEpoch), PI_FABRIC_PAIR_WORKER_GENERATION: String(r.workerGeneration), PI_FABRIC_PAIR_NONCE: nonce, PI_FABRIC_PAIR_PARENT_PID: String(process.pid) } },
+        rpcFactory: this.rpcFactory, isCurrent: (h, activation) => this.runtimeCurrent(h, activation) });
     }
   }
   /** @param {Launch} launch */
@@ -958,7 +975,7 @@ export class PairController extends EventEmitter {
       await this.activationFailed(work, error); throw error;
     }
   }
-  /** @param {string} id @param {WorkerRecord} record @param {PiRuntime} runtime */
+  /** @param {string} id @param {WorkerRecord} record @param {WorkerRuntime} runtime */
   consumeObservations(id, record, runtime) {
     let changed = false;
     for (let batch = runtime.takeObservations(); batch.length; batch = runtime.takeObservations()) {
@@ -1010,7 +1027,7 @@ export class PairController extends EventEmitter {
   /**
    * Whether this runtime's current compaction is maintenance the controller should wait for: it started outside
    * a lease and has not yet passed control.compactionMaxMs (a compaction past the bound is being stopped).
-   * @param {PiRuntime} runtime
+   * @param {WorkerRuntime} runtime
    * @returns {boolean}
    */
   compactionWithinBound(runtime) {
@@ -1024,7 +1041,7 @@ export class PairController extends EventEmitter {
   /**
    * Wait for a running between-run compaction, so report settlement, checkpoint freezing and the next
    * activation do not race it. Compaction never touches the workspace, so this only waits.
-   * @param {PiRuntime} runtime @param {number} [timeoutMs]
+   * @param {WorkerRuntime} runtime @param {number} [timeoutMs]
    * @returns {Promise<void>}
    */
   async awaitCompaction(runtime, timeoutMs = this.compactionBound()) {
@@ -1158,7 +1175,7 @@ export class PairController extends EventEmitter {
       for (const r of Object.values(this.state.workers)) this.taskSettled(r.task);
     });
   }
-  /** @param {string} id @param {PiRuntime} h @param {Array<() => Promise<void>>} jobs @returns {Promise<boolean>} */
+  /** @param {string} id @param {WorkerRuntime} h @param {Array<() => Promise<void>>} jobs @returns {Promise<boolean>} */
   async #scanWorker(id, h, jobs) {
     let changed = false;
     const r = this.record(id), t = r.task, data = this.runtimeData.get(h); assert(data, 'Missing runtime bookkeeping');
@@ -2206,7 +2223,7 @@ export class PairController extends EventEmitter {
   async peek(id) {
     const r = this.record(id), t = r.task;
     assert(t, 'This worker has no task to look at');
-    const liveness = this.workerLiveness(id);
+    const liveness = this.workerLiveness(id), handle = this.handles.get(id);
     // The transcript tail is the worker's own words, already cached by file identity, so this stays cheap.
     const tail = await this.transcript(id).catch(() => '');
     const lines = String(tail).split('\n').filter(line => line.trim());
@@ -2217,6 +2234,8 @@ export class PairController extends EventEmitter {
       liveness,
       recentActivity: (this.recentActivity.get(id) ?? []).slice(-6).map(event => ({ tool: event.tool, target: bounded(event.target, 120), at: event.at })),
       lastAssistantText: bounded(lines.slice(-6).join('\n'), 1500) || null,
+      // A low worker's own account of its step: the run under way, its plan, requests and steers waiting.
+      ...(handle instanceof LowRuntime ? { progress: handle.progress } : {}),
       context: liveness.context,
       stepElapsedMs: liveness.stepElapsedMs,
       steersLeft: Math.max(0, this.steerAllowance() - steersSpent),
@@ -2738,7 +2757,9 @@ ${advice}`;
     const { ino, size, mtimeMs } = await fs.lstat(file), last = this.lastTranscript;
     if (last && last.key === key && last.file === file && last.ino === ino && last.size === size && last.mtimeMs === mtimeMs) return last.text;
     const entries = await readJsonlTail(file, TRANSCRIPT_TAIL_BYTES);
-    const text = transcriptText(entries.filter(entry => entry.type === 'message' && isRpcRecord(entry.message)).map(entry => entry.message), { full });
+    // A low worker's session log has its own shape: messages with a top-level role and no Pi entry type.
+    const pi = entries.filter(entry => entry.type === 'message' && isRpcRecord(entry.message)).map(entry => entry.message);
+    const text = transcriptText(pi.length || !entries.some(entry => typeof entry.role === 'string') ? pi : lowMessages(entries), { full });
     this.lastTranscript = { key, file, ino, size, mtimeMs, text };
     return text;
   }
