@@ -3,7 +3,8 @@ import path from 'node:path';
 import { atomicJSON, assert, bounded, digest, inside, mkdirPrivate, plain, PROTOCOL, readJSON, safeId, Serial, uid } from './util.js';
 import { assertReportSize, reportSchema } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope, validateReportPayload } from './contracts.js';
-import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, pairToolRoute, isDirectMutation, nativeSettings, probeNative, providerFileWrite, refusedProgramReason, requestsDetachedEffect, reviewWarmingAction, signedIn, toolName, toolPlacement } from './native.js';
+import { detachedEffectDescription, detachedProviderEffect, detachingProgramCalls, ensureCacheLifetime, gateTool, guardProgramShell, guardShellCall, pairToolRoute, isDirectMutation, nativeSettings, probeNative, providerFileWrite, refusedProgramReason, requestsDetachedEffect, reviewWarmingAction, shellTimeoutNote, signedIn, toolName, toolPlacement } from './native.js';
+import { outOfScope, scopeSentence } from './scope.js';
 import { addSpeedSample, selectLastMeasuredUsage } from './metrics.js';
 import { normalizeActivity, pushActivity } from './timeline.js';
 
@@ -348,6 +349,16 @@ export function registerWorker(pi, env = process.env) {
     if (detaching.length) return { block: true, reason: `Pair workers cannot call ${detaching.join(', ')}: each leaves work running or changes shared state after the call. Do this step's work directly in this session.` };
     const refused = refusedProgramReason(event.toolName, event.input);
     if (refused) return { block: true, reason: refused };
+    // The shell guard: the commands Pair's human reserved for themselves, and a default timeout so a hung command is
+    // bounded up front. A fabric_exec program is checked too, because its nested pi.bash calls reach the core tools
+    // inside the program's own kernel and never come back through this handler.
+    const guard = authority.shellGuard;
+    if (guard) {
+      const shell = guardShellCall(event.toolName, event.input, guard);
+      if (shell) return shell;
+      const program = guardProgramShell(event.toolName, event.input, guard);
+      if (program) return program;
+    }
     const n = toolName(event.toolName);
     if (/^(bash|powershell)$/.test(n)) {
       const policy = await nativeSettings(ctx.cwd, ctx.isProjectTrusted?.() === true, env);
@@ -362,6 +373,14 @@ export function registerWorker(pi, env = process.env) {
       if (typeof target === 'string') {
         const absolute = path.resolve(ctx.cwd, target);
         if (!inside(authority.repoRoot || ctx.cwd, absolute)) return { block: true, reason: 'Direct write is outside this Pair workspace' };
+        // Step scope, when Main set one and asked for it to be enforced. The shape is the repo-root check's: the
+        // target is compared as a repository-relative path, and a write outside the step's globs is refused with the
+        // scope named, so the worker can retry inside it or report that the step needs a wider one.
+        const scope = authority.task?.steps[authority.task.stepIndex]?.scope;
+        if (authority.enforceStepScope === true && Array.isArray(scope) && scope.length) {
+          const relative = path.relative(authority.repoRoot || ctx.cwd, absolute).split(path.sep).join('/');
+          if (outOfScope(scope, [relative], authority.repoRoot || ctx.cwd).length) return { block: true, reason: `SCOPE_REFUSED: ${relative} is outside ${scopeSentence(scope)}. Stay inside the step's scope, or report that the step needs a wider one.` };
+        }
         let existing = absolute;
         for (;;) {
           try { const real = await fs.realpath(existing); if (!inside(authority.repoRoot || ctx.cwd, real)) return { block: true, reason: 'Direct write follows a symlink outside this Pair workspace' }; break; }
@@ -373,6 +392,10 @@ export function registerWorker(pi, env = process.env) {
   });
   pi.on('tool_result', async (event, ctx) => {
     const details = event.details;
+    // A command that ran into its own timeout is the usual hang: a test waiting forever, a server in the foreground.
+    // Run unchanged it hangs again for as long, so the worker is told before it decides what to do next.
+    const timedOut = event.isError ? shellTimeoutNote(event.toolName, event.content) : null;
+    if (timedOut) return { content: [...event.content, { type: 'text', text: timedOut }], details: event.details, ...(event.structuredContent !== undefined ? { structuredContent: event.structuredContent } : {}) };
     if (event.isError) return undefined;
     /** @type {number | null} */ let pid = null;
     let text;

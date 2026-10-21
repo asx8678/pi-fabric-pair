@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { agentDir, assert, atomicJSON, digest, exists, isArray, merge, plain, readJSON as readUntypedJSON, safeId } from './util.js';
-import { EFFORT_LEVELS } from './contracts.js';
+import { EFFORT_LEVELS, MAX_WORKER_FALLBACKS } from './contracts.js';
 
 /** @type {(file: string, fallback?: unknown, maxBytes?: number) => Promise<unknown>} */
 const readJSON = readUntypedJSON;
@@ -16,7 +16,7 @@ export function isIndicator(value) { return INDICATORS.some(mode => mode === val
 /** @typedef {{fabric: boolean, fovea: boolean, prewalkDisabled: boolean, autoCompaction: boolean}} ConfigRequirements */
 /** @typedef {{maxFiles: number, maxTotalBytes: number, maxArtifactBytes: number}} EvidenceConfig */
 /** @typedef {{enabled: boolean, provider: string, model: string, on: 'final' | 'checkpoints', timeoutMs: number}} PeerReviewConfig */
-/** Supervision budgets and thresholds. Never part of configHash(): tuning them must not interrupt a running worker. @typedef {{watchdog: boolean, silentMs: number, pingTimeoutMs: number, toolMaxMs: number, stepNudgeMs: number, maxAutoRecoveriesPerStep: number, noReportNudges: number, maxSteersPerStep: number, providerCooldownMs: number, quotaCooldownMs: number, maxProviderWaits: number, compactionMaxMs: number, mainHeartbeat: 'off' | 'note' | 'wake', mainHeartbeatMs: number}} ControlConfig */
+/** Supervision budgets and thresholds. Never part of configHash(): tuning them must not interrupt a running worker. @typedef {{watchdog: boolean, silentMs: number, pingTimeoutMs: number, toolMaxMs: number, stepNudgeMs: number, maxAutoRecoveriesPerStep: number, autoRepairsPerStep: number, blockedCommands: string[], defaultShellTimeoutS: number, noReportNudges: number, maxSteersPerStep: number, providerCooldownMs: number, quotaCooldownMs: number, maxProviderWaits: number, fallbackAfterWaits: number, compactionMaxMs: number, compactBeforeTaskTokens: number, freshSessionAboveTokens: number, mainHeartbeat: 'off' | 'note' | 'wake', mainHeartbeatMs: number}} ControlConfig */
 /** @typedef {{version: 2, enabled: boolean, autoStart: boolean, indicator: Indicator, maxWorkers: number, workers: import('./contracts.js').WorkerSpec[], supervision: import('./contracts.js').TaskPolicy, runtime: RuntimeConfig, requirements: ConfigRequirements, limits: import('./contracts.js').CurrentTaskLimits, verification: import('./contracts.js').VerificationPolicy, evidence: EvidenceConfig, peerReview: PeerReviewConfig, mainReadOnlyDuringTasks: boolean, autoDeliverReports: boolean, autoCheckIdle: boolean, mainSupervision: boolean, attentionCue: boolean, maxMainRecoveries: number, control: ControlConfig}} PairConfig */
 /** @typedef {'supervision' | 'runtime' | 'requirements' | 'limits' | 'verification' | 'evidence' | 'peerReview' | 'control'} NestedConfigKey */
 /** @typedef {Partial<Omit<PairConfig, NestedConfigKey>> & {supervision?: Partial<PairConfig['supervision']>, runtime?: Partial<RuntimeConfig>, requirements?: Partial<ConfigRequirements>, limits?: Partial<PairConfig['limits']>, verification?: Partial<PairConfig['verification']>, evidence?: Partial<EvidenceConfig>, peerReview?: Partial<PeerReviewConfig>, control?: Partial<ControlConfig>}} ConfigLayer */
@@ -37,7 +37,10 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
   indicator: 'minimal',
   maxWorkers: 1,
   workers: [{ id: 'worker', provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }],
-  supervision: { mode: 'milestones', finalReview: true, maxRevisions: 20, maxRevisionsPerStep: 3, summaryDetail: 'normal', maxStepFiles: 5 },
+  // enforceStepScope: whether a step's declared scope is enforced inside a Pi worker (a low worker has no in-worker
+  // gate, so its out-of-scope files are named at the checkpoint instead). Off by default: a scope is advisory until
+  // the human asks Pair to refuse writes outside it.
+  supervision: { mode: 'milestones', finalReview: true, maxRevisions: 20, maxRevisionsPerStep: 3, summaryDetail: 'normal', maxStepFiles: 5, enforceStepScope: false },
   runtime: { backend: 'pi', lowCommand: 'low', lowArgs: [], command: 'pi', commandArgs: [], extraExtensions: [], excludeExtensions: [], extraSkills: [], inheritExtensions: true, mcp: true, startupTimeoutMs: 120000, requestTimeoutMs: 30000, shutdownTimeoutMs: 5000 },
   requirements: { fabric: true, fovea: true, prewalkDisabled: true, autoCompaction: true },
   limits: {
@@ -57,10 +60,32 @@ export const DEFAULTS = Object.freeze(/** @satisfies {PairConfig} */ ({
     watchdog: true,
     silentMs: 300000, pingTimeoutMs: 20000, toolMaxMs: 900000, stepNudgeMs: 1200000,
     maxAutoRecoveriesPerStep: 2, noReportNudges: 1, maxSteersPerStep: 6,
+    // How many times Pair sends a step back to the worker on its own for a mechanical failure (a failed configured
+    // check, an oversized step, checks that describe a different workspace). Past the bound the report reaches Main
+    // with the repair history. Outside configHash(), like every other control.
+    autoRepairsPerStep: 2,
+    // Commands a Pair worker may not run at all, as regexes matched against the command text. These are the
+    // destructive repository and release operations that belong to the human: rewriting history, force-cleaning,
+    // publishing a package, and anything as root. A worker that needs one reports instead of running it.
+    // Each pattern ends at a word boundary so it matches the command, not a longer word: `git commit` but not
+    // `git commitx`, `git stash` but not `git stashx`.
+    blockedCommands: ['git\\s+commit\\b', 'git\\s+push\\b', 'git\\s+reset\\s+--hard\\b', 'git\\s+checkout\\s+--\\s', 'git\\s+clean\\s+-[a-z]*f',
+      'git\\s+rebase\\b', 'git\\s+stash\\b', 'git\\s+branch\\s+-D\\b', '(npm|pnpm|yarn|bun)\\s+publish\\b', 'sudo(\\s|$)', 'rm\\s+-[a-zA-Z]*[rR][a-zA-Z]*[fF][a-zA-Z]*\\s+(/|~)', 'rm\\s+-[a-zA-Z]*[fF][a-zA-Z]*[rR][a-zA-Z]*\\s+(/|~)', 'rm\\s+(?:-[rR]\\s+-[fF]|-[fF]\\s+-[rR])\\s+(/|~)'],
+    // The shell timeout limit, in seconds: a Pi worker's shell call with no timeout gets it, one asking for more is
+    // cut to it (refused, in a fabric_exec program), so a hung command is bounded up front. In Pair's records no
+    // worker command needed more than about seven minutes and every one past ten was hung. 0 leaves calls as set.
+    defaultShellTimeoutS: 600,
     providerCooldownMs: 60000, quotaCooldownMs: 900000, maxProviderWaits: 4,
+    // A worker with fallbacks switches to the next one after this many transient provider waits in a step (a quota
+    // stop switches at once). 0 switches at the first transient failure.
+    fallbackAfterWaits: 2,
     // How long a between-run compaction (Fabric compacts right after a run settles) may run before Pair stops
     // it. 0 restores the old behaviour of refusing compaction outside a lease.
     compactionMaxMs: 600000,
+    // Context hygiene at dispatch: a task never starts in a bloated context. Above the first threshold the worker
+    // compacts first (Pi) or starts a fresh low session; above the second it starts a new conversation and the old
+    // session file is archived. 0 turns the second off.
+    compactBeforeTaskTokens: 200000, freshSessionAboveTokens: 600000,
     mainHeartbeat: 'off', mainHeartbeatMs: 900000
   },
   mainSupervision: false,
@@ -89,6 +114,33 @@ function assertKeys(value, allowed, label) {
   assert(plain(value), `${label} must be an object`);
   for (const key of Object.keys(value)) assert(allowed.includes(key), `Unknown ${label} setting: ${key}`);
 }
+/**
+ * The backend a worker runs on: its own setting, or the project default in `runtime.backend`.
+ *
+ * Resolution lives in one function so nothing has to remember the fallback. A config file written before a worker
+ * could choose its backend has no `spec.backend`, and keeps behaving exactly as it did.
+ * @param {{backend?: 'pi' | 'low'}} spec @param {{backend: 'pi' | 'low'}} runtime @returns {'pi' | 'low'}
+ */
+export function workerBackend(spec, runtime) { return spec.backend ?? runtime.backend; }
+/**
+ * The low command and arguments for a worker: its own, or the project default. Only meaningful for a low worker,
+ * but resolved the same way so a Pi worker's spec can be compared without special cases.
+ * @param {{lowCommand?: string, lowArgs?: string[]}} spec @param {{lowCommand: string, lowArgs: string[]}} runtime
+ * @returns {{command: string, args: string[]}}
+ */
+export function workerLow(spec, runtime) { return { command: spec.lowCommand ?? runtime.lowCommand, args: spec.lowArgs ?? runtime.lowArgs }; }
+/**
+ * The spec a worker runs on its fallback `index`: the fallback's provider and model, its effort and backend when it
+ * names them, and everything else (id, cwd, readOnly, low command) from the worker. Null when there is no such entry.
+ * @param {import('./contracts.js').WorkerSpec} spec @param {number} index @returns {import('./contracts.js').WorkerSpec | null}
+ */
+export function fallbackSpec(spec, index) {
+  const fallback = spec.fallbacks?.[index];
+  if (!fallback) return null;
+  const { fallbacks: _fallbacks, ...rest } = spec;
+  return { ...rest, provider: fallback.provider, model: fallback.model, effort: fallback.effort ?? spec.effort, ...(fallback.backend ? { backend: fallback.backend } : {}) };
+}
+
 /** @param {unknown} [raw] @returns {PairConfig} */
 export function validateConfig(raw = {}) {
   assert(plain(raw), 'Pair configuration must be an object');
@@ -131,16 +183,35 @@ function assertMergedConfig(c) {
   const ids = new Set();
   for (const w of c.workers) {
     assert(plain(w), 'Invalid worker'); const id = safeId(w.id, 'worker ID'); assert(!ids.has(id), 'Duplicate worker ID'); ids.add(id);
-    for (const key of Object.keys(w)) assert(['id', 'provider', 'model', 'effort', 'cwd', 'readOnly'].includes(key), `Unknown worker setting ${key}`);
+    for (const key of Object.keys(w)) assert(['id', 'provider', 'model', 'effort', 'cwd', 'readOnly', 'backend', 'lowCommand', 'lowArgs', 'fallbacks'].includes(key), `Unknown worker setting ${key}`);
+    if (w.fallbacks !== undefined) {
+      assert(isArray(w.fallbacks) && w.fallbacks.length <= MAX_WORKER_FALLBACKS, `worker.fallbacks must be an array of at most ${MAX_WORKER_FALLBACKS} entries`);
+      for (const f of w.fallbacks) {
+        assert(plain(f) && Object.keys(f).every(key => ['provider', 'model', 'effort', 'backend'].includes(key)), 'worker.fallbacks entries take provider, model, effort and backend');
+        for (const key of ['provider', 'model']) assert(typeof f[key] === 'string' && f[key].length > 0 && f[key].length < 1000, `worker.fallbacks ${key} must be a non-empty string`);
+        if (f.effort !== undefined) assert(EFFORT_LEVELS.some(level => level === f.effort), `Unsupported fallback effort level; use one of ${EFFORT_LEVELS.join(', ')}`);
+        if (f.backend !== undefined) assert(f.backend === 'pi' || f.backend === 'low', `worker.fallbacks backend must be "pi" or "low", not ${JSON.stringify(f.backend)}`);
+        assert(!(w.readOnly && workerBackend(/** @type {{backend?: 'pi' | 'low'}} */ (f.backend ? f : w), /** @type {PairConfig} */ (c).runtime) === 'low'), 'A read-only worker cannot fall back to the low backend: low has no in-worker gate to keep it read-only.');
+      }
+    }
+    // A worker may choose its own backend; absent means the project default in runtime.backend.
+    if (w.backend !== undefined) assert(w.backend === 'pi' || w.backend === 'low', `worker.backend must be "pi" or "low", not ${JSON.stringify(w.backend)}`);
+    if (w.lowCommand !== undefined) assert(typeof w.lowCommand === 'string' && w.lowCommand.length > 0 && !w.lowCommand.includes('\0'), 'worker.lowCommand must be a non-empty command');
+    if (w.lowArgs !== undefined) assert(isArray(w.lowArgs) && w.lowArgs.every(v => typeof v === 'string' && !v.includes('\0')), 'worker.lowArgs must be a string array');
     for (const key of ['provider', 'model']) assert(typeof w[key] === 'string' && w[key].length < 1000, `worker.${key} must be a string`);
     assert(EFFORT_LEVELS.some(level => level === w.effort), `Unsupported effort level; use one of ${EFFORT_LEVELS.join(', ')}`);
     assert(w.cwd === null || typeof w.cwd === 'string', 'worker.cwd must be null or a path');
     assert(typeof w.readOnly === 'boolean', 'worker.readOnly must be boolean');
+    // A read-only low worker is refused here, not only when it starts: the config is the file a human edits and
+    // 'Edit as JSON' saves through this same validation, so a combination Pair will never run must not load or
+    // persist — otherwise it sits in the file looking valid and fails much later, or never if the worker never starts.
+    assert(!(w.readOnly && workerBackend(/** @type {{backend?: 'pi' | 'low'}} */ (w), /** @type {PairConfig} */ (c).runtime) === 'low'), 'worker.readOnly cannot be used with a low backend: a low worker runs without Pair\'s in-worker tool gate, so read-only cannot be enforced for it. Turn readOnly off or run the worker on "pi".');
   }
   assert(typeof c.supervision.mode === 'string' && ['final-only', 'milestones', 'every-step'].includes(c.supervision.mode), 'Invalid supervision mode');
   assert(c.supervision.finalReview === true, 'This release always requires final review');
   for (const key of ['maxRevisions', 'maxRevisionsPerStep']) assert(typeof c.supervision[key] === 'number' && Number.isInteger(c.supervision[key]) && c.supervision[key] >= 0 && c.supervision[key] <= 20, `${key} must be 0–20`);
   assert(typeof c.supervision.maxStepFiles === 'number' && Number.isSafeInteger(c.supervision.maxStepFiles) && c.supervision.maxStepFiles >= 1 && c.supervision.maxStepFiles <= 1000, 'maxStepFiles must be 1–1000');
+  assert(typeof c.supervision.enforceStepScope === 'boolean', 'supervision.enforceStepScope must be boolean');
   assert(typeof c.supervision.summaryDetail === 'string' && ['minimal', 'normal', 'detailed'].includes(c.supervision.summaryDetail), 'Invalid summary detail');
   assert(typeof c.runtime.command === 'string' && c.runtime.command.length > 0 && !c.runtime.command.includes('\0'), 'runtime.command is required');
   assert(c.runtime.backend === 'pi' || c.runtime.backend === 'low', 'runtime.backend must be "pi" or "low"');
@@ -162,13 +233,22 @@ function assertMergedConfig(c) {
   /** @type {Record<string, [number, number]>} */
   const boundedControl = {
     silentMs: [10000, 3600000], pingTimeoutMs: [1000, 300000], toolMaxMs: [60000, 86400000], stepNudgeMs: [60000, 86400000],
-    maxAutoRecoveriesPerStep: [0, 20], noReportNudges: [0, 5], maxSteersPerStep: [0, 20],
-    providerCooldownMs: [1000, 3600000], quotaCooldownMs: [60000, 86400000], maxProviderWaits: [0, 20],
+    maxAutoRecoveriesPerStep: [0, 20], autoRepairsPerStep: [0, 20], defaultShellTimeoutS: [0, 86400], noReportNudges: [0, 5], maxSteersPerStep: [0, 20],
+    providerCooldownMs: [1000, 3600000], quotaCooldownMs: [60000, 86400000], maxProviderWaits: [0, 20], fallbackAfterWaits: [0, 20],
     // 0 is meaningful here: it turns the maintenance-compaction allowance off.
-    compactionMaxMs: [0, 86400000], mainHeartbeatMs: [60000, 86400000]
+    compactionMaxMs: [0, 86400000], mainHeartbeatMs: [60000, 86400000],
+    // 0 turns the fresh-session threshold off, and 0 turns the pre-task compaction off.
+    compactBeforeTaskTokens: [0, 10000000], freshSessionAboveTokens: [0, 10000000]
   };
   for (const [key, [minimum, maximum]] of Object.entries(boundedControl)) {
     assert(typeof c.control[key] === 'number' && Number.isSafeInteger(c.control[key]) && c.control[key] >= minimum && c.control[key] <= maximum, `control.${key} must be ${minimum}–${maximum}`);
+  }
+  // The blocked-command list is config a human edits, so a pattern that does not compile is refused here rather than
+  // silently never matching in a worker that cannot be re-checked. The list is bounded to keep a state file sane.
+  assert(Array.isArray(c.control.blockedCommands) && c.control.blockedCommands.length <= 64, 'control.blockedCommands must be an array of at most 64 patterns');
+  for (const pattern of c.control.blockedCommands) {
+    assert(typeof pattern === 'string' && pattern.length > 0 && pattern.length <= 500, 'control.blockedCommands must hold non-empty strings of at most 500 characters');
+    try { new RegExp(pattern); } catch { assert(false, `control.blockedCommands has an invalid pattern: ${pattern}`); }
   }
   /** @type {Record<string, [number, number]>} */
   const boundedLimits = { maxReportsPerTask: [1, 1000], maxReportBytes: [1, 1048576], maxAutomaticReportRepairs: [0, 20] };

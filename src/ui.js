@@ -1471,7 +1471,8 @@ function workerRowText(summary, w, selected, room, fg, now) {
     : state.label;
   const task = w.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
   const stepText = task ? `step ${task.step}/${task.steps}` : '';
-  const model = w.model && w.model !== '/' ? w.model : 'no model';
+  // While a fallback runs the task, the roster names the model actually working, not the configured one.
+  const model = w.fallback ? w.fallback.model : w.model && w.model !== '/' ? w.model : 'no model';
   // The state word carries its own colour; everything else is muted so the colour reads as the state.
   const tail = `  ${fg(state.color, word)}${stepText ? fg('muted', ` · ${stepText}`) : ''}`;
   const isDefault = dashboardWorker(summary) === w;
@@ -1481,7 +1482,9 @@ function workerRowText(summary, w, selected, room, fg, now) {
   let head = headOf(true);
   if (visibleWidth(head) + visibleWidth(tail) + 4 > room) head = headOf(false);
   const roomForMeta = room - visibleWidth(head) - visibleWidth(tail);
-  const meta = [model, w.effort].filter(Boolean).join(' · ');
+  // The backend belongs in the roster: with a mixed project the same model name can be a Pi worker or a low one.
+  const backend = w.fallback ? w.fallback.backend : w.backend;
+  const meta = [model, w.fallback ? 'fallback' : w.effort, backend === 'low' ? 'low' : backend === 'pi' ? 'pi' : null].filter(Boolean).join(' · ');
   // The meta column is what gets clipped; the state word and the step must always be readable.
   return truncateToWidth(head + fg('muted', truncateToWidth(meta, Math.max(2, roomForMeta), '…')) + tail, room, '…');
 }
@@ -1831,13 +1834,14 @@ export function statusText(summary, _native = null, now = Date.now()) {
   for (const w of summary.workers) {
     const active = ['working', 'settling', 'starting'].includes(w.status), obs = w.observation, task = w.task ?? null;
     lines.push(`## Worker · ${w.id}`, row('State', `${symbol(w.status)} ${w.status === 'permission' ? 'needs permission' : w.status.replace(/_/g, ' ')}`),
-      row('Model', hasModel(w) ? `${w.model} · effort ${w.effort}` : 'not chosen yet'));
+      row('Model', hasModel(w) ? `${w.model} · effort ${w.effort}${w.backend === 'low' ? ' · low' : w.backend === 'pi' ? ' · pi' : ''}` : 'not chosen yet'));
     if (w.error) lines.push(`! ${w.error}`);
     if (w.task && active && activityAge(w, now) >= STALE_AGE_MS) lines.push('! No recent worker activity. Read the transcript or cancel the task.');
     const next = nextAction(w);
     if (next) lines.push(row('Next', next === '/pair to set up' ? 'open /pair and choose the worker model'
       : next === 'not a Git repo' ? 'open Pi in a Git repository, or set the worker workspace in /pair settings → Worker → Workspace'
       : next === '/pair' ? 'open /pair for this worker' : next));
+    if (w.fallback) lines.push(row('Fallback', `${w.fallback.model}${w.fallback.backend === 'low' ? ' · low' : ''} for the rest of this task`));
     if (w.pendingConfiguration) lines.push(row('Settings', 'change pending; applied before the next task'));
     if (w.task) {
       const cost = typeof w.task.reportedCost === 'number' && w.task.reportedCost > 0 ? ` · ${costLabel(w.task.reportedCost)}` : '';
@@ -2756,11 +2760,18 @@ function reportCard(report, expanded) {
   else lines.push({ color: null, text: `  ${inline(asksSomething ? question : summaryLines[0] ?? '(no summary)', 400)}` });
   lines.push(pairVerifiedLine(report.independentlyRunChecks, expanded));
   lines.push(workerClaimsLine(report.checks, expanded));
+  // The step's acceptance criteria with the worker's verdict on each: one row seen/count, the entries when expanded.
+  const acceptance = Array.isArray(report.acceptance) ? report.acceptance.filter(claim => claim && typeof claim === 'object') : [];
+  if (acceptance.length) {
+    const met = acceptance.filter(claim => claim.met === true).length;
+    lines.push({ color: met === acceptance.length ? 'muted' : 'warning', text: `  Acceptance  ${met}/${acceptance.length} met` });
+    if (expanded) for (const claim of acceptance) lines.push({ color: claim.met === true ? null : 'warning', text: `    ${claim.met === true ? '✔' : '✖'} ${inline(String(claim.criterion ?? ''), 200)}${typeof claim.evidence === 'string' && claim.evidence.trim() ? ` — ${inline(claim.evidence, 300)}` : ''}` });
+  }
   // Files: count plus the first few names. A collapsed question drops this row to stay within six lines.
   const shownFiles = expanded ? files : files.slice(0, 3);
   if (expanded || !asksSomething) lines.push({ color: 'muted', text: `  ${fileCount} file${fileCount === 1 ? '' : 's'}${shownFiles.length ? ` · ${shownFiles.map(file => inline(String(file), 120)).join(', ')}` : ''}${shownFiles.length < files.length ? ', …' : ''}` });
   // Warnings only when the controller set them; a collapsed card keeps them on one row.
-  const notices = [report.stepSizeNotice, report.workerBudgetNotice].filter(notice => typeof notice === 'string' && notice.trim()).map(notice => inline(String(notice), 300));
+  const notices = [report.stepSizeNotice, report.scopeNotice, report.workerBudgetNotice].filter(notice => typeof notice === 'string' && notice.trim()).map(notice => inline(String(notice), 300));
   if (notices.length) lines.push({ color: 'warning', text: `⚠ ${notices.join(' · ')}` });
   if (!expanded) return lines;
   // Waiting for Main is calm (accent), not a warning: Main answers it.

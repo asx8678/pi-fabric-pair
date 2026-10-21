@@ -107,7 +107,7 @@ the file cannot drift apart:
 | --- | --- |
 | Workers | The roster first — one row per worker, the default starred — then, for the worker being edited, model, thinking effort, read-only and workspace, followed by Make default, Move up, Move down, Duplicate, Remove and Add a worker… last. With more than one worker an Editing row at the top of that block chooses which one the page edits. The roster rows are read-only: order and membership change through the rows below it. |
 | Review | Review policy, step size limit, revision limit, revisions per step, final review, report detail, and automatic report delivery. |
-| Supervision | Main supervision, Main recoveries per task, the idle check-in, the step time limit, and the fourteen `control` rows: watchdog, silence before a ping, ping answer limit, tool time limit, step nudge, watchdog recoveries per step, compaction time limit, Main heartbeat and its interval, nudges without a report, steers per step, provider cooldown, quota cooldown and provider waits per step. |
+| Supervision | Main supervision, Main recoveries per task, the idle check-in, the step time limit, and the nineteen `control` rows: watchdog, silence before a ping, ping answer limit, tool time limit, step nudge, watchdog recoveries per step, auto-repairs per step, waits before a fallback, shell timeout limit, compaction time limit, compact before a task above, fresh session above, Main heartbeat and its interval, nudges without a report, steers per step, provider cooldown, quota cooldown and provider waits per step. |
 | Limits | Step time limit, reports per task, report size limit, report repairs, and the optional cost and output-token ceilings (`none` by default). |
 | Verification | The trusted commands (Enter opens the editor and asks for authorization), require passing, and the command time limit. |
 | Peer review | Whether it runs, the reviewer model (through the same picker as the worker's), when it reads (`checkpoints` or `final`), and its time limit. |
@@ -179,6 +179,55 @@ automatically once Main's current work is done, and never interrupts it. Review 
 Main's decisions; asking the human before each approval requires that explicit
 instruction.
 
+## Worker backends
+
+The worker can be a Pi RPC process (the default) or a [low](https://github.com/asx8678/low) worker. Main stays the
+same Pi + Fabric + Fovea session either way: review gates, checkpoints, evidence, decisions, steers and the
+watchdog work exactly the same, and only the process that does the work changes.
+
+The backend is chosen per worker, so one project can hold a Pi worker and a low worker at the same time:
+
+| Setting | Meaning |
+| --- | --- |
+| `workers[].backend` | `"pi"` or `"low"` for that worker. Optional: without it the worker follows `runtime.backend`. |
+| `workers[].lowCommand` | That worker's low binary. Optional: falls back to `runtime.lowCommand`. |
+| `workers[].lowArgs` | That worker's arguments. Optional: falls back to `runtime.lowArgs`. |
+| `runtime.backend` | The project default, `"pi"` unless you change it. |
+| `runtime.lowCommand` | The default low binary, `low` on `PATH`. |
+| `runtime.lowArgs` | Default arguments, placed before Pair's own `low --serve` arguments. |
+
+A backend change is restart-bound for the worker that changed: the running generation keeps the backend it was
+started with, and the new one applies at that worker's next start. The one-live-worker rule is unchanged, so a mixed
+roster still runs one worker at a time: `/pair start <id>` stops an idle live worker and starts the other. In the TUI the Workers settings page has a **Backend** row (and the low command and arguments rows when it is
+`low`); the dashboard roster and `/pair worker list` show each worker's backend; `/pair worker add <id>
+[provider/model] [effort] [pi|low]` sets it when adding a worker.
+
+**Provider fallbacks.** A worker may list providers to switch to when its own keeps failing:
+
+```json
+{ "id": "worker", "provider": "opendesign", "model": "deepseek-v4.1-flash", "effort": "high", "cwd": null, "readOnly": false,
+  "fallbacks": [{ "provider": "opencode-go", "model": "deepseek-v4.1-flash" }, { "provider": "other", "model": "m", "effort": "low", "backend": "low" }] }
+```
+
+Up to four, tried in order. Each takes `provider` and `model`, and optionally `effort` and `backend`; anything it
+leaves out is the worker's own. A run that ends without a report on a classified provider error switches at once for
+a quota stop and after `control.fallbackAfterWaits` waits (2) for a rate limit; with every fallback spent, the
+ordinary provider wait applies. The switch stops the process (a confirmed exit), records the fallback on the worker,
+and resumes the step on it: a Pi worker keeps its conversation and is started with the fallback model, which its
+authority and drift checks then expect; a low worker restarts `low --serve` on the fallback model with the same
+`--session`. A fallback on the other backend cannot carry a conversation, so it starts a fresh one with the whole
+plan, and the primary conversation is set aside. The switch is not a recovery and does not spend the recovery budget,
+it is on the task's timeline and announced, and the roster shows the worker's fallback. It lasts for the task: the
+next dispatch stops the worker and puts it back on its own provider and conversation. A read-only worker cannot fall
+back to low. In the TUI the Workers page has a **Fallbacks** row (`provider/model`, optionally `:effort` and
+`@pi`/`@low`) and the Supervision page a **Waits before a fallback** row.
+
+A low worker cannot be read-only, and Pair does not check Fabric, Fovea, prewalk or compaction requirements for it;
+`/pair doctor` still reports them for Main. The worker's own report arrives as the same latch and inbox file a Pi
+worker's `pair_report` writes, so a checkpoint from low is reviewed like any other. The differences that matter
+while running one — no in-worker tool gate, low's own `run()` sandbox, usage reported once per task — are in
+[docs/low-backend.md](docs/low-backend.md).
+
 ## Everyday controls
 
 | Command | Purpose |
@@ -200,8 +249,8 @@ instruction.
 | `/pair cancel worker` | Cancel the task and keep the conversation. |
 | `/pair stop worker` | Stop the worker process and retain its history. |
 | `/pair worker list` | Every configured worker in list order: the first is the default and is what a bare `/pair start` and a dispatch use, and a never-started one says "not started". |
-| `/pair worker add <id> [provider/model] [effort]` | Add a worker slot (a bare model name inherits the first worker's provider). |
-| `/pair worker remove <id> [keep\|discard]` | Remove a worker after confirming. `keep` (the default) leaves its conversation, so adding the same id later resumes it; `discard` deletes its session, inbox, archive and mesh. Refused while it runs or holds a task. |
+| `/pair worker add <id> [provider/model] [effort] [pi|low]` | Add a worker slot (a bare model name inherits the first worker's provider). The backend is optional; `low` after the model and effort means the backend, while a lone `low` is still the effort. |
+| `/pair worker remove <id> [keep\|discard]` | Remove a worker after confirming. `keep` (the default) leaves its conversation, so adding the same id later resumes it; `discard` deletes its session, inbox, archive and mesh. A worker that is running or holds a task is stopped first and its task cancelled (the confirmation says so; files it changed stay). Refused only for the last worker, or when Pair cannot prove the process exited. The list is edited in the file that holds it, project or global. |
 | `/pair worker default <id>` | Move a worker first: a bare `/pair start` and a dispatch to a worker use the first entry. |
 | `/pair reset-worker worker` | Start the next task in a new conversation (old session files are archived, not deleted). |
 | `/pair indicator mode` | Choose the footer badge and live line: `minimal`, `compact`, `board` or `off`. |
@@ -502,6 +551,15 @@ needs for a bug report.
 Approval is tied to an inspected code checkpoint. Source changes after that
 checkpoint invalidate approval.
 
+Answering a question and requesting a revision do not need that exact match: you or
+Main may edit the workspace while a report waits. Pair captures the workspace as it
+is when the decision is made, returns the changed files as `workspaceChanged`, gives
+the worker the same list with an instruction to read and keep them, and fences the
+worker's renewed lease on that capture, so a further edit before it starts refuses
+the decision (`STALE_CHECKPOINT`) instead of handing the worker a workspace nobody
+decided on. The next checkpoint is still measured from the last approved step, so it
+includes those edits.
+
 Pair's own configuration is never part of that evidence. The project config files
 (`.pi/fabric-pair.json`, and the legacy `.pi/pair.json`), the `.v<version>.bak`
 backups `saveConfig` writes next to them, and anything else named
@@ -611,6 +669,7 @@ token budget, or an unconfirmed process exit.
 | Ping unanswered | stop the process, restart, re-activate | 1 recovery | Main supervised, exit unconfirmed for the human |
 | Silent for 10 min but answering (2 × silentMs) | abort the stalled request, re-activate | 1 recovery | Main supervised |
 | Rate-limit or quota error with no report | wait, then resume on its own | 4 waits (`control.maxProviderWaits`); transient 60 s doubling to at most 15 min, quota 15 min | Main supervised |
+| Same, on a worker with `fallbacks` | switch to the next fallback and resume | a quota stop at once; a rate limit after 2 waits (`control.fallbackAfterWaits`) | the ordinary wait above |
 | Process gone, exit proven | re-activate with recovery guidance | 1 recovery | Main supervised |
 | Step reaches `activeStepTimeoutMs` (30 min) | pause for review | — | human decides |
 
@@ -619,11 +678,67 @@ nudges and provider waits do not count against it. A crash, or an exit that cann
 proven to have happened, is never recovered automatically: `pair_recover` tries to
 prove it first, and otherwise the task stays held for you and `/pair reconcile`.
 
+**Destructive commands are refused inside a Pi worker.** A worker that tried to run `git commit`, `git push`,
+`git reset --hard`, `git checkout --`, `git clean -f`, `git rebase`, `git stash`, `git branch -D`,
+`npm publish` (or pnpm/yarn/bun), `sudo`, or `rm -rf /` / `rm -rf ~` is stopped before the command runs, and told
+which rule matched so it can report instead of retrying. The same check covers a `fabric_exec` program, whose
+nested `pi.bash` calls bypass the earlier gate: a literal command is checked, and a command built at run time is
+refused rather than run unguarded. The list is `control.blockedCommands` (regexes, matched against the whole
+command and against each `|`, `&&` or `;` clause), and it is config-only — edit it in
+`fabric-pair.json`, not in the settings screen. `control.defaultShellTimeoutS` (600, `0` disables it) is the
+shell timeout limit: a call with no timeout of its own gets it, a direct call asking for more is cut to it, and a
+`fabric_exec` program asking for more is refused with the limit named, so the worker sends it again within it. Both
+are control settings, so tuning them never rebinds a worker. **A low worker has none of this:** its sandbox is the
+only guard for shell work (see `docs/low-backend.md`).
+
+**A hung command is not run again unchanged.** Most worker hangs are not a frozen worker but a command that never
+ends: a test waiting forever, a server started in the foreground. In Pair's own records no worker command needed
+more than about seven minutes, and every one that ran past ten was hung; the worker's habit was to rerun it with a
+longer timeout. So every work order carries a short COMMANDS rule (bound every command, give test runners a per-test
+timeout, never run servers or watch modes in the foreground, and on a Pi worker the limit above), a shell result
+that ended in its own timeout gets a note telling the worker it hung and not to rerun it unchanged, and the
+watchdog's message after it stops a tool at `control.toolMaxMs` says the same. This repository's own `npm test`
+runs with `--test-timeout=60000 --test-force-exit`: the first fails a hanging test with its name, and the second
+ends the run even when that test left a timer or a child process behind (without it the run still hangs).
+
+**Mechanical failures go back to the worker, not to you.** Some failures are not
+judgement calls: Pair ran the configured checks and one failed, the checks describe a
+different workspace than the checkpoint, or an every-step checkpoint changed more files
+than `supervision.maxStepFiles` allows. For those the report is not delivered at all.
+Pair sends the same step back to the same worker with its own finding and the failing
+output, up to `control.autoRepairsPerStep` times (2 by default) per step, and records
+each attempt on the task's timeline as a watchdog action. These repairs are Pair's, not
+yours: they do not spend `maxRevisions`, `maxRevisionsPerStep` or any of your revision
+caps, and a question, a blocked report, a worker's own failure or an out-of-scope write
+is never repaired this way — those still come to you. Once the budget is spent the report
+reaches you as usual, and its message says how many repairs were tried and what each one
+found, so nothing is hidden. The budget is outside `configHash()`, so tuning it never
+interrupts a running worker.
+
 **Compaction between runs.** Fabric compacts its worker context right after a run
 settles. Pair treats that compaction as maintenance, not stray work: it lets it finish
 (`control.compactionMaxMs`, 10 min by default; `0` refuses it) and the report settle
 clocks, checkpoint freezing and the next prompt all wait for it. Stopping it would mean
 a 1M-token worker never compacts and every request stays slow.
+
+**Context hygiene between tasks.** A task never starts in a context that is
+already too large. Before a dispatch sends the work prompt, Pair reads the worker's own
+last measurement — Pi's bridge-probe context, or low's `status.json` prompt tokens — and
+compares it with two thresholds:
+
+- `control.compactBeforeTaskTokens` (200k by default, `0` off): the worker compacts
+  first, keeping what the next task needs. A low worker cannot be told to summarise its
+  own session, so it starts a fresh session instead — the same outcome by the route that
+  backend has.
+- `control.freshSessionAboveTokens` (600k by default, `0` off): the conversation is
+  replaced rather than summarised. The old session file is archived under the worker's
+  directory and the entry is kept in its history, so nothing is lost and the next task
+  starts clean.
+
+Both are `control` settings, so they are outside `configHash()` and tuning them never
+interrupts a running worker. A worker Pair has never measured is left alone rather than
+compacted on a guess, and a compaction is bounded by `control.compactionMaxMs` like any
+other maintenance. The Settings screen's Supervision page has a row for each.
 
 **What reaches Main, and what reaches you.** Every stop reaches both.
 
@@ -654,6 +769,19 @@ re-plan that step — `pair_decide` `revise` with `steps` that replace it, at mo
 per step position — or fix it directly: `action: "fix"` hands the workspace to Main,
 and `action: "fixed"` runs the configured verification, freezes the result and
 continues the worker with a note listing the files Main changed.
+
+**A step can carry its own controls.** Besides `acceptance`, a step may declare a
+`scope` — repository-relative globs (`src/**`, `test/*.test.js`) — and an `effort`.
+An absolute path or a `..` in a scope is refused when the plan is dispatched or
+revised. A checkpoint that changed files outside the scope is reported with a
+`STEP_SCOPE` notice; with `supervision.enforceStepScope` on, a Pi worker cannot
+write outside it and an approval of such a checkpoint is refused (a low worker has
+no in-worker gate, so it is always the notice). A per-step `effort` is applied to a
+Pi worker before its prompt and restored afterwards; a low worker serves one effort,
+so a step asking for another level is refused with that reason rather than run at
+the served one. A report may carry `acceptance: [{criterion, met, evidence}]`, which
+the report card shows as a met count and, expanded, one verdict per criterion; low's
+`criteria` and its second look map into the same field.
 
 **The heartbeat** is opt-in and off by default. `control.mainHeartbeat: "note"`
 appends one display-only line every `control.mainHeartbeatMs` (15 min) while a task

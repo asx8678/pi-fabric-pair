@@ -33,7 +33,7 @@
     "fabric-pair.example.json"
   ],
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\"",
+    "test": "node --test --test-timeout=60000 --test-force-exit \"test/**/*.test.js\"",
     "typecheck": "tsc -p tsconfig.json",
     "prepack": "npm run typecheck",
     "pack:check": "npm pack --dry-run --ignore-scripts"

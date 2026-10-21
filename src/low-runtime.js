@@ -7,6 +7,7 @@ import { assertReportSize } from './schema.js';
 import { validateAuthority, validateLatch, validateReportEnvelope, validateReportPayload } from './contracts.js';
 import { meshRootFor } from './native.js';
 import { normalizeActivity, pushActivity } from './timeline.js';
+import { classifyProviderError } from './provider.js';
 
 /**
  * A Pair worker backed by low (https://github.com/asx8678/low) instead of a Pi RPC process.
@@ -26,7 +27,12 @@ import { normalizeActivity, pushActivity } from './timeline.js';
 /** @typedef {import('./actor-runtime.js').RuntimeObservation} RuntimeObservation */
 /** @typedef {import('./rpc.js').RpcExit} RpcExit */
 /** @typedef {{command: string, args: string[], home?: string}} LowOptions */
-/** @typedef {Omit<PiRuntimeOptions, 'rpcOptions' | 'rpcFactory' | 'isCurrent'> & {low: LowOptions, isCurrent: (runtime: LowRuntime, activation: Activation | null) => boolean, spawnLow?: typeof spawn}} LowRuntimeOptions */
+/**
+ * Extra options on top of PiRuntime's. `now` and `heartbeatMs` let a test drive the runtime's time rules (the
+ * status-file heartbeat, the age of a run) from a fake clock instead of real waits, and `beforePublish` lets a test
+ * step into the window between the report's latch and its inbox write. Production passes none of them.
+ * @typedef {Omit<PiRuntimeOptions, 'rpcOptions' | 'rpcFactory' | 'isCurrent'> & {low: LowOptions, isCurrent: (runtime: LowRuntime, activation: Activation | null) => boolean, spawnLow?: typeof spawn, now?: () => number, heartbeatMs?: number, beforePublish?: () => void | Promise<void>}} LowRuntimeOptions
+ */
 /** @typedef {{token: Activation, controller: AbortController, prepared: boolean, attempted: boolean, accepted: boolean, settled: boolean}} ActivationState */
 /** @typedef {{status?: unknown, exit?: unknown, error?: unknown, verdict?: unknown, good?: unknown, answer?: unknown, question?: unknown, criteria?: unknown, check?: unknown, changes?: unknown, limit?: unknown, tokens?: unknown, id?: unknown, claims?: unknown, plan?: unknown, undo?: unknown, steers?: unknown}} LowResult */
 /**
@@ -40,6 +46,19 @@ const LOW_EFFORTS = { off: 'low', minimal: 'low', low: 'low', medium: 'medium', 
 const OBS_COUNT = 256, POLL_MS = 250, WATCH_MS = 2000, STDERR_TAIL = 32000, TAIL_BYTES = 256 * 1024;
 /** How old the status file's heartbeat (rewritten every second while low --serve runs) may be for a ping to count it as answering. */
 const BEAT_MS = 30000;
+/**
+ * Whether a status-file heartbeat still says the server is alive.
+ *
+ * Bounded on both sides on purpose: a timestamp in the future (a host clock that jumped, a file copied between
+ * machines) would otherwise read as fresh for ever, and a frozen server is exactly what this rule exists to
+ * catch. Pure, so its edges are tested without a process or a wait.
+ * @param {number} at the heartbeat's own timestamp @param {number} now @param {number} [window] @returns {boolean}
+ */
+export function heartbeatFresh(at, now, window = BEAT_MS) {
+  if (!Number.isFinite(at) || !Number.isFinite(now) || at <= 0) return false;
+  const age = now - at;
+  return age >= 0 && age < window;
+}
 /** How long a control `--send` (a steer, an abort, /stop) may take: it only drops a file into the inbox. */
 const CONTROL_MS = 15000;
 /** What the controller's work order says that a low worker does differently: there is no pair_report tool. */
@@ -83,6 +102,29 @@ function claimsCheck(claims, brief) {
   return { name: 'low second look', result: contradicted.length ? 'fail' : held.length ? 'pass' : 'not_run', detail: bounded(detail, 2000) };
 }
 
+/**
+ * low's own view of the goal, as Pair's acceptance claims. low states its criteria as one sentence and its second look
+ * as what held, what was contradicted and what stayed uncertain; each becomes one {criterion, met, evidence} entry, so
+ * Main reads a verdict per criterion instead of a paragraph.
+ * @param {LowResult} result @param {'pass' | 'fail' | 'not_run'} outcome
+ * @returns {{criterion: string, met: boolean, evidence?: string}[]}
+ */
+function acceptanceClaims(result, outcome) {
+  /** @type {{criterion: string, met: boolean, evidence?: string}[]} */
+  const claims = [];
+  const criteria = str(result.criteria).trim(), check = str(result.check).trim();
+  if (criteria) claims.push({ criterion: bounded(criteria, 200), met: outcome === 'pass', ...(check && check !== '-' ? { evidence: bounded(`low's check: ${check}`, 500) } : {}) });
+  if (plain(result.claims)) {
+    const groups = [['held', true, 'held'], ['contradicted', false, 'contradicted'], ['uncertain', false, 'uncertain']];
+    for (const [key, met, label] of /** @type {[string, boolean, string][]} */ (groups)) {
+      for (const entry of strings(/** @type {Record<string, unknown>} */ (result.claims)[key])) {
+        if (claims.length >= 32) break;
+        claims.push({ criterion: bounded(entry, 200), met, evidence: `low second look: ${label}` });
+      }
+    }
+  }
+  return claims.slice(0, 32);
+}
 /** The low home whose `.low/sessions` holds the worker's conversations. @param {LowOptions} low */
 export function lowHome(low) { return low.home || os.homedir(); }
 /** @param {LowOptions} low */
@@ -124,7 +166,9 @@ export function lowReportPayload(result, task) {
     const decisions = [str(result.criteria) && `Done means: ${str(result.criteria)}`, steerLine,
       ...(level >= 1 ? [] : [planLine(result.plan), str(result.undo) && `Undo low's changes: ${str(result.undo)}`])].filter(Boolean).map(line => bounded(line, 2000));
     if (decisions.length) payload.decisions = decisions;
-    return { taskId: task.id, stepId: step.id, ...payload, ...(changedFiles.length ? { changedFiles } : {}) };
+    // The step's acceptance criteria with low's verdict on each. Present at every level: it is what Main reviews.
+    const acceptance = exit === 4 ? [] : acceptanceClaims(result, outcome);
+    return { taskId: task.id, stepId: step.id, ...payload, ...(changedFiles.length ? { changedFiles } : {}), ...(acceptance.length ? { acceptance } : {}) };
   };
   /** @param {Record<string, unknown>} payload @param {number} limit */
   const fit = (payload, limit) => {
@@ -158,6 +202,7 @@ export class LowRuntime {
   /** @type {{message: string, at: number, source: 'assistant' | 'retry' | 'compaction'} | null} */ #lastError = null;
   /** @type {ReturnType<typeof setInterval> | undefined} */ #watch;
   /** @type {LowProgress | null} */ #progress = null;
+  /** The last context size low reported, in tokens: its prompt tokens are what the session holds. @type {number | null} */ #contextTokens = null;
   /** @type {import('./timeline.js').ActivityEvent[]} */ #activity = [];
   /** Whether this low writes a status file; an older one does not, and its session log's growth is all there is. */
   #statusSeen = false; #beatAt = 0; #toolStep = 0;
@@ -185,6 +230,24 @@ export class LowRuntime {
   get lastError() { return this.#lastError; }
   /** What the running task is doing, as low's last status said; null between tasks. */
   get progress() { return this.#progress; }
+  /**
+   * The last measured size of this worker's context, in tokens, or null when low has not reported one. low keeps its
+   * own context inside a session and writes the numbers in its status file; between tasks the last task's totals are
+   * the best measurement there is. The controller reads this at dispatch to decide whether the next task should
+   * start in the session that is already there (see PairController.prepareContext).
+   * @returns {number | null}
+   */
+  contextTokens() { return this.#contextTokens; }
+  /**
+   * low cannot be told to summarise its own session from outside: context lives inside the session it manages, and
+   * the CLI has no compaction command. The controller therefore starts a fresh session instead of compacting for a
+   * low worker (see PairController.prepareContext), which is the same outcome by the route this backend has.
+   * @param {string} _instructions
+   * @returns {Promise<void>}
+   */
+  async compactContext(_instructions) { throw new Error('UNSUPPORTED: low manages context inside its own session; Pair starts a fresh session instead of compacting it'); }
+  /** The clock the heartbeat rule reads. Injecting it is what makes the silence rules testable without waiting. */
+  #now() { return (this.#options.now || Date.now)(); }
   /** The low session id: the session log's file name without `.jsonl`. */
   get sessionId() { return this.#sessionFile ? path.basename(this.#sessionFile, '.jsonl') : null; }
 
@@ -323,6 +386,10 @@ export class LowRuntime {
       const authority = validateAuthority(await readJSON(path.join(this.dir, 'authority.json'), null), { ownerSession: this.#options.ownerSession, ownerEpoch: this.ownerEpoch, workerId: this.#options.workerId, workerGeneration: this.workerGeneration });
       this.#assertCurrent(activation);
       requireValue(authority.phase === 'running' && authority.task && authority.task.id === activation.taskId && authority.leaseId === activation.leaseId && authority.attemptId === activation.attemptId, 'Pair authority does not grant this activation');
+      // Per-step effort is a Pi-only control: low takes --effort when its server starts and refuses any other option
+      // on --send, so the controller refuses such a step before reaching here (never silently runs it at another level).
+      const stepEffort = authority.task.steps[authority.task.stepIndex]?.effort;
+      requireValue(stepEffort === undefined || stepEffort === this.#options.spec.effort, `UNSUPPORTED_PROFILE: a low worker cannot change effort per step (this step asks for ${String(stepEffort)}, the worker runs at ${this.#options.spec.effort})`);
       const child = this.#send(['--json', `${message}\n\n${LOW_WORKER_NOTE}`]);
       this.#task = child;
       active.accepted = true; this.#lastError = null; this.#settledAborted = false; this.#lastEventAt = Date.now(); this.#progress = null; this.#toolStep = 0;
@@ -367,7 +434,10 @@ export class LowRuntime {
       this.#enqueue({ type: 'message_end', at: Date.now(), message: { role: 'assistant', usage: { input: prompt - cached, output: num(tokens.out), cacheRead: cached, cacheWrite: 0 } } });
       if (str(result.error)) this.#lastError = { message: bounded(str(result.error), 2000), at: Date.now(), source: 'assistant' };
       const aborted = this.#settledAborted || active.controller.signal.aborted;
-      if (!aborted && this.#current(active.token) && authority.task) await this.#publish(lowReportPayload(result, authority.task), authority);
+      // A provider failure (a rate limit, a quota stop) ends the run without a report, the way a Pi worker's run does:
+      // Pair then waits it out or switches to a fallback instead of handing Main a blocked report it can do nothing with.
+      const providerFailure = result.status === 'error' && classifyProviderError(str(result.error), { providerCooldownMs: 60000, quotaCooldownMs: 900000 }) !== null;
+      if (!aborted && !providerFailure && this.#current(active.token) && authority.task) await this.#publish(lowReportPayload(result, authority.task), authority, active.token);
     } finally {
       this.#task = null; this.#tool = null; this.#progress = null; this.#toolStep = 0; active.settled = true;
       this.#settledSequence++; this.#settledAt = Date.now(); this.#lastEventAt = this.#settledAt;
@@ -375,13 +445,20 @@ export class LowRuntime {
       this.#wake();
     }
   }
-  /** Write the report where a Pi worker's pair_report does: the latch, then the inbox. @param {import('./contracts.js').ReportPayload} payload @param {import('./contracts.js').Authority} authority */
-  async #publish(payload, authority) {
+  /**
+   * Write the report where a Pi worker's pair_report does: the latch, then the inbox. Pi re-checks the report's
+   * authority between its staged write and the publication, and so does this: a lease revoked while the report is
+   * being written leaves the inbox untouched, so nothing a later task could mistake for its own appears.
+   * @param {import('./contracts.js').ReportPayload} payload @param {import('./contracts.js').Authority} authority @param {Activation} token
+   */
+  async #publish(payload, authority, token) {
     const o = this.#options, task = /** @type {NonNullable<typeof authority.task>} */ (authority.task);
     const report = validateReportEnvelope({ version: PROTOCOL, reportId: uid('report'), workerId: o.workerId, ownerSession: o.ownerSession, ownerEpoch: o.ownerEpoch, workerGeneration: o.workerGeneration, nonce: o.nonce,
       sessionId: /** @type {string} */ (this.sessionId), leaseId: authority.leaseId, attemptId: task.attemptId, attemptNumber: task.attemptNumber, planRevision: task.planRevision,
       payload, payloadHash: digest(payload), createdAt: Date.now() });
     await atomicJSON(path.join(o.dir, 'latch.json'), validateLatch({ ownerEpoch: o.ownerEpoch, workerGeneration: o.workerGeneration, leaseId: authority.leaseId, attemptId: task.attemptId, report }));
+    if (o.beforePublish) await o.beforePublish();
+    if (!this.#current(token)) return;
     await mkdirPrivate(path.join(o.dir, 'inbox'));
     await atomicJSON(path.join(o.dir, 'inbox', `${report.reportId}.json`), report);
   }
@@ -426,7 +503,7 @@ export class LowRuntime {
     const status = await readJSON(file.replace(/\.jsonl$/, '.inbox/status.json'), null, 256 * 1024).catch(() => null);
     if (!plain(status)) return false;
     this.#statusSeen = true;
-    const now = Date.now();
+    const now = this.#now();
     if (count(status.at)) this.#beatAt = count(status.at);
     // Between tasks, or before the server took this one: the task's own result settles it.
     if (status.state !== 'running' || !this.#task) return true;
@@ -435,12 +512,16 @@ export class LowRuntime {
     const run = plain(status.running) ? status.running : null, step = count(status.step);
     const plan = plain(status.plan) && strings(status.plan.steps).length ? { steps: strings(status.plan.steps).slice(0, 50).map(s => bounded(s, 300)), done: (Array.isArray(status.plan.done) ? status.plan.done : []).filter(n => Number.isSafeInteger(n)).slice(0, 50) } : null;
     const tokens = plain(status.tokens) ? status.tokens : {}, steers = plain(status.steers) ? status.steers : {};
+    // low's prompt tokens are the context the session holds: that is the size the next task would start at.
+    if (count(tokens.prompt)) this.#contextTokens = count(tokens.prompt);
     this.#progress = Object.freeze({ activity: bounded(str(status.activity), 200), step, running: run ? { what: bounded(str(run.what), 300), forMs: count(run.ms) } : null,
       intent: bounded(str(status.intent), 300) || null, plan, requests: count(status.requests),
       tokens: { prompt: count(tokens.prompt), cached: count(tokens.cached), out: count(tokens.out) }, steers: { pending: count(steers.pending), taken: count(steers.taken) },
       taskMs: count(status.ms), movedAt: moved || null, at: count(status.at) || now });
     if (!run) this.#tool = null;
     else if (!this.#tool || step !== this.#toolStep) {
+      // The watchdog's tool limit reads startedAt against the controller's clock; both are wall-clock time, so a
+      // fake clock has to move this too or the two would disagree about how long the run has been going.
       this.#tool = { name: 'run', startedAt: now - count(run.ms) }; this.#toolStep = step;
       this.#activity = pushActivity(this.#activity, { tool: 'run', target: str(run.what), at: this.#tool.startedAt });
       await atomicJSON(path.join(this.dir, 'activity.json'), { version: 1, events: this.#activity }, { durable: false }).catch(() => {});
@@ -522,7 +603,7 @@ export class LowRuntime {
     try { process.kill(this.pid, 0); } catch { return false; }
     if (!this.#statusSeen) return true;
     await this.#status().catch(() => false);
-    return Date.now() - this.#beatAt < BEAT_MS;
+    return heartbeatFresh(this.#beatAt, this.#now(), this.#options.heartbeatMs ?? BEAT_MS);
   }
   /** @param {string} reason @returns {Promise<void>} */
   abortCurrent(reason) {
@@ -567,7 +648,10 @@ export class LowRuntime {
     this.#closing = true; this.#ready = false;
     const wait = async (/** @type {number} */ ms) => { const end = Date.now() + ms; while (!this.closed && Date.now() < end) await sleep(50); return this.closed; };
     const grace = Math.max(1000, this.#options.config.runtime.shutdownTimeoutMs || 5000);
-    if (this.sessionId && !this.#task) await this.#control('/stop').catch(() => {});
+    // Always offer low its own /stop, whether or not a task is still in flight: a task that settles while this
+    // runs would otherwise leave the server up until the signal below, and a concurrent settle is exactly the
+    // kind of timing that made the resume test flaky. /stop is bounded, and the signals still follow if it fails.
+    if (this.sessionId) await this.#control('/stop').catch(() => {});
     if (await wait(grace)) return;
     try { signalGroup(this.pid, 'SIGTERM', this.#server); } catch { /* already gone */ }
     if (await wait(grace)) return;

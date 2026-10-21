@@ -44,6 +44,64 @@ history incrementally.
   retained-history verification accepts a between-lease compaction entry and still
   refuses any other, the settle clocks and checkpoint freezing wait for it, the next
   activation waits before prompting, and the dashboard says "compacting".
+- `step-controls`: the controls a step can carry. A step's `scope` is a list of
+  repository-relative globs (absolute paths and `..` are refused at dispatch and
+  in a revised plan); an out-of-scope change is named in the report
+  (`STEP_SCOPE`) and, with `supervision.enforceStepScope` on, is also refused
+  inside a Pi worker and refused at approval. A step's `effort` is applied to a Pi
+  worker through `set_thinking_level` before its prompt — accepted by the drift
+  checks because the controller set it — and restored for the next step; a low
+  worker refuses a level it cannot serve instead of running at another one.
+  Reports may carry `acceptance: [{criterion, met, evidence}]`, shown in the report
+  card, and low's `criteria`/`claims` map into them; an unknown level and an
+  escaping glob are refused.
+- `shell-guard`: a Pair worker cannot run the commands its human reserved. In the
+  Pi worker's `tool_call`, a bash/powershell call whose command matches
+  `control.blockedCommands` (13 regexes by default: commit, push, reset --hard,
+  checkout --, clean -f, rebase, stash, branch -D, publish, sudo, and recursive
+  force-deletes of / or ~) is refused with the rule named, and a call without a
+  timeout, or asking for more, gets `control.defaultShellTimeoutS` (600, 0
+  disables). A `fabric_exec` program is scanned too, because its nested `pi.bash`
+  calls never reach that handler: a literal command is checked, a computed one is
+  refused, and so is a call whose own `timeout` option is over the limit (the scan
+  is a check, not a rewrite; the shell's `timeout 300 …` inside a command is not
+  the option). A result that ran into its timeout keeps its text and gains a note
+  not to rerun the hung command, and every work order states the command rule,
+  with the limit only for a Pi worker. Both settings
+  are control, so outside `configHash()`; the list is config-only and validated (an
+  invalid regex is refused). A low worker has no such hook — `--protect` takes paths,
+  not commands — so its sandbox is the only guard and `/pair doctor` says so.
+- `provider-fallback`: `workers[].fallbacks` (at most 4; provider and model, optional
+  effort and backend; a read-only worker cannot fall back to low) and
+  `control.fallbackAfterWaits` (2, outside `configHash()`) validate; a quota stop
+  switches at once and a rate limit after the configured waits, by stopping the
+  process and resuming the step on the fallback without spending a recovery; the
+  chain moves on and, spent, falls back to the ordinary wait; a fallback on the other
+  backend sets the primary conversation aside and the next task restores it; and,
+  end to end on the fake low, a quota stop restarts `low --serve` on the fallback
+  model with the same `--session` and the step finishes there with authority bound
+  to the fallback model. `controller-restart` covers the Pi restart on the fallback
+  model with the same conversation.
+- `auto-repair`: mechanical failures stop costing Main a turn. A failed
+  configured check, checks that describe a different workspace than the checkpoint
+  (`VERIFICATION_SOURCE_DRIFT`) and an oversized every-step checkpoint
+  (`STEP_TOO_LARGE`) are not delivered: Pair re-queues the same step to the same
+  worker with its own finding and the bounded failing output, up to
+  `control.autoRepairsPerStep` (2, outside `configHash()`), through the same
+  continuation fence a `decide(revise)` uses, recorded on the timeline as a
+  watchdog action and without spending `maxRevisions` or `maxRevisionsPerStep`.
+  Past the bound the report reaches Main and its message says how many repairs were
+  tried and what each found. A question, a blocker, a clean checkpoint, an
+  out-of-scope write and a worker's own failure are never repaired this way.
+- `session-hygiene`: a task never starts in a bloated context. The two
+  thresholds (`control.compactBeforeTaskTokens`, 200k, and
+  `control.freshSessionAboveTokens`, 600k, 0 disables either) are config control,
+  outside `configHash()`; above the first a Pi worker is compacted before the work
+  prompt and a low worker starts a fresh session instead; above the second the
+  conversation is replaced, the old session file archived in the worker's history
+  and the record marked so the next start opens a new one; a bounded compaction is
+  stopped at `control.compactionMaxMs`; and a worker Pair never measured is left
+  alone rather than compacted on a guess.
 - `watchdog-core`: the `control` settings (defaults, bounds, and that they never
   change `configHash()`), `autoRecover` (bounded per step; refuses human pauses,
   spent budgets and unconfirmed exits; records a timeline note and a toast), the
@@ -84,7 +142,10 @@ mock Pi APIs gained `registerShortcut`. The source exports `DEFAULTS`,
 Re-derived from the current behaviour at the same time:
 
 - `controller-scan-recovery`: the transcript test expects `transcriptText`'s
-  rendering and also covers the unchanged-file cache.
+  rendering and also covers the unchanged-file cache. An answer or revise after the
+  workspace was edited is now accepted (it used to be refused as `STALE_CHECKPOINT`):
+  the result and the worker's message list the changed files, an answer without edits
+  carries no list, and approve still requires the exact checkpoint.
 - `efficiency`: the ChatGPT sign-in fixture has a priced prompt cache, so signing
   in is the only reason it is never warmed; the unpriced case is its own assertion.
 - `message-cards`: cards are `{color, text}` lines, and a failed worker claim is a
@@ -93,7 +154,9 @@ Re-derived from the current behaviour at the same time:
   suffix is accepted (another extension may restore a per-model effort); an
   unknown level is still rejected.
 - `handoff-safety`: verification records source drift as a failed
-  `VERIFICATION_SOURCE_DRIFT` check and stops there, instead of rejecting.
+  `VERIFICATION_SOURCE_DRIFT` check and stops there, instead of rejecting. A revise
+  that accepted workspace edits fences the renewed lease on the capture it accepted,
+  so a further edit during the readiness wait is still refused.
 - `config-merge`: `changedLayer`/`readScopeLayer`/`layerChangedExternally`: a
   save writes only the fields the edit changed onto the layer read from disk just
   before saving (a key written externally after load survives; an external change to
@@ -121,7 +184,9 @@ Re-derived from the current behaviour at the same time:
   is a plain start when nothing is live, and is what a dispatch to a non-live worker
   uses; a dispatch that is refused outright stops nothing.
 - `worker-removal`: `removeWorker` refuses a live process, an unresolved task, an
-  unknown id and the last worker; it archives the state record the way `reset` does,
+  unknown id and the last worker; with `stopFirst` (the host's removal) it cancels
+  the task and stops the process first, but checks the last-worker rule before
+  touching anything; it archives the state record the way `reset` does,
   deletes the worker directory only with `keepConversation: false`, keeps it
   otherwise so adding the same id resumes the same session file, and restores the
   record when the config save fails.
@@ -149,6 +214,39 @@ Re-derived from the current behaviour at the same time:
   `duplicateWorker` (copies model and effort under a new id, right after the
   original), `moveWorker` (clamped at the ends), `makeDefault`, `removeWorker`
   (refuses the last one) and `describeWorker`/`splitModel`.
+- `low-heartbeat`: the pure `heartbeatFresh` rule behind a low worker's ping — fresh until exactly the window
+  old and stale from then on, never fresh when the timestamp is in the future or missing (a host clock that
+  jumped must not make a frozen server look alive), and a window parameter an older low or a test can set.
+  No process and no wait, so the edges cannot flake.
+- `low-watchdog`: the watchdog rungs against a real `LowRuntime` on the fake low host, proving the same scan
+  code paths drive both backends: a run past `control.toolMaxMs` is stopped and the step re-activated with
+  guidance (its run is the watchdog's `tool`); a quiet worker with no run under way is `silent` and, after the
+  ping, aborts the stalled request; a server that stops answering is the frozen rung and is stopped; a server
+  that exits mid-task leaves a provable exit (`exitProof`) so a crash may be recovered and nothing is reported
+  from the dying task.
+- `exit-proof`: `exitProof`, the gate in front of every automatic recovery (the watchdog's crash and
+  settle-timeout rungs, Main's `pair_recover`). It separates "the worker is still running" from "an unrelated
+  process inherited its PID number after it exited": a number taken by a process that started after the spawn
+  proves the exit, one that could be ours proves nothing, the runtime's own reaped exit is proof whatever now
+  holds the number, a handle from an older generation proves nothing, and `parseElapsed` reads every `ps etime`
+  shape (`ps lstart` is a local-time string, so it is read in the wrong zone and was an hour off here), and
+  `exitProof` prefers the exit the runtime itself reaped — the proof that survives the PID number being reused,
+  which is what made the crash rung flaky under a busy suite.
+- `low-publish-fence`: a low report is published the way Pi publishes `pair_report` — latch, re-check of the
+  lease, then inbox — driven over a scripted child rather than the fake CLI (the fake deletes its inbox on
+  `/stop`, which would erase the evidence). A lease revoked inside that window leaves the latch and no inbox
+  entry; with the lease intact the same report publishes, so the test cannot pass by never publishing at all.
+- `per-worker-backend`: `spec.backend` (with `runtime.backend` as the default) resolved by `workerBackend`, a
+  worker's own `lowCommand`/`lowArgs` by `workerLow`, an old config file that has neither loading unchanged and
+  gaining no field, invalid values refused, one worker's backend change being restart-bound while the other worker
+  and the project runtime stay put, a mixed roster reporting each backend, `addWorker` with and without a backend,
+  and the read-only refusal following the worker rather than the project.
+- `backend-choice`: the runtime a start constructs comes from that worker's spec — a low worker gets a real
+  `LowRuntime` whose spawn carries its own command and arguments (asserted on the argv the stub was handed), a
+  worker with no backend follows the project in both directions, and a mixed roster switches from the Pi worker to
+  the low one under the one-live-worker rule.
+- `backend-staging`: `runtime.backend` is inside `configHash()`, so switching it stages a restart while a worker
+  is retained (the live config keeps the backend the process started with) and applies at once when none is.
 - `low-runtime`: the `runtime.backend === 'low'` path against
   `helpers/fake-low.mjs`, which speaks low's inbox protocol, so the low worker starts,
   takes a turn and stops without Pi RPC or a model request.

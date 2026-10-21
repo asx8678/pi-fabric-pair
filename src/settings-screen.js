@@ -1,6 +1,6 @@
 import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { briefError, clone } from './util.js';
-import { INDICATORS, validateConfig, validateConfigLayer } from './config.js';
+import { INDICATORS, validateConfig, validateConfigLayer, workerBackend, workerLow } from './config.js';
 import { EFFORT_LEVELS } from './contracts.js';
 import { INDICATOR_LABEL, authorizeVerification, boxFrame, clampEffort, effortHint, hints, isCancel, keyIs, onOff, overlayOptions, overlayRows, packHints, settingsUI, supportedEfforts, workerModel } from './ui.js';
 import { duplicateWorker, makeDefault, moveWorker } from './worker-config.js';
@@ -18,7 +18,11 @@ import { duplicateWorker, makeDefault, moveWorker } from './worker-config.js';
 /** @typedef {'workers' | 'review' | 'supervision' | 'limits' | 'verification' | 'peerReview' | 'runtime' | 'requirements' | 'evidence' | 'display' | 'general'} SettingsPage */
 /** @typedef {'list' | 'options' | 'model' | 'input' | 'filter'} ScreenMode */
 /** @typedef {{value: string, label: string, hint: string}} RowOption */
-/** @typedef {{id: string, label: string, value: string, hint: string, kind: 'toggle' | 'choice' | 'number' | 'nullable' | 'text' | 'list' | 'model' | 'peer-model' | 'add' | 'open' | 'action' | 'note', options?: readonly RowOption[], tone?: 'warning', work?: 'verification' | 'migrate' | 'json', restart?: boolean}} SettingsRow */
+/**
+ * One settings row. `choiceValue` is the value the row is *on* when it differs from the text it shows: a worker that
+ * follows the project default shows 'pi (project default)' but is on 'inherit', and the choice list must mark that,
+ * not the resolved value it happens to have.
+ * @typedef {{id: string, label: string, value: string, hint: string, kind: 'toggle' | 'choice' | 'number' | 'nullable' | 'text' | 'list' | 'model' | 'peer-model' | 'add' | 'open' | 'action' | 'note', options?: readonly RowOption[], tone?: 'warning', work?: 'verification' | 'migrate' | 'json', restart?: boolean, choiceValue?: string}} SettingsRow */
 /** @typedef {'ok' | 'error' | 'info' | 'none'} StatusTone */
 /** @typedef {{saved: PairConfig, scope: ConfigScope, workerId: string, page: SettingsPage, rowId: string, status: string, tone: StatusTone}} ScreenSession */
 /** @typedef {{run: 'verification'} | {run: 'migrate'} | {run: 'json'} | {run: 'save', next: PairConfig, label: string, value: string} | {run: 'remove', workerId: string} | {run: 'duplicate', workerId: string, newId: string}} ScreenAnswer */
@@ -44,9 +48,9 @@ const DESC_LINES = 3;
  */
 const ROW_PATH = {
   // Workers: the array is marked as one leaf, so every worker row reads the same source.
-  model: 'workers', effort: 'workers', readOnly: 'workers', workspace: 'workers',
+  model: 'workers', effort: 'workers', readOnly: 'workers', workspace: 'workers', backend: 'workers', workerLowCommand: 'workers', workerLowArgs: 'workers',
   // Review
-  policy: 'supervision.mode', stepFiles: 'supervision.maxStepFiles', revisions: 'supervision.maxRevisions',
+  policy: 'supervision.mode', stepFiles: 'supervision.maxStepFiles', enforceStepScope: 'supervision.enforceStepScope', revisions: 'supervision.maxRevisions',
   revisionsPerStep: 'supervision.maxRevisionsPerStep', finalReview: 'supervision.finalReview', detail: 'supervision.summaryDetail',
   autoDeliver: 'autoDeliverReports',
   // Supervision
@@ -197,8 +201,31 @@ class SettingsView {
       const known = /** @type {ScreenModel | undefined} */ (workerModel(this.ctx, worker));
       rows.push({ id: 'effort', label: 'Thinking effort', value: worker.effort, kind: 'choice', options: levelsFor(known).map(level => ({ value: level, label: level, hint: effortHint(known, level) })),
         hint: known ? `How hard the worker thinks. ${known.provider}/${known.id} supports ${supportedEfforts(known).join(', ')}.` : 'How hard the worker thinks. Checked against the worker model when it starts.' });
+      // The backend is the worker's own, falling back to the project default: this is how one project holds a Pi
+      // worker and a low worker at once. Shown resolved, so the row never leaves the effective choice ambiguous.
+      const backend = workerBackend(worker, saved.runtime), inherited = worker.backend === undefined;
+      // The list marks the row the worker is *in*, not the value it happens to resolve to: with the project at pi, a
+      // worker that says nothing and one that says 'pi' look the same on the page but are not the same file, and a
+      // human who arrows past 'pi' to 'project default' has to be able to see which one they are on.
+      const backendRowValue = inherited ? 'inherit' : backend;
+      rows.push({ id: 'backend', label: 'Backend', value: inherited ? `${backend} (project default)` : backend, kind: 'choice', restart: true, choiceValue: backendRowValue,
+        options: [
+          { value: 'pi', label: 'pi', hint: 'Run this worker as a Pi process, with Fabric and its own tools.' },
+          { value: 'low', label: 'low', hint: 'Run this worker through the low command: its run() sandbox, no Fabric tools.' },
+          { value: 'inherit', label: 'project default', hint: `Use runtime.backend, now ${saved.runtime.backend}.` },
+        ],
+        hint: `How this worker runs, independent of the other workers. ${inherited ? `Following the project default (runtime.backend is ${saved.runtime.backend}).` : 'This worker overrides the project default.'} Restart-bound for this worker.${this.taskNote()}` });
+      if (backend === 'low') {
+        const low = workerLow(worker, saved.runtime), lowInherited = worker.lowCommand === undefined && worker.lowArgs === undefined;
+        rows.push({ id: 'workerLowCommand', label: 'low program', value: low.command, kind: 'text', restart: true,
+          hint: `The command this worker runs. ${lowInherited ? 'Following runtime.lowCommand.' : 'This worker overrides runtime.lowCommand.'} Restart-bound.` });
+        rows.push({ id: 'workerLowArgs', label: 'low arguments', value: listLabel(low.args), kind: 'list', restart: true,
+          hint: `Arguments placed before Pair's own low --serve arguments. ${lowInherited ? 'Following runtime.lowArgs.' : 'This worker overrides runtime.lowArgs.'} Restart-bound.` });
+      }
+      rows.push({ id: 'workerFallbacks', label: 'Fallbacks', value: worker.fallbacks?.length ? listLabel(worker.fallbacks.map(fallbackLabel)) : 'none', kind: 'list', restart: true,
+        hint: `Providers to switch to, in order, when this worker's own keeps failing: a quota stop at once, a rate limit after control.fallbackAfterWaits waits. Write provider/model, optionally :effort and @pi or @low (another backend starts a fresh conversation). The switch lasts for the task. Restart-bound.${this.taskNote()}` });
       rows.push({ id: 'readOnly', label: 'Read-only', value: onOff(worker.readOnly), kind: 'toggle',
-        hint: 'On: the worker can only read and search; it cannot edit files. Not supported together with Fabric.' });
+        hint: backend === 'low' ? 'Not available for a low worker: low always edits its working tree.' : 'On: the worker can only read and search; it cannot edit files. Not supported together with Fabric.' });
       rows.push({ id: 'workspace', label: 'Workspace', value: worker.cwd || 'same as Main', kind: 'text',
         hint: "The folder the worker edits, as an absolute path. Blank means Main's workspace." });
       // The list itself is editable here, not only in the commands: order is what "default" means.
@@ -246,6 +273,10 @@ class SettingsView {
         hint: 'How many times Main may recover one task (0–20). One is given back each time it approves a step.' });
       rows.push({ id: 'autoCheckIdle', label: 'Check in when Main is idle', value: onOff(saved.autoCheckIdle), kind: 'toggle',
         hint: 'On: Pair asks idle Main to look at a task nobody is working on, and at reports it will not deliver by itself. Once per task state.' });
+      // A step may declare the files it is about. Off: the checkpoint names out-of-scope files. On: a Pi worker's
+      // write outside them is refused, and an approval of such a checkpoint is refused too.
+      rows.push({ id: 'enforceStepScope', label: 'Enforce step scope', value: onOff(saved.supervision.enforceStepScope === true), kind: 'toggle',
+        hint: 'On: when a step declares a scope, a Pi worker cannot write outside it and a checkpoint that does is not approvable. Off: out-of-scope files are named in the report for Main to judge. Low workers have no in-worker gate either way.' });
       rows.push({ id: 'stepTimeout', label: 'Step time limit', value: minutesLabel(saved.limits.activeStepTimeoutMs), kind: 'number',
         hint: 'Minutes a step may run before Pair pauses it for review. The watchdog nudges and, when it can, recovers before this is reached.' });
       rows.push({ id: 'watchdog', label: 'Watchdog', value: onOff(saved.control.watchdog), kind: 'toggle',
@@ -258,8 +289,20 @@ class SettingsView {
         hint: 'How long a step may run before Pair asks the worker to report what is left. Once per step attempt; it does not pause anything.' });
       rows.push({ id: 'maxAutoRecoveries', label: 'Watchdog recoveries per step', value: String(saved.control.maxAutoRecoveriesPerStep), kind: 'number',
         hint: 'How many times the watchdog may restart a step on its own (0–20). Provider waits and nudges do not count.' });
+      rows.push({ id: 'autoRepairsPerStep', label: 'Auto-repairs per step', value: String(saved.control.autoRepairsPerStep), kind: 'number',
+        hint: 'How many times Pair sends a step back to the worker on its own when its own checks fail, the step is too large, or the checks describe a different workspace (0–20). Past this the report reaches you with what was tried. It does not use up your revisions.' });
+      rows.push({ id: 'fallbackAfterWaits', label: 'Waits before a fallback', value: String(saved.control.fallbackAfterWaits), kind: 'number',
+        hint: 'A worker with fallbacks switches to the next one after this many provider waits in a step (0–20). A quota stop switches at once; 0 switches at the first rate limit too.' });
+      rows.push({ id: 'defaultShellTimeoutS', label: 'Shell timeout limit', value: durationLabel(saved.control.defaultShellTimeoutS * 1000), kind: 'number',
+        hint: 'The longest a Pi worker shell call may run: the timeout of a call without one, and the cap for one asking more, so a hung test run is stopped in minutes rather than the tool limit. 0 leaves calls as the worker sets them. The blocked-command list is config only (control.blockedCommands).' });
       rows.push({ id: 'compactionMaxMs', label: 'Compaction time limit', value: durationLabel(saved.control.compactionMaxMs), kind: 'number',
         hint: 'How long a between-run compaction may take before Pair stops it. 0 refuses compaction outside a run. A generous limit lets a 1M-token worker compact instead of cancelling it.' });
+      // Context hygiene: a task never starts in a context that is already too large. Both are token counts, and both
+      // are outside configHash(), so tuning them never interrupts a running worker.
+      rows.push({ id: 'compactBeforeTaskTokens', label: 'Compact before a task above', value: tokenLabel(saved.control.compactBeforeTaskTokens), kind: 'number',
+        hint: 'Before a task starts, if the worker\'s context holds more than this, Pair compacts it first (a low worker starts a fresh session instead). 0 turns it off.' });
+      rows.push({ id: 'freshSessionAboveTokens', label: 'Fresh session above', value: tokenLabel(saved.control.freshSessionAboveTokens), kind: 'number',
+        hint: 'Above this the conversation is replaced rather than summarised: the old session is archived in the worker\'s history and the task starts clean. 0 turns it off.' });
       rows.push({ id: 'mainHeartbeat', label: 'Main heartbeat', value: saved.control.mainHeartbeat, kind: 'choice',
         options: [{ value: 'off', label: 'off', hint: 'Nothing extra is sent to Main.' }, { value: 'note', label: 'note', hint: 'One display-only line with the worker state, every interval.' }, { value: 'wake', label: 'wake', hint: 'A line and a short prompt asking Main to pair_peek and act only on problems.' }],
         hint: 'While a task runs and Main is idle: how often Main is reminded of the worker, and whether that starts a turn.' });
@@ -319,7 +362,7 @@ class SettingsView {
       return rows;
     }
     if (page === 'runtime') {
-      rows.push({ id: 'runtimeBackend', label: 'Backend', value: saved.runtime.backend, kind: 'choice',
+      rows.push({ id: 'runtimeBackend', label: 'Backend', value: saved.runtime.backend, kind: 'choice', restart: true,
         options: [{ value: 'pi', label: 'pi', hint: 'Run the worker as a Pi process. Every other runtime row applies.' }, { value: 'low', label: 'low', hint: 'Run the worker through the low command and its arguments.' }],
         hint: `How a worker runs. Restart-bound: applies at the next worker restart.${this.taskNote()}` });
       rows.push({ id: 'command', label: 'Program', value: saved.runtime.command || 'pi', kind: 'text', restart: true,
@@ -849,7 +892,12 @@ class SettingsView {
   /** @param {SettingsRow} row */
   toggle(row) {
     const next = clone(this.session.saved), worker = this.nextWorker(next), on = row.value !== 'On';
-    if (row.id === 'readOnly') worker.readOnly = on;
+    if (row.id === 'readOnly') {
+      // A low worker always edits its working tree, so Pair would refuse to start it read-only. Refusing the edit here
+      // says so at the moment of the attempt instead of at the next start.
+      if (on && workerBackend(worker, this.session.saved.runtime) === 'low') { this.session.status = '✖ A low worker cannot be read-only: low always edits its working tree.'; this.session.tone = 'error'; this.refresh(); return; }
+      worker.readOnly = on;
+    }
     else if (row.id === 'cue') next.attentionCue = on;
     else if (row.id === 'autoDeliver') next.autoDeliverReports = on;
     else if (row.id === 'enabled') next.enabled = on;
@@ -871,13 +919,14 @@ class SettingsView {
   cycle(row) {
     const options = row.options ?? [];
     if (!options.length) return;
-    this.applyChoice(row, options[wrapIndex(options.findIndex(option => option.value === row.value), 1, options.length)].value);
+    const current = row.choiceValue ?? row.value;
+    this.applyChoice(row, options[wrapIndex(options.findIndex(option => option.value === current), 1, options.length)].value);
   }
 
   /** @param {SettingsRow} row */
   openOptions(row) {
     if (!row.options?.length) return;
-    const index = Math.max(0, row.options.findIndex(option => option.value === row.value));
+    const index = Math.max(0, row.options.findIndex(option => option.value === (row.choiceValue ?? row.value)));
     this.editing = row; this.mode = 'options';
     this.optionsState = { items: row.options, index, hint: row.options[index].hint };
     this.refresh();
@@ -908,11 +957,21 @@ class SettingsView {
     if (row.id === 'scope') { void this.switchScope(value === 'global' ? 'global' : 'project'); return; }
     const next = clone(this.session.saved), worker = this.nextWorker(next);
     if (row.id === 'effort') worker.effort = /** @type {Effort} */ (value);
+    else if (row.id === 'backend') {
+      // 'inherit' is not a stored value: it removes the override so the worker follows runtime.backend again.
+      if (value === 'inherit') delete worker.backend; else worker.backend = /** @type {'pi' | 'low'} */ (value);
+    }
     else if (row.id === 'policy') next.supervision.mode = /** @type {PairConfig['supervision']['mode']} */ (value);
     else if (row.id === 'detail') next.supervision.summaryDetail = /** @type {PairConfig['supervision']['summaryDetail']} */ (value);
     else if (row.id === 'indicator') next.indicator = /** @type {PairConfig['indicator']} */ (value);
     else if (row.id === 'mainHeartbeat') next.control.mainHeartbeat = /** @type {PairConfig['control']['mainHeartbeat']} */ (value);
-    else { this.refresh(); return; }
+    else if (row.id === 'runtimeBackend') next.runtime.backend = /** @type {PairConfig['runtime']['backend']} */ (value);
+    else if (row.id === 'peerOn') next.peerReview.on = /** @type {PairConfig['peerReview']['on']} */ (value);
+    else {
+      // A choice row without a case here used to close its picker and save nothing, which looked like a save that
+      // did not take (the project Backend row did this). Say so instead.
+      this.session.status = `✖ Not saved: ${row.label} has no save handler`; this.session.tone = 'error'; this.refresh(); return;
+    }
     this.commit(next, row.label, value, '', this.rowRestarts(row));
   }
 
@@ -939,7 +998,7 @@ class SettingsView {
   openInput(row) {
     // Each row opens on the value it stores, not the label it shows: sizes in MB, lists as text, none as blank.
     const saved = this.session.saved;
-    const value = row.kind === 'list' ? /** @type {string[]} */ (Reflect.get(saved.runtime, row.id)).join(', ')
+    const value = row.kind === 'list' ? (row.id === 'workerLowArgs' ? (this.worker().lowArgs ?? saved.runtime.lowArgs) : row.id === 'workerFallbacks' ? (this.worker().fallbacks ?? []).map(fallbackLabel) : /** @type {string[]} */ (Reflect.get(saved.runtime, row.id))).join(', ')
       : row.id === 'workspace' ? (this.worker().cwd || '')
         : row.kind === 'nullable' ? (Reflect.get(saved.limits, row.id) === null ? '' : String(Reflect.get(saved.limits, row.id)))
           : row.kind === 'number' ? String(openValue(saved, row.id)) : '';
@@ -983,17 +1042,35 @@ class SettingsView {
       /** @type {[number, number]} */
       const [low, high] = row.id === 'stepFiles' ? [1, 1000] : [0, 20], value = Number(trimmed);
       // The supervision rows are edited in seconds, minutes or hours and stored in milliseconds.
-      /** @type {Record<string, {unit: 'ms' | 'min' | 'minOrOff', low: number, high: number}>} */
+      /** @type {Record<string, {unit: 'ms' | 'min' | 'minOrOff' | 'tokens', low: number, high: number}>} */
       const durations = { stepTimeout: { unit: 'min', low: 60000, high: 86400000 }, silentMs: { unit: 'ms', low: 10000, high: 3600000 },
         toolMaxMs: { unit: 'ms', low: 60000, high: 86400000 }, stepNudgeMs: { unit: 'ms', low: 60000, high: 86400000 },
-        compactionMaxMs: { unit: 'minOrOff', low: 0, high: 86400000 }, mainHeartbeatMs: { unit: 'ms', low: 60000, high: 86400000 } };
+        compactionMaxMs: { unit: 'minOrOff', low: 0, high: 86400000 }, mainHeartbeatMs: { unit: 'ms', low: 60000, high: 86400000 },
+        // Stored in seconds, edited like the other durations; 0 disables the injection.
+        defaultShellTimeoutS: { unit: 'ms', low: 0, high: 86400000 },
+        // Token counts: entered as a plain number of tokens, or with a k suffix (200k).
+        compactBeforeTaskTokens: { unit: 'tokens', low: 0, high: 10000000 }, freshSessionAboveTokens: { unit: 'tokens', low: 0, high: 10000000 } };
       const duration = durations[row.id];
+      // Token thresholds read and write as token counts, not durations: 200k is a context size, not a time.
+      if (duration && duration.unit === 'tokens') {
+        const tokens = parseTokens(trimmed);
+        if (tokens === null || tokens < duration.low || tokens > duration.high) {
+          this.session.status = `Enter a token count like 200k, 1.5M or a plain number (${duration.low}–${duration.high}).`; this.session.tone = 'error'; this.refresh(); return;
+        }
+        Reflect.set(next.control, row.id, tokens);
+        this.mode = 'list'; this.input = null; this.editing = null;
+        this.commit(next, row.label, tokenLabel(tokens), '', this.rowRestarts(row));
+        return;
+      }
       if (duration) {
         const ms = parseDuration(trimmed, duration.unit);
         if (ms === null || ms < duration.low || ms > duration.high) {
           this.session.status = `Enter a duration like 60 s, 5 min or 1 h (${Math.round(duration.low / 1000)}–${Math.round(duration.high / 1000)} s).`; this.session.tone = 'error'; this.refresh(); return;
         }
         if (row.id === 'stepTimeout') next.limits.activeStepTimeoutMs = ms;
+        // The shell timeout is stored in seconds (it is what a tool call takes), so a duration is divided on the way in
+        // and multiplied on the way out — the only control field that is not milliseconds.
+        else if (row.id === 'defaultShellTimeoutS') next.control.defaultShellTimeoutS = Math.round(ms / 1000);
         // These row ids are exactly the millisecond fields of control.
         else Reflect.set(next.control, row.id, ms);
         this.mode = 'list'; this.input = null; this.editing = null;
@@ -1008,6 +1085,8 @@ class SettingsView {
       else if (row.id === 'revisions') next.supervision.maxRevisions = value;
       else if (row.id === 'maxMainRecoveries') next.maxMainRecoveries = value;
       else if (row.id === 'maxAutoRecoveries') next.control.maxAutoRecoveriesPerStep = value;
+      else if (row.id === 'autoRepairsPerStep') next.control.autoRepairsPerStep = value;
+      else if (row.id === 'fallbackAfterWaits') next.control.fallbackAfterWaits = value;
       else if (whole[row.id]) whole[row.id](value);
       else { this.refresh(); return; }
       this.mode = 'list'; this.input = null; this.editing = null;
@@ -1032,13 +1111,34 @@ class SettingsView {
       return;
     }
     if (row.kind === 'list') {
-      Reflect.set(next.runtime, row.id, parseList(text));
+      const list = parseList(text);
+      // A worker-level lowArgs override, with the same rule as lowCommand: blank or equal to the project default
+      // stores nothing, so the config file keeps meaning "inherit".
+      if (row.id === 'workerLowArgs') {
+        if (list.length && listLabel(list) !== listLabel(next.runtime.lowArgs)) worker.lowArgs = list; else delete worker.lowArgs;
+        this.mode = 'list'; this.input = null; this.editing = null;
+        this.commit(next, row.label, listLabel(worker.lowArgs ?? next.runtime.lowArgs), '', this.rowRestarts(row));
+        return;
+      }
+      if (row.id === 'workerFallbacks') {
+        const fallbacks = list.map(parseFallback);
+        const bad = list.find((_, index) => fallbacks[index] === null);
+        if (bad !== undefined) { this.session.status = `Write each fallback as provider/model, optionally :effort and @pi or @low, not ${JSON.stringify(bad)}.`; this.session.tone = 'error'; this.refresh(); return; }
+        if (fallbacks.length) worker.fallbacks = /** @type {import('./contracts.js').WorkerFallback[]} */ (fallbacks); else delete worker.fallbacks;
+        this.mode = 'list'; this.input = null; this.editing = null;
+        this.commit(next, row.label, worker.fallbacks ? listLabel(worker.fallbacks.map(fallbackLabel)) : 'none', '', this.rowRestarts(row));
+        return;
+      }
+      Reflect.set(next.runtime, row.id, list);
       this.mode = 'list'; this.input = null; this.editing = null;
       this.commit(next, row.label, listLabel(/** @type {string[]} */ (Reflect.get(next.runtime, row.id))), '', this.rowRestarts(row));
       return;
     }
     if (row.kind === 'text') {
       if (row.id === 'workspace') worker.cwd = trimmed || null;
+      // A worker-level override is stored only when it differs from the project default; blank clears it back to
+      // inheriting runtime.lowCommand, which keeps such a config file identical to one written before overrides.
+      else if (row.id === 'workerLowCommand') { if (trimmed && trimmed !== next.runtime.lowCommand) worker.lowCommand = trimmed; else delete worker.lowCommand; }
       else if (row.id === 'command') next.runtime.command = trimmed || 'pi';
       else if (row.id === 'lowCommand') next.runtime.lowCommand = trimmed;
       else { this.refresh(); return; }
@@ -1238,7 +1338,8 @@ function wholeNumberRows(next) {
   const ms = {
     pingTimeoutMs: value => { next.control.pingTimeoutMs = value; }, noReportNudges: value => { next.control.noReportNudges = value; },
     maxSteersPerStep: value => { next.control.maxSteersPerStep = value; }, providerCooldownMs: value => { next.control.providerCooldownMs = value; },
-    quotaCooldownMs: value => { next.control.quotaCooldownMs = value; }, maxProviderWaits: value => { next.control.maxProviderWaits = value; }
+    quotaCooldownMs: value => { next.control.quotaCooldownMs = value; }, maxProviderWaits: value => { next.control.maxProviderWaits = value; },
+    autoRepairsPerStep: value => { next.control.autoRepairsPerStep = value; }
   };
   return {
     ...ms,
@@ -1267,7 +1368,8 @@ function openValue(saved, id) {
   const { commands: _commands, requirePassing: _require, ...verification } = saved.verification;
   const { backend: _backend, lowCommand: _lowCommand, lowArgs: _lowArgs, command: _command, commandArgs: _commandArgs,
     extraExtensions: _extra, excludeExtensions: _exclude, extraSkills: _skills, inheritExtensions: _inherit, mcp: _mcp, ...runtime } = saved.runtime;
-  const { watchdog: _watchdog, mainHeartbeat: _heartbeat, ...control } = saved.control;
+  // The blocked-command list is config-only (documented, not a row), and the watchdog/heartbeat rows are not numbers.
+  const { watchdog: _watchdog, mainHeartbeat: _heartbeat, blockedCommands: _blocked, ...control } = saved.control;
   /** @type {Record<string, number>} */
   const numbers = {
     ...control, ...runtime, ...verification, ...limits,
@@ -1285,8 +1387,47 @@ function openValue(saved, id) {
 function listLabel(values) { return values.length ? values.join(', ') : 'none'; }
 /** Parse a comma- or line-separated list into trimmed, non-empty values. @param {string} value @returns {string[]} */
 function parseList(value) { return String(value).split(/[,\n]/).map(item => item.trim()).filter(Boolean); }
+/** A fallback as the Workers page writes it: provider/model, then :effort and @backend when it names them. @param {import('./contracts.js').WorkerFallback} f */
+function fallbackLabel(f) { return `${f.provider}/${f.model}${f.effort ? `:${f.effort}` : ''}${f.backend ? `@${f.backend}` : ''}`; }
+/**
+ * The inverse of fallbackLabel; null when the text is not one. The provider is everything before the first slash, so a
+ * model id may itself hold slashes.
+ * @param {string} text @returns {import('./contracts.js').WorkerFallback | null}
+ */
+function parseFallback(text) {
+  const match = /^([^/\s:@]+)\/([^\s:@]+)(?::([a-z]+))?(?:@(pi|low))?$/.exec(text.trim());
+  if (!match) return null;
+  const [, provider, model, effort, backend] = match;
+  if (effort !== undefined && !EFFORT_LEVELS.some(level => level === effort)) return null;
+  return { provider, model, ...(effort ? { effort: /** @type {import('./contracts.js').Effort} */ (effort) } : {}), ...(backend ? { backend: /** @type {'pi' | 'low'} */ (backend) } : {}) };
+}
 /** File sizes are stored in bytes and edited in MB, the unit a human thinks in. @param {number} bytes @returns {string} */
 function bytesLabel(bytes) { return `${Math.round(bytes / 1048576)} MB`; }
+/**
+ * A token count as a human writes it: 200k, 1.5M, or a plain number. Thresholds in the hundreds of thousands are
+ * unreadable as digits, and '200k' is how the setting is discussed in the docs.
+ * @param {number} tokens @returns {string}
+ */
+function tokenLabel(tokens) {
+  if (!tokens) return 'off';
+  if (tokens >= 1000000 && tokens % 100000 === 0) return `${tokens / 1000000}M`;
+  if (tokens >= 1000 && tokens % 1000 === 0) return `${tokens / 1000}k`;
+  return String(tokens);
+}
+/**
+ * Parse a token count: a plain integer, or a number with a k or M suffix (200k, 1.5M). Returns null when the text is
+ * not a token count at all, so the caller can report the field rather than silently accept a wrong number.
+ * @param {string} value @returns {number | null}
+ */
+function parseTokens(value) {
+  const text = String(value).trim().toLowerCase().replace(/\s+/g, '');
+  if (text === '0' || text === 'off') return 0;
+  const match = /^(\d+(?:\.\d+)?)(k|m)?$/.exec(text);
+  if (!match) return null;
+  const amount = Number(match[1]) * (match[2] === 'm' ? 1000000 : match[2] === 'k' ? 1000 : 1);
+  const tokens = Math.round(amount);
+  return Number.isSafeInteger(tokens) && tokens >= 0 ? tokens : null;
+}
 /** @param {number} ms @returns {string} a duration in the unit that reads best (s, min or h) */
 function durationLabel(ms) {
   const minutes = Math.round(ms / 60000);
@@ -1296,7 +1437,7 @@ function durationLabel(ms) {
 }
 /** @param {number} ms @returns {string} minutes, the unit the step limit is edited in */
 function minutesLabel(ms) { return `${Math.max(1, Math.round(ms / 60000))} min`; }
-/** Parse a duration the human typed back into milliseconds, in the unit the row shows. @param {string} value @param {'ms' | 'min' | 'minOrOff'} unit @returns {number | null} */
+/** Parse a duration the human typed back into milliseconds, in the unit the row shows. @param {string} value @param {'ms' | 'min' | 'minOrOff' | 'tokens'} unit @returns {number | null} */
 function parseDuration(value, unit) {
   const text = String(value).trim().toLowerCase().replace(/\s+/g, ' ');
   if (unit === 'minOrOff' && (text === '0' || text === 'off')) return 0;

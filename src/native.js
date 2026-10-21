@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { agentDir, assert, canonical, merge, ownerAlive, plain, readJSON, readJSONC, VERSION } from './util.js';
+import { agentDir, assert, bounded, canonical, merge, ownerAlive, plain, readJSON, readJSONC, VERSION } from './util.js';
 
 /**
  * @typedef {{name: string, source?: string, sourceInfo?: {path?: string}}} NativeRegistration
@@ -303,7 +303,11 @@ export async function probeNative(pi, ctx) {
  * @param {string} cwd
  * @param {string} expectedMeshRoot
  */
-export function checkReadiness(probe, rpcState, config, worker, cwd, expectedMeshRoot) {
+/**
+ * @param {any} probe @param {any} rpcState @param {any} config @param {any} worker @param {string} cwd @param {string} expectedMeshRoot
+ * @param {string} [effort] the level this activation runs at: a step's own effort, or the worker's when absent
+ */
+export function checkReadiness(probe, rpcState, config, worker, cwd, expectedMeshRoot, effort) {
   assert(probe.protocol === 1, 'Worker bridge protocol mismatch');
   assert(probe.cwd === cwd, 'Worker is running in the wrong workspace');
   assert(probe.meshRoot === expectedMeshRoot, 'Worker mesh environment does not match the Pair-owned private mesh root; refusing shared, inherited or unknown Fabric mesh state');
@@ -311,7 +315,8 @@ export function checkReadiness(probe, rpcState, config, worker, cwd, expectedMes
   assert(typeof rpcState.sessionFile === 'string' && rpcState.sessionFile.length > 0, 'Worker session persistence is disabled');
   assert(probe.sessionFile === rpcState.sessionFile, 'Worker bridge and RPC session paths differ');
   assert(rpcState.model?.provider === worker.provider && rpcState.model?.id === worker.model, 'Selected worker model was not applied exactly');
-  assert(rpcState.thinkingLevel === worker.effort, `Worker effort ${worker.effort} was not applied (Pi used ${rpcState.thinkingLevel}); ${worker.provider}/${worker.model} probably does not support it. Choose a supported effort in /pair settings.`);
+  const expectedEffort = typeof effort === 'string' ? effort : worker.effort;
+  assert(rpcState.thinkingLevel === expectedEffort, `Worker effort ${expectedEffort} was not applied (Pi used ${rpcState.thinkingLevel}); ${worker.provider}/${worker.model} probably does not support it. Choose a supported effort in /pair settings.`);
   assert(probe.model?.provider === rpcState.model.provider && probe.model?.id === rpcState.model.id, 'Worker bridge and RPC model selections differ');
   assert(probe.thinkingLevel === rpcState.thinkingLevel, 'Worker bridge and RPC thinking levels differ');
   if (config.requirements.fabric) assert(probe.capabilities.fabric, 'Worker has no fabric_exec. Install/load pi-fabric or specify runtime.extraExtensions.');
@@ -463,6 +468,165 @@ function executableText(code, { strings = false } = {}) {
 function reachedThroughAlias(text, literal, provider, action) {
   if (!new RegExp(`(?<![\\w$])${provider}(?![\\w$])(?!\\s*(?:\\?\\s*\\.|\\.|\\[|\\(|=(?!=)|:))`).test(text)) return false;
   return new RegExp(`\\.\\s*${action}(?![\\w$])`).test(text) || new RegExp(`(["'\`])${action}\\1`).test(literal);
+}
+/**
+ * The shell commands a \`fabric_exec\` program would run. A worker's program calls the shell through the core tools
+ * (\`pi.bash\`, \`pi.powershell\`, \`tools.call({ref: 'bash'})\`), and those inner calls reach Pi's \`tool_call\` only
+ * inside the program's own kernel — not this worker's gate, which sees just the program. A command written as a
+ * string literal is read straight out of the source; one built by concatenation, a template expression or a variable
+ * cannot be read without running the program, so a reference to the shell with no literal next to it yields a null
+ * entry, which the caller refuses rather than guessing.
+ * @param {unknown} code @returns {(string | null)[]} commands, or null where the command is computed
+ */
+export function shellProgramCalls(code) {
+  if (typeof code !== 'string') return [];
+  // The same lexical scan programCalls uses: comments and regexes dropped, string bodies kept.
+  const text = executableText(code, { strings: true });
+  // `pi.bash`, `pi?.bash`, `pi["bash"]`, `bash(` and `tools.call({ref: "bash"})` all mention it; anything else is a
+  // program with no shell in it, which needs no scan.
+  const mentionsShell = /\\?["'\x60]?(?:bash|powershell)\\?["'\x60]?/i.test(text) && /(?:pi|tools|call|ref)/i.test(text);
+  if (!mentionsShell) return [];
+  /** @param {string} rest @returns {string | null} */
+  const literalCommand = rest => {
+    // command: "..." / cmd: '...' / "command": \`...\` — the value must be one closed literal in the same call.
+    for (const quote of ['"', "'", '\x60']) {
+      const key = new RegExp('(?:["\'\x60])?(?:command|cmd)(?:["\'\x60])?\\s*:\\s*\\' + quote, 'g');
+      const match = key.exec(rest);
+      if (!match) continue;
+      const start = match.index + match[0].length;
+      let out = '';
+      for (let i = start; i < rest.length; i++) {
+        if (quote !== '\x60' && rest[i] === '\\') { out += rest[i] + (rest[i + 1] ?? ''); i++; continue; }
+        if (rest[i] === quote) return out;
+        if (quote !== '\x60' && rest[i] === '\n') break;
+        out += rest[i];
+      }
+      return null;
+    }
+    return null;
+  };
+  const found = [];
+  // pi.bash({...}), pi.powershell({...}), pi["bash"]({...}), and tools.call({ref: 'bash', args: {...}}).
+  const callSites = [
+    /(?:pi|tools)\s*(?:\?\.)?\s*[.[]\s*(["'\x60]?)(?:bash|powershell)\1\s*\]?\s*[,()]\s*(?:args\s*=\s*)?\{/gi,
+    /tools\s*\.\s*call\s*\(\s*\{[^}]*?ref\s*:\s*(["'\x60])(?:bash|powershell)\1[^}]*?args\s*:\s*\{/gi
+  ];
+  for (const callSite of callSites) for (const match of text.matchAll(callSite)) found.push(literalCommand(text.slice(match.index, match.index + 4000)));
+  return found.length ? found : [null];
+}
+/**
+ * The `timeout` option of each `pi.bash({...})` / `pi.powershell({...})` call in a `fabric_exec` program, in seconds,
+ * or null for a call that sets none. Only the call's own top-level key counts: string bodies are blanked first, so
+ * `timeout 300 cargo …` inside a command is not read as the option, and a nested object's `timeout` is skipped.
+ * @param {unknown} code @returns {(number | null)[]}
+ */
+export function shellProgramTimeouts(code) {
+  if (typeof code !== 'string') return [];
+  const text = executableText(code);
+  /** @type {(number | null)[]} */ const found = [];
+  const callSite = /(?:pi|tools)\s*(?:\?\.)?\s*\.\s*(?:bash|powershell)\s*\(\s*\{/gi;
+  for (const match of text.matchAll(callSite)) {
+    let depth = 0, top = '';
+    for (let i = match.index + match[0].length - 1; i < text.length; i++) {
+      const c = text[i];
+      if (c === '{' || c === '[' || c === '(') { depth++; if (depth === 1) continue; }
+      else if (c === '}' || c === ']' || c === ')') { depth--; if (depth === 0) break; }
+      if (depth === 1) top += c;
+    }
+    const option = /(?:^|[,\s])timeout\s*:\s*(\d+(?:\.\d+)?)/.exec(top);
+    found.push(option ? Number(option[1]) : null);
+  }
+  return found;
+}
+/**
+ * The note Pair adds to a shell call, or a fabric_exec program, that ended in its own timeout ("Command timed out
+ * after N seconds", Pi's bash wording, which fabric_exec passes on). Null for any other result. In Pair's records the
+ * worker's usual next move was the same command with a longer timeout, which hung again for as long.
+ * @param {string} name @param {unknown} content @returns {string | null}
+ */
+export function shellTimeoutNote(name, content) {
+  const n = toolName(name);
+  if (!SHELL_TOOLS.has(n) && n !== 'fabric_exec') return null;
+  const text = Array.isArray(content) ? content.map(part => (plain(part) && typeof part.text === 'string' ? part.text : '')).join('\n') : '';
+  const seconds = /Command timed out after (\d+) seconds/.exec(text)?.[1];
+  if (!seconds) return null;
+  return `PAIR: this command hung for ${seconds}s and was stopped. Do not run it again unchanged or with a longer timeout: it will hang again. Find what hangs first: run one test file or one test with a short timeout, and give test runners a per-test timeout (node --test --test-timeout=60000 --test-force-exit); never run servers, watch modes or interactive prompts in the foreground. If you cannot find it, report the step blocked and say which command hangs.`;
+}
+/** The shell tools a worker's calls reach: Pi's own, and the same tools through fabric_exec's nested pi.* calls. */
+export const SHELL_TOOLS = new Set(['bash', 'powershell']);
+/**
+ * The first pattern that matches a command, or null. The command text is matched as written and then clause by clause,
+ * so a destructive command behind a pipe, `&&` or `;` is still found.
+ * @param {string} command @param {string[]} patterns @returns {string | null}
+ */
+export function blockedCommandPattern(command, patterns) {
+  if (typeof command !== 'string' || !Array.isArray(patterns) || !patterns.length) return null;
+  const clauses = [command, ...command.split(/(?:\|\||&&|[|;&\n])/)].map(part => part.trim()).filter(Boolean);
+  for (const pattern of patterns) {
+    if (typeof pattern !== 'string' || !pattern) continue;
+    let expression;
+    try { expression = new RegExp(pattern); } catch { continue; }
+    if (clauses.some(clause => expression.test(clause))) return pattern;
+  }
+  return null;
+}
+/**
+ * The block a worker gets for a command Pair will not run. It names the rule, so the worker reports precisely instead
+ * of retrying variants of the same command.
+ * @param {string} pattern @param {string} command @returns {string}
+ */
+export function blockedCommandReason(pattern, command) {
+  return 'BLOCKED_COMMAND: this Pair worker may not run it: /' + pattern + '/ matches ' + JSON.stringify(bounded(command, 200)) + '. Destructive repository and release commands belong to Pair\'s human (control.blockedCommands). Say what you need instead of running it, and report the step.';
+}
+/**
+ * The shell guard for one worker call: what to refuse, and what to add. Apart from mutating `input` to inject the
+ * default timeout, which is how a tool_call handler changes a call it allows.
+ * @param {string} name @param {unknown} input @param {{blockedCommands?: string[], defaultShellTimeoutS?: number}} control
+ * @returns {{block: true, reason: string} | undefined}
+ */
+export function guardShellCall(name, input, control) {
+  const n = toolName(name);
+  if (!SHELL_TOOLS.has(n) || !plain(input)) return undefined;
+  const command = typeof input.command === 'string' ? input.command : null;
+  if (command === null) return undefined;
+  const pattern = blockedCommandPattern(command, /** @type {string[]} */ (control?.blockedCommands));
+  if (pattern) return { block: true, reason: blockedCommandReason(pattern, command) };
+  // The bound is the default for a call without a timeout and the limit for one that asks for more: a worker that
+  // picks 900 or 1200 seconds for a test run waits that long in silence when the run hangs.
+  const bound = control?.defaultShellTimeoutS;
+  if (typeof bound === 'number' && Number.isFinite(bound) && bound > 0 && !(typeof input.timeout === 'number' && Number.isFinite(input.timeout) && input.timeout > 0 && input.timeout <= bound)) input.timeout = bound;
+  return undefined;
+}
+/**
+ * The same guard for a `fabric_exec` program, whose nested shell calls never reach this worker's tool_call. A literal
+ * command is judged like a direct call; a computed one cannot be, so it is refused rather than run unguarded. A program
+ * cannot be rewritten the way a direct call's input is, so a shell call asking for more than the timeout limit is
+ * refused with the limit named, and the worker sends it again within it.
+ * @param {unknown} name @param {unknown} input @param {{blockedCommands?: string[], defaultShellTimeoutS?: number}} control
+ * @returns {{block: true, reason: string} | undefined}
+ */
+export function guardProgramShell(name, input, control) {
+  if (toolName(name) !== 'fabric_exec' || !plain(input)) return undefined;
+  const commands = shellProgramCalls(input.code);
+  if (!commands.length) return undefined;
+  for (const command of commands) {
+    if (command === null) return { block: true, reason: 'BLOCKED_COMMAND: this fabric_exec program runs a shell command it builds at run time, which Pair cannot check before it runs. Write the command as one string literal in pi.bash({command: "..."}) so Pair can check it, or run it as a direct bash call.' };
+    const pattern = blockedCommandPattern(command, /** @type {string[]} */ (control?.blockedCommands));
+    if (pattern) return { block: true, reason: blockedCommandReason(pattern, command) };
+  }
+  const bound = control?.defaultShellTimeoutS;
+  const over = typeof bound === 'number' && Number.isFinite(bound) && bound > 0 ? shellProgramTimeouts(input.code).find(timeout => timeout !== null && timeout > bound) : undefined;
+  if (typeof over === 'number') return { block: true, reason: shellTimeoutReason(over, /** @type {number} */ (bound)) };
+  return undefined;
+}
+/**
+ * The refusal for a program shell call over the limit. It says why, so the worker fixes the command rather than only
+ * the number: nothing a worker ran in Pair's records needed more than about seven minutes, and every call that ran
+ * past ten was hung.
+ * @param {number} asked @param {number} bound @returns {string}
+ */
+export function shellTimeoutReason(asked, bound) {
+  return `SHELL_TIMEOUT_LIMIT: a shell call asks for timeout ${asked}s; Pair's limit is ${bound}s (control.defaultShellTimeoutS). Nothing was run. Send it again with timeout at most ${bound}. A command that needs longer is usually hung: give test runners a per-test timeout (node --test --test-timeout=60000 --test-force-exit), run one test file instead of the suite, and never run servers or watch modes in the foreground.`;
 }
 /**
  * Fabric refs a `fabric_exec` program reaches by name: `schema.commit(...)`, `schema?.commit`, a

@@ -1,8 +1,9 @@
 import { assert, isArray, plain, safeId } from './util.js';
+import { EFFORT_LEVELS } from './contracts.js';
 /** @typedef {import('./contracts.js').Step} Step */
 /** @typedef {{workerId: string, requestId: string, objective: string, constraints?: string[], context?: string, steps: Step[]}} DispatchPayload */
-/** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel' | 'fix' | 'fixed', feedback: string, checkpointHash?: string, steps?: Step[]}} DecisionShape */
-/** @typedef {DecisionShape & ({action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'cancel' | 'fix' | 'fixed'})} DecisionPayload */
+/** @typedef {{workerId: string, taskId: string, reportId: string, action: 'answer' | 'approve' | 'revise' | 'cancel' | 'fix' | 'fixed' | 'repair', feedback: string, checkpointHash?: string, steps?: Step[]}} DecisionShape */
+/** @typedef {DecisionShape & ({action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'cancel' | 'fix' | 'fixed' | 'repair'})} DecisionPayload */
 
 /** @typedef {{description?: string, enum?: readonly unknown[]}} SchemaOptions */
 /** @typedef {SchemaOptions & {type: 'string', minLength?: number, maxLength?: number}} StringSchema */
@@ -29,7 +30,14 @@ const array = (items, maxItems = 64) => ({ type: 'array', items, maxItems });
 const object = (properties, required) => ({ type: 'object', properties, required, additionalProperties: false });
 /** @template {string} Value @param {Value[]} values @returns {{type: 'string', enum: Value[]}} */
 const enumOf = values => ({ type: 'string', enum: values });
-const stepSchema = object({ id: string('Stable step ID', 80), title: string('Step title', 200), instructions: string('Bounded implementation instructions'), acceptance: array(string('Acceptance criterion', 2000)) }, ['id', 'title', 'instructions']);
+const stepSchema = object({
+  id: string('Stable step ID', 80), title: string('Step title', 200), instructions: string('Bounded implementation instructions'),
+  acceptance: array(string('Acceptance criterion', 2000)),
+  // Scope: the repository-relative globs this step may change. A step without one is unrestricted, which is what
+  // every plan written before this field meant. Effort: the thinking level this step runs at.
+  scope: array(string('Repository-relative glob this step may change', 300), 32),
+  effort: enumOf([...EFFORT_LEVELS])
+}, ['id', 'title', 'instructions']);
 export const dispatchSchema = object({
   workerId: string('Configured worker ID', 80), requestId: string('Idempotency key; reuse only to retry the identical assignment', 80),
   objective: string('Task goal', 6000), constraints: array(string('Mandatory constraint', 2000)),
@@ -44,11 +52,13 @@ export const reportSchema = object({
   decisions: array(string('Important decision', 2000), 24),
   changedFiles: array(string('Changed path', 1024), 200),
   checks: array(object({ name: string('Check name', 200), result: enumOf(['pass', 'fail', 'not_run']), detail: string('Evidence; explicitly worker-reported', 2000) }, ['name', 'result']), 32),
+  // The step's acceptance criteria, each with what the worker says about it and the evidence for that verdict.
+  acceptance: array(object({ criterion: string('Acceptance criterion, as the step states it', 200), met: { type: 'boolean', description: 'Whether the worker judges this criterion met' }, evidence: string('What shows it: a path, a command and its result, a line of output', 500) }, ['criterion', 'met']), 32),
   stepComplete: { type: 'boolean', description: 'False for an intermediate checkpoint; final_review always completes the task.' }
 }, ['taskId', 'stepId', 'kind', 'summary']);
 export const decisionSchema = object({
   workerId: string('Configured worker ID', 80), taskId: string('Task ID', 80), reportId: string('The exact report being answered/reviewed', 80),
-  action: enumOf(['answer', 'approve', 'revise', 'cancel', 'fix', 'fixed']),
+  action: enumOf(['answer', 'approve', 'revise', 'cancel', 'fix', 'fixed', 'repair']),
   feedback: string('Answer, concrete changes required, or review rationale', 12000),
   checkpointHash: string('Exact current checkpoint hash, required for approval', 64),
   steps: { ...array(stepSchema, 32), minItems: 1, description: 'revise only: the complete replacement plan. Completed steps must be kept unchanged as its prefix; this starts a new plan revision.' }
@@ -102,13 +112,31 @@ function assertDecisionPayload(input) {
   if (input.steps !== undefined) {
     assert(input.action === 'revise', 'Only revise may replace the plan steps');
     assertUniqueStepIds(input.steps);
+    assertStepScopes(input.steps);
   }
 }
 
+/**
+ * A step's scope is repository-relative by construction: an absolute path or one that climbs with ".." names
+ * something the step cannot be held to, so it is refused before the plan is accepted.
+ * @param {Step[]} steps
+ */
+function assertStepScopes(steps) {
+  for (const step of steps) {
+    const scope = step.scope;
+    if (scope === undefined) continue;
+    for (const entry of scope) {
+      const normalized = String(entry).replace(/\\/g, '/');
+      assert(!normalized.startsWith('/') && !/^[A-Za-z]:/.test(normalized) && !normalized.split('/').includes('..'),
+        `step ${step.id}: scope entry ${JSON.stringify(entry)} must be a repository-relative glob: no absolute path and no ".."`);
+    }
+  }
+}
 /** @param {unknown} input @returns {DispatchPayload} */
 export function validateDispatch(input) {
   assertDispatchShape(input); assert(JSON.stringify(input).length <= 64000, 'Work order is too large; use concise instructions and repository references (64 KB maximum)'); safeId(input.workerId, 'workerId'); safeId(input.requestId, 'requestId');
   assertUniqueStepIds(input.steps);
+  assertStepScopes(input.steps);
   return input;
 }
 /** @param {string | undefined} summaryDetail */

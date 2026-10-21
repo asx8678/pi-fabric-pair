@@ -70,6 +70,32 @@ test('removal requires confirmed exit, no task, and another worker to keep', { t
   await assert.rejects(() => c.removeWorker('ds2', { save }), /at least one worker/);
 }));
 
+test('removing a busy worker cancels its task and stops it first, then removes it', { timeout: 20000 }, () => fixture(async ({ c, save, launches }) => {
+  await c.start('ds2');
+  const task = await holdTask(c, 'ds2');
+  const process = launches.at(-1);
+  assert.ok(process && !process.closed, 'the worker is running its task');
+  const removed = await c.removeWorker('ds2', { stopFirst: true, keepConversation: true, save });
+  assert.deepEqual(removed, { workerId: 'ds2', archived: true, conversation: 'kept' });
+  assert.equal(process.closed, true, 'the process was stopped, and its exit confirmed, before the record went');
+  assert.equal(c.state.workers.ds2, undefined, 'the worker is gone from state');
+  assert.deepEqual(c.config.workers.map(worker => worker.id), ['worker'], 'and from the config');
+  // The archive keeps what happened: the task was cancelled because the worker was removed.
+  const dir = c.workerDir('ds2'), archive = (await fs.readdir(dir)).find(name => name.startsWith('removed-'));
+  const record = JSON.parse(await fs.readFile(path.join(dir, String(archive)), 'utf8'));
+  assert.equal(record.task.id, task.id); assert.equal(record.task.status, 'cancelled');
+  assert.match(record.task.cancelReason, /The worker was removed/);
+}));
+
+test('the last worker is refused before anything is stopped: its task and process are left alone', { timeout: 20000 }, () => fixture(async ({ c, save, launches }) => {
+  await c.removeWorker('worker', { save });
+  await c.start('ds2');
+  await holdTask(c, 'ds2');
+  await assert.rejects(() => c.removeWorker('ds2', { stopFirst: true, save }), /at least one worker/);
+  assert.equal(launches.at(-1)?.closed, false, 'still running');
+  assert.equal(c.record('ds2').task?.status, 'running', 'its task was not cancelled on the way to a refusal');
+}));
+
 test('removal archives the state record and discards the directory only on request', { timeout: 20000 }, () => fixture(async ({ c, save }) => {
   await c.start('ds2');
   await c.stop('ds2');

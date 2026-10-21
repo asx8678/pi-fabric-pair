@@ -20,7 +20,8 @@
     "maxRevisions": 20,
     "maxRevisionsPerStep": 3,
     "summaryDetail": "normal",
-    "maxStepFiles": 5
+    "maxStepFiles": 5,
+    "enforceStepScope": false
   },
   "runtime": {
     "backend": "pi",
@@ -58,12 +59,23 @@
     "toolMaxMs": 900000,
     "stepNudgeMs": 1200000,
     "maxAutoRecoveriesPerStep": 2,
+    "autoRepairsPerStep": 2,
+    "blockedCommands": [
+      "git\\s+commit\\b", "git\\s+push\\b", "git\\s+reset\\s+--hard\\b", "git\\s+checkout\\s+--\\s", "git\\s+clean\\s+-[a-z]*f",
+      "git\\s+rebase\\b", "git\\s+stash\\b", "git\\s+branch\\s+-D\\b", "(npm|pnpm|yarn|bun)\\s+publish\\b", "sudo(\\s|$)",
+      "rm\\s+-[a-zA-Z]*[rR][a-zA-Z]*[fF][a-zA-Z]*\\s+(/|~)", "rm\\s+-[a-zA-Z]*[fF][a-zA-Z]*[rR][a-zA-Z]*\\s+(/|~)",
+      "rm\\s+(?:-[rR]\\s+-[fF]|-[fF]\\s+-[rR])\\s+(/|~)"
+    ],
+    "defaultShellTimeoutS": 600,
     "noReportNudges": 1,
     "maxSteersPerStep": 6,
     "providerCooldownMs": 60000,
     "quotaCooldownMs": 900000,
     "maxProviderWaits": 4,
+    "fallbackAfterWaits": 2,
     "compactionMaxMs": 600000,
+    "compactBeforeTaskTokens": 200000,
+    "freshSessionAboveTokens": 600000,
     "mainHeartbeat": "off",
     "mainHeartbeatMs": 900000
   },

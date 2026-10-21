@@ -254,7 +254,20 @@ test('source drift during the readiness-to-continuation wait rejects the renewed
   onlyHeldNotice(f);
 }, { project: { runtime: { command: process.execPath, commandArgs: [host], inheritExtensions: false, startupTimeoutMs: 5000, requestTimeoutMs: 2000, shutdownTimeoutMs: 300 } }, rpc: 'real' }));
 
-test('source drift during the final activation readiness wait rejects the renewed authorization', { timeout: 15000 }, () => mainFixture(async f => {
+test('a revise that accepted edits is fenced on that capture: a further edit before renewal is rejected', { timeout: 15000 }, () => mainFixture(async f => {
+  const { reportId, taskId } = await injectReview(f.controller, f.cwd);
+  await tool(f, 'pair_yield');
+  await f.controller.inspect('worker', reportId);
+  await fs.writeFile(path.join(f.cwd, 'main-edit.txt'), 'edited during review\n');
+  const c = f.controller;
+  const original = c.startReserved.bind(c);
+  c.startReserved = async launch => { await fs.writeFile(path.join(f.cwd, `external-drift-${Date.now()}.txt`), 'external writer\n'); return original(launch); };
+  assert.match(await settled(f, 'pair_decide', { workerId: 'worker', taskId, reportId, action: 'revise', feedback: 'Revision after an accepted edit' }), /STALE_CHECKPOINT.*changed again between the decision and renewed running authority/, 'only the capture the decision accepted may be renewed');
+  assert.equal(c.record('worker').task.status, 'interrupted', 'the failed renewal holds the task without replaying work');
+  onlyHeldNotice(f);
+}, { project: { runtime: { command: process.execPath, commandArgs: [host], inheritExtensions: false, startupTimeoutMs: 5000, requestTimeoutMs: 2000, shutdownTimeoutMs: 300 } }, rpc: 'real' }));
+
+test('source drift during the final activation readiness wait rejects the renewed authorization',{ timeout: 15000 }, () => mainFixture(async f => {
   const { reportId, taskId } = await injectReview(f.controller, f.cwd);
   await tool(f, 'pair_yield');
   await f.controller.inspect('worker', reportId);

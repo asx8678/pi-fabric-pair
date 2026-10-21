@@ -87,7 +87,7 @@ test('a tool past control.toolMaxMs is stopped and the step re-activated with gu
     assert.equal(resumed.length, 1, 'the step was re-activated');
     assert.equal(resumed[0].by, 'watchdog');
     assert.match(String(resumed[0].instruction), /The bash call was stopped after 2 min/);
-    assert.match(String(resumed[0].instruction), /Avoid commands that never exit/);
+    assert.match(String(resumed[0].instruction), /Do not run it again unchanged/);
     assert.ok(userNotices.some(n => n.level === 'warning' && /Tool bash ran 2 min/.test(n.message)), 'the human is told');
     assert.equal(task.watchdog.recoveries, 1);
   } finally { await cleanup(f); }

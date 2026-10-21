@@ -10,7 +10,7 @@ import { PiRpc } from '../src/rpc.js';
 import { validateStoredState } from '../src/contracts.js';
 
 const host = fileURLToPath(new URL('./helpers/restart-worker.js', import.meta.url));
-async function fixture(run) {
+async function fixture(run, worker = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-restart-'));
   const repo = path.join(base, 'repo'), home = path.join(base, 'agent');
   await fs.mkdir(repo); await fs.mkdir(home);
@@ -20,7 +20,7 @@ async function fixture(run) {
     cwd: repo, ownerSession: 'restart-owner', storageDir: path.join(base, 'state'),
     config: {
       enabled: true, autoStart: false,
-      workers: [{ id: 'worker', provider: 'fixture', model: 'first', effort: 'low', cwd: null, readOnly: false }],
+      workers: [{ id: 'worker', provider: 'fixture', model: 'first', effort: 'low', cwd: null, readOnly: false, ...worker }],
       runtime: { command: process.execPath, commandArgs: [host], inheritExtensions: false, startupTimeoutMs: 5000, requestTimeoutMs: 2000, shutdownTimeoutMs: 300 },
       requirements: { fabric: false, fovea: false, prewalkDisabled: false, autoCompaction: true },
     },
@@ -83,6 +83,26 @@ test('restart applies staged worker model settings while retaining history and M
   assert.equal(c.pendingConfig, null); assert.equal(c.summary().main.model, 'main/unchanged');
   assert.equal(launches.length, 2); await noWorkPrompts(c);
 }));
+
+test('a worker on a provider fallback restarts on the fallback model with the same conversation, during its task', { timeout: 15000 }, () => fixture(async ({ c, launches }) => {
+  const before = await c.start('worker'), sessionId = before.sessionId, file = before.sessionFile;
+  const history = await fs.readFile(file, 'utf8');
+  await retainedTask(c);
+  await c.stop('worker');
+  const record = c.record('worker');
+  record.fallback = { index: 0, reason: 'quota exceeded', at: Date.now(), primary: structuredClone(record.bound), primarySession: null };
+  await c.persist();
+  // The configured spec is unchanged, so this is not a pending settings change: the start is allowed mid-task.
+  const after = await c.restart('worker');
+  assert.equal(after.bound.provider, 'fixture'); assert.equal(after.bound.model, 'second'); assert.equal(after.bound.effort, 'high');
+  assert.equal(after.sessionId, sessionId); assert.equal(after.sessionFile, file);
+  assert.ok((await fs.readFile(file, 'utf8')).startsWith(history), 'the conversation carries over');
+  const authority = JSON.parse(await fs.readFile(path.join(c.workerDir('worker'), 'authority.json'), 'utf8'));
+  assert.deepEqual(authority.model, { provider: 'fixture', id: 'second' }, 'the worker\'s own model check expects the fallback');
+  assert.equal(c.summary().workers[0].pendingConfiguration, false);
+  assert.equal(c.summary().workers[0].fallback?.model, 'fixture/second');
+  assert.equal(launches.length, 2); await noWorkPrompts(c);
+}, { fallbacks: [{ provider: 'fixture', model: 'second', effort: 'high' }] }));
 
 for (const fault of ['crash', 'malformed RPC']) test(`a worker ${fault} stays contained and explicit restart recovers the retained session`, { timeout: 15000 }, () => fixture(async ({ c, launches }) => {
   const before = await c.start('worker'), sessionId = before.sessionId, file = before.sessionFile;

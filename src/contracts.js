@@ -14,7 +14,7 @@ export const TASK_NOTE_LIMIT = 10000;
 const RESERVED_IDS = new Set(['prototype', ...Object.getOwnPropertyNames(Object.prototype)]);
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
-const POLICY_KEYS = ['mode', 'finalReview', 'maxRevisions', 'maxRevisionsPerStep', 'summaryDetail', 'maxStepFiles'];
+const POLICY_KEYS = ['mode', 'finalReview', 'maxRevisions', 'maxRevisionsPerStep', 'summaryDetail', 'maxStepFiles', 'enforceStepScope'];
 const LIMIT_KEYS = ['maxTurnsPerStep', 'taskTimeoutMs', 'activeStepTimeoutMs', 'maxQueuedTasks', 'maxQueuedReviews', 'maxReportsPerTask', 'maxReportBytes', 'maxAutomaticReportRepairs', 'maxAutomaticRecoveryAttempts', 'maxReportedCostUsd', 'maxOutputTokens'];
 const LIMIT_BOUNDS = Object.freeze({ maxReportsPerTask: [1, 1000], maxReportBytes: [1, 1048576], maxAutomaticReportRepairs: [0, 20] });
 const DEPRECATED_LIMIT_BOUNDS = Object.freeze({ maxQueuedTasks: [0, 128], maxQueuedReviews: [0, 128], maxAutomaticRecoveryAttempts: [0, 20] });
@@ -28,31 +28,46 @@ const REPORT_KEYS = ['version', 'reportId', 'workerId', 'ownerSession', 'ownerEp
 
 /** @typedef {'final-only' | 'milestones' | 'every-step'} ReviewMode */
 /** @typedef {'minimal' | 'normal' | 'detailed'} SummaryDetail */
-/** @typedef {{mode: ReviewMode, finalReview: true, maxRevisions: number, maxRevisionsPerStep: number, summaryDetail: SummaryDetail, maxStepFiles?: number}} TaskPolicy */
-/** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, maxRevisionsPerStep?: number, summaryDetail: SummaryDetail}} LegacyTaskPolicy */
+/** @typedef {{mode: ReviewMode, finalReview: true, maxRevisions: number, maxRevisionsPerStep: number, summaryDetail: SummaryDetail, maxStepFiles?: number, enforceStepScope?: boolean}} TaskPolicy */
+/** @typedef {{mode: ReviewMode | 'final' | 'strict', finalReview: true, maxRevisions: number, maxRevisionsPerStep?: number, summaryDetail: SummaryDetail, enforceStepScope?: boolean}} LegacyTaskPolicy */
 /** @typedef {{maxTurnsPerStep?: number, taskTimeoutMs?: number}} DeprecatedTurnTaskLimits */
 /** @typedef {{maxReportedCostUsd: number | null, maxOutputTokens: number | null}} BaseTaskLimits */
 /** @typedef {{activeStepTimeoutMs: number, maxQueuedTasks: number, maxQueuedReviews: number, maxReportsPerTask: number, maxReportBytes: number, maxAutomaticReportRepairs: number, maxAutomaticRecoveryAttempts: number}} DeferredTaskLimits */
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & {activeStepTimeoutMs: number, maxReportsPerTask: number, maxReportBytes: number, maxAutomaticReportRepairs: number, maxQueuedTasks?: number, maxQueuedReviews?: number, maxAutomaticRecoveryAttempts?: number}} CurrentTaskLimits */
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & DeferredTaskLimits} TaskLimits */
 /** @typedef {BaseTaskLimits & DeprecatedTurnTaskLimits & Partial<DeferredTaskLimits>} LegacyTaskLimits */
-/** @typedef {{id: string, title: string, instructions: string, acceptance?: string[]}} Step */
+/** @typedef {{id: string, title: string, instructions: string, acceptance?: string[], scope?: string[], effort?: string}} Step */
 /** @typedef {'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'} Effort */
 /** @type {readonly Effort[]} */
 export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-/** @typedef {{id: string, provider: string, model: string, effort: Effort, cwd: string | null, readOnly: boolean}} WorkerSpec */
+/**
+ * One worker's configuration. `backend`, `lowCommand` and `lowArgs` are optional so a config file written before a
+ * worker could choose its backend still loads; `undefined` means "use runtime.*", which is resolved by
+ * `workerBackend()`. They live in the spec because that is what the controller hashes per worker: changing them
+ * stages a restart for that worker, and only for that worker.
+ * @typedef {{id: string, provider: string, model: string, effort: Effort, cwd: string | null, readOnly: boolean, backend?: WorkerBackend, lowCommand?: string, lowArgs?: string[], fallbacks?: WorkerFallback[]}} WorkerSpec
+ */
+/**
+ * A provider/model the worker switches to when its own keeps failing (a quota stop, or control.fallbackAfterWaits
+ * transient waits). Effort and backend default to the worker's own.
+ * @typedef {{provider: string, model: string, effort?: Effort, backend?: WorkerBackend}} WorkerFallback
+ */
+/** At most this many fallbacks per worker: each one is a restart, and a long chain only delays escalation. */
+export const MAX_WORKER_FALLBACKS = 4;
+/** @typedef {'pi' | 'low'} WorkerBackend */
 /** @typedef {{name: string, command: string, args: string[]}} VerificationCommand */
 /** @typedef {{commands: VerificationCommand[], requirePassing: boolean, timeoutMs: number}} VerificationPolicy */
-/** @typedef {'answer' | 'approve' | 'revise' | 'fixed'} ContinuationAction */
+/** @typedef {'answer' | 'approve' | 'revise' | 'fixed' | 'repair'} ContinuationAction */
 /** @typedef {'pending' | 'accepted' | 'not_required' | 'not_sent_budget'} DecisionDelivery */
 /** @typedef {{hash: string, action: 'cancel', at: number}} CancelDecision */
 /** @typedef {{hash: string, feedback: string, ownerEpoch: number, workerGeneration: number, attemptId: string, deliveryOperationId: string, at: number, reviewerModel: string | null, delivery: DecisionDelivery}} ContinuationDecisionFields */
-/** @typedef {{action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'fixed', checkpointHash: string | null}} DecisionCheckpoint */
+/** @typedef {{action: 'approve', checkpointHash: string} | {action: 'answer' | 'revise' | 'fixed' | 'repair', checkpointHash: string | null}} DecisionCheckpoint */
 /** @typedef {ContinuationDecisionFields & DecisionCheckpoint} ContinuationDecision */
 /** @typedef {CancelDecision | ContinuationDecision} StoredDecision */
 /** @typedef {{action: ContinuationAction, feedback: string, reportId: string}} LastDecision */
 /** @typedef {{name: string, result: 'pass' | 'fail' | 'not_run', detail?: string}} ReportedCheck */
-/** @typedef {{taskId: string, stepId: string, summary: string, decisions?: string[], changedFiles?: string[], checks?: ReportedCheck[], stepComplete?: boolean}} ReportBody */
+/** @typedef {{criterion: string, met: boolean, evidence?: string}} AcceptanceClaim */
+/** @typedef {{taskId: string, stepId: string, summary: string, decisions?: string[], changedFiles?: string[], checks?: ReportedCheck[], acceptance?: AcceptanceClaim[], stepComplete?: boolean}} ReportBody */
 /** @typedef {ReportBody & ({kind: 'question', question: string} | {kind: 'checkpoint' | 'blocked' | 'final_review', question?: string})} ReportPayload */
 /** @typedef {{version: 1, reportId: string, workerId: string, ownerSession: string, ownerEpoch: number, workerGeneration: number, nonce: string, sessionId: string, leaseId: string, attemptId: string, attemptNumber: number, planRevision: number, payload: ReportPayload, payloadHash: string, createdAt: number}} ReportEnvelope */
 /** @typedef {{name: string, source: 'controller-configured', passed: boolean, code: number | null, timedOut: boolean, output: string, artifact: string}} VerificationResult */
@@ -60,7 +75,7 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {ReportEnvelope & {checkpoint: Checkpoint, snapshotRef: string, inspectedAt?: number, snapshot?: import('./evidence.js').Snapshot}} FinalizedReport */
 /** @typedef {{id: string, objective: string, planRevision: number, attemptId: string, attemptNumber: number, constraints: string[], steps: Step[], stepIndex: number, policy: LegacyTaskPolicy, limits: LegacyTaskLimits, lastDecision: LastDecision | null}} AuthorityTask */
 /** @typedef {'idle' | 'running' | 'waiting' | 'paused' | 'stopped'} AuthorityPhase */
-/** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, phase: AuthorityPhase, leaseId: string, attemptId: string | null, readOnly: boolean, model: {provider: string, id: string}, repoRoot: string, task: AuthorityTask | null, updatedAt: number, cacheWarming?: 'off' | 'active'}} Authority */  // cacheWarming: legacy key, accepted and ignored
+/** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, workerId: string, workerGeneration: number, phase: AuthorityPhase, leaseId: string, attemptId: string | null, readOnly: boolean, model: {provider: string, id: string}, repoRoot: string, task: AuthorityTask | null, updatedAt: number, cacheWarming?: 'off' | 'active', enforceStepScope?: boolean, shellGuard?: {blockedCommands: string[], defaultShellTimeoutS: number}}} Authority */  // cacheWarming: legacy key, accepted and ignored
 /** @typedef {{ownerEpoch: number, workerGeneration: number, leaseId: string, attemptId: string, report: ReportEnvelope}} Latch */
 
 /** @typedef {'activating' | 'running' | 'awaiting_settle' | 'question' | 'blocked' | 'review' | 'paused' | 'interrupted' | 'completed' | 'cancelled'} TaskStatus */
@@ -84,7 +99,13 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'
 /** @typedef {PreDeferredPolicyV1 & {maxRevisionsPerStep: number}} StoredPolicyV1 */
 /** @typedef {{id: string, requestId: string, objective: string, context: string, constraints: string[], steps: Step[], stepIndex: number, planRevision: number, status: TaskStatus, leaseId: string, verification: VerificationPolicy, startedAt: number, updatedAt: number, revisions: number, turns: number, usage: UsageTotals | null, baseSnapshotRef: string, lastDecision: LastDecision | null, dispatchSettleSequence?: number, pendingSince?: number, abortRequested?: boolean, interruption?: string, previousStatus?: string, completedAt?: number, cancelReason?: string, stepRevisions?: number, pausedBy?: 'human', mainRecoveries?: number, timeline?: import('./timeline.js').TimelineEntry[], mainFix?: {reportId: string, startedAt: number}, stepReplans?: {index: number, count: number}, changeKind?: 'main-fix', stepSteers?: {index: number, count: number}, watchdog?: {step: number, recoveries: number, noReportNudges: number, steers: number, nudged: boolean, nudgedAttemptId?: string, pingedAt?: number, providerWaits: number, retryAt: number | null, retryReason: string | null}}} StoredTaskFieldsV1 */
 /** @typedef {StoredTaskFieldsV1 & {workerId: string, attemptId: string, attemptNumber: number, pendingReport: ReportEnvelope | null, report: FinalizedReport | null, decisions: Record<string, StoredDecision>} & ({policy: StoredPolicyV1, limits: TaskLimits} | {policy: PreDeferredPolicyV1, limits: BaseTaskLimits})} StoredTaskV1 */
-/** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null, pid?: number, spawnedAt?: number}} StoredWorkerFieldsV1 */
+/** @typedef {{id: string, cwd: string, repoRoot: string, status: WorkerStatus, sessionId: string | null, sessionFile: string | null, bound: WorkerSpec, history: StoredHistoryV1[], usage: UsageTotals | null, error?: string | null, diagnosticFile?: string, lastObservation?: StoredTelemetryV1 | HistoricalTelemetryV1 | null, lastExchange?: StoredExchangeV1 | null, staleReports?: StoredStaleReportV1[], probe?: StoredProbeV1 | HistoricalProbeV1 | null, pid?: number, spawnedAt?: number, freshSession?: boolean, fallback?: StoredFallbackV1}} StoredWorkerFieldsV1 */
+/**
+ * The fallback a worker runs on for the rest of its current task: which entry of its configured fallbacks, why, the
+ * primary spec it replaced (so a settings change mid-task is still noticed), and the primary conversation a switch to
+ * the other backend set aside, restored with the primary at the next task.
+ * @typedef {{index: number, reason: string, at: number, primary: WorkerSpec, primarySession: {sessionId: string | null, sessionFile: string | null} | null}} StoredFallbackV1
+ */
 /** @typedef {StoredWorkerFieldsV1 & {workerGeneration: number, task: StoredTaskV1 | null}} StoredWorkerV1 */
 /** @typedef {{version: 1, ownerSession: string, ownerEpoch: number, cwd: string, workers: Record<string, StoredWorkerV1>, requests: Record<string, StoredRequestV1>, notices: Record<string, StoredNoticeV1>, mainPhase?: StoredMainPhaseV1, branch?: number}} StoredStateV1 */
 /** @typedef {'invalid-field' | 'missing-required-field' | 'mixed-identity' | 'partial-policy-layout' | 'hash-mismatch' | 'inconsistent-reference' | 'unsupported-version' | 'unsupported-shape' | 'unsupported-policy'} StoredIssueCode */
@@ -188,7 +209,7 @@ function knownVersion(value, label, supported) {
 function reference(condition, path, message) { invariant(condition, message, path, 'inconsistent-reference'); }
 /** @param {unknown} value @param {string} label */
 function checkDecision(value, label) {
-  const decision = object(value, label), action = choice(required(decision, 'action', label), ['answer', 'approve', 'revise', 'cancel', 'fixed'], `${label}.action`);
+  const decision = object(value, label), action = choice(required(decision, 'action', label), ['answer', 'approve', 'revise', 'cancel', 'fixed', 'repair'], `${label}.action`);
   const identity = ['ownerEpoch', 'workerGeneration', 'attemptId', 'deliveryOperationId'];
   keys(decision, action === 'cancel' ? ['hash', 'action', 'at'] : ['hash', 'action', 'feedback', 'checkpointHash', 'at', 'reviewerModel', 'delivery', ...identity], label);
   hash(required(decision, 'hash', label), `${label}.hash`); integer(required(decision, 'at', label), `${label}.at`);
@@ -213,7 +234,7 @@ function validateStoredDecision(value, label) { assertStoredDecision(value, labe
 function assertLastDecision(value, label) {
   if (value === null) return;
   const decision = object(value, label); keys(decision, ['action', 'feedback', 'reportId'], label);
-  choice(required(decision, 'action', label), ['answer', 'approve', 'revise', 'fixed'], `${label}.action`);
+  choice(required(decision, 'action', label), ['answer', 'approve', 'revise', 'fixed', 'repair'], `${label}.action`);
   invariant(text(required(decision, 'feedback', label), `${label}.feedback`, 12000).length > 0, `${label}.feedback must not be empty`, `${label}.feedback`);
   id(required(decision, 'reportId', label), `${label}.reportId`);
 }
@@ -229,6 +250,7 @@ function assertTaskPolicy(value, label = 'task.policy', { legacy = false } = {})
   if (!legacy || Object.hasOwn(policy, 'maxRevisionsPerStep')) integer(required(policy, 'maxRevisionsPerStep', label), `${label}.maxRevisionsPerStep`, 0, 20);
   choice(required(policy, 'summaryDetail', label), ['minimal', 'normal', 'detailed'], `${label}.summaryDetail`);
   if (Object.hasOwn(policy, 'maxStepFiles')) integer(policy.maxStepFiles, `${label}.maxStepFiles`, 1, 1000);
+  if (Object.hasOwn(policy, 'enforceStepScope')) bool(policy.enforceStepScope, `${label}.enforceStepScope`);
 
 }
 
@@ -279,10 +301,23 @@ function validateVerification(value, label) { assertVerification(value, label); 
 
 /** @param {unknown} value @param {string} label @returns {asserts value is Step} */
 function assertStep(value, label) {
-  const step = object(value, label); keys(step, ['id', 'title', 'instructions', 'acceptance'], label);
+  const step = object(value, label); keys(step, ['id', 'title', 'instructions', 'acceptance', 'scope', 'effort'], label);
   id(required(step, 'id', label), `${label}.id`); text(required(step, 'title', label), `${label}.title`, 200); text(required(step, 'instructions', label), `${label}.instructions`);
   if (Object.hasOwn(step, 'acceptance')) array(step.acceptance, `${label}.acceptance`).forEach((entry, index) => text(entry, `${label}.acceptance[${index}]`, 2000));
-
+  // A scope says which files a step is about. It is repository-relative by construction: an absolute path or one
+  // that climbs with ".." would name something the step cannot be held to, so it is refused at the door.
+  if (Object.hasOwn(step, 'scope')) {
+    const scope = array(step.scope, `${label}.scope`);
+    invariant(scope.length <= 32, `${label}.scope holds at most 32 globs`, `${label}.scope`);
+    scope.forEach((entry, index) => {
+      const at = `${label}.scope[${index}]`, glob = text(entry, at, 300);
+      const normalized = glob.replace(/\\/g, '/');
+      invariant(!normalized.startsWith('/') && !/^[A-Za-z]:/.test(normalized) && !normalized.split('/').includes('..'),
+        `${at} must be a repository-relative glob: no absolute path and no ".."`, at);
+    });
+  }
+  // A per-step effort is one Pi already knows; the runtime refuses a level the model does not offer when it applies it.
+  if (Object.hasOwn(step, 'effort')) choice(step.effort, EFFORT_LEVELS, `${label}.effort`);
 }
 
 /** @param {unknown} value @param {string} label @returns {Step} */
@@ -290,11 +325,26 @@ function validateStep(value, label) { assertStep(value, label); return value; }
 
 /** @param {unknown} value @param {string} label @returns {asserts value is WorkerSpec} */
 function assertWorkerSpec(value, label) {
-  const spec = object(value, label); keys(spec, ['id', 'provider', 'model', 'effort', 'cwd', 'readOnly'], label);
+  const spec = object(value, label); keys(spec, ['id', 'provider', 'model', 'effort', 'cwd', 'readOnly', 'backend', 'lowCommand', 'lowArgs', 'fallbacks'], label);
   id(required(spec, 'id', label), `${label}.id`); text(required(spec, 'provider', label), `${label}.provider`, 999); text(required(spec, 'model', label), `${label}.model`, 999);
   choice(required(spec, 'effort', label), EFFORT_LEVELS, `${label}.effort`);
   const cwd = required(spec, 'cwd', label); invariant(cwd === null || typeof cwd === 'string', `${label}.cwd must be null or a path`, `${label}.cwd`); bool(required(spec, 'readOnly', label), `${label}.readOnly`);
-
+  // Absent means "inherit runtime.*", so a stored spec from before this existed still validates.
+  if (Object.hasOwn(spec, 'backend')) choice(spec.backend, ['pi', 'low'], `${label}.backend`);
+  if (Object.hasOwn(spec, 'lowCommand')) text(spec.lowCommand, `${label}.lowCommand`, 999);
+  if (Object.hasOwn(spec, 'lowArgs')) array(spec.lowArgs, `${label}.lowArgs`).forEach((entry, index) => text(entry, `${label}.lowArgs[${index}]`, 999));
+  if (Object.hasOwn(spec, 'fallbacks')) {
+    const fallbacks = array(spec.fallbacks, `${label}.fallbacks`);
+    invariant(fallbacks.length <= MAX_WORKER_FALLBACKS, `${label}.fallbacks must hold at most ${MAX_WORKER_FALLBACKS} entries`, `${label}.fallbacks`);
+    fallbacks.forEach((entry, index) => assertWorkerFallback(entry, `${label}.fallbacks[${index}]`));
+  }
+}
+/** @param {unknown} value @param {string} label @returns {asserts value is WorkerFallback} */
+function assertWorkerFallback(value, label) {
+  const fallback = object(value, label); keys(fallback, ['provider', 'model', 'effort', 'backend'], label);
+  text(required(fallback, 'provider', label), `${label}.provider`, 999); text(required(fallback, 'model', label), `${label}.model`, 999);
+  if (Object.hasOwn(fallback, 'effort')) choice(fallback.effort, EFFORT_LEVELS, `${label}.effort`);
+  if (Object.hasOwn(fallback, 'backend')) choice(fallback.backend, ['pi', 'low'], `${label}.backend`);
 }
 
 /** @param {unknown} value @param {string} label @returns {WorkerSpec} */
@@ -603,7 +653,18 @@ function checkStoredTask(value, label, workerId, facts) {
   if (Object.hasOwn(task, 'changeKind')) choice(task.changeKind, ['main-fix'], `${label}.changeKind`);
   // The watchdog's bounded per-step bookkeeping. Absent means none yet; a record for another step is reset on use.
   if (Object.hasOwn(task, 'watchdog')) {
-    const watchdog = object(task.watchdog, `${label}.watchdog`); keys(watchdog, ['step', 'recoveries', 'noReportNudges', 'steers', 'nudged', 'nudgedAttemptId', 'pingedAt', 'providerWaits', 'retryAt', 'retryReason'], `${label}.watchdog`);
+    const watchdog = object(task.watchdog, `${label}.watchdog`); keys(watchdog, ['step', 'recoveries', 'autoRepairs', 'repairs', 'noReportNudges', 'steers', 'nudged', 'nudgedAttemptId', 'pingedAt', 'providerWaits', 'retryAt', 'retryReason'], `${label}.watchdog`);
+    if (Object.hasOwn(watchdog, 'autoRepairs')) integer(watchdog.autoRepairs, `${label}.watchdog.autoRepairs`, 0);
+    // Each automatic repair records what Pair found, so the report that finally reaches Main carries the history.
+    if (Object.hasOwn(watchdog, 'repairs')) {
+      invariant(Array.isArray(watchdog.repairs) && watchdog.repairs.length <= 8, `${label}.watchdog.repairs must be an array of at most 8 entries`, `${label}.watchdog.repairs`);
+      for (const entry of /** @type {unknown[]} */ (watchdog.repairs)) {
+        const repair = object(entry, `${label}.watchdog.repairs[]`); keys(repair, ['reasons', 'at'], `${label}.watchdog.repairs[]`);
+        invariant(Array.isArray(repair.reasons) && repair.reasons.length <= 8, `${label}.watchdog.repairs[].reasons must be an array of at most 8 strings`, `${label}.watchdog.repairs[].reasons`);
+        for (const reason of /** @type {unknown[]} */ (repair.reasons)) text(reason, `${label}.watchdog.repairs[].reasons[]`, 200);
+        integer(required(repair, 'at', `${label}.watchdog.repairs[]`), `${label}.watchdog.repairs[].at`, 0);
+      }
+    }
     if (Object.hasOwn(watchdog, 'nudgedAttemptId')) id(watchdog.nudgedAttemptId, `${label}.watchdog.nudgedAttemptId`);
     if (Object.hasOwn(watchdog, 'pingedAt')) integer(watchdog.pingedAt, `${label}.watchdog.pingedAt`, 0);
     integer(required(watchdog, 'step', `${label}.watchdog`), `${label}.watchdog.step`, 0);
@@ -629,7 +690,7 @@ function checkStoredTask(value, label, workerId, facts) {
  */
 function checkWorkerRecord(value, label, workerId, ownerSession, facts) {
   const record = object(value, label);
-  keys(record, ['id', 'cwd', 'repoRoot', 'status', 'sessionId', 'sessionFile', 'bound', 'task', 'history', 'usage', 'error', 'diagnosticFile', 'lastObservation', 'lastExchange', 'staleReports', 'probe', 'pid', 'spawnedAt', 'workerGeneration'], label);
+  keys(record, ['id', 'cwd', 'repoRoot', 'status', 'sessionId', 'sessionFile', 'bound', 'task', 'history', 'usage', 'error', 'diagnosticFile', 'lastObservation', 'lastExchange', 'staleReports', 'probe', 'pid', 'spawnedAt', 'freshSession', 'fallback', 'workerGeneration'], label);
   reference(id(required(record, 'id', label), `${label}.id`) === workerId, `${label}.id`, 'Worker identity differs from its map key');
   for (const key of ['cwd', 'repoRoot']) text(required(record, key, label), `${label}.${key}`, 10000);
   choice(required(record, 'status', label), WORKER_STATUSES, `${label}.status`);
@@ -645,6 +706,16 @@ function checkWorkerRecord(value, label, workerId, ownerSession, facts) {
   validateUsageTotals(required(record, 'usage', label), `${label}.usage`);
   if (Object.hasOwn(record, 'error')) nullableText(record.error, `${label}.error`);
   if (Object.hasOwn(record, 'diagnosticFile')) text(record.diagnosticFile, `${label}.diagnosticFile`, 10000);
+  // Set only while an oversized conversation has been archived and the next start must open a new session.
+  if (Object.hasOwn(record, 'freshSession')) bool(record.freshSession, `${label}.freshSession`);
+  if (Object.hasOwn(record, 'fallback')) {
+    const at = `${label}.fallback`, fallback = object(record.fallback, at);
+    keys(fallback, ['index', 'reason', 'at', 'primary', 'primarySession'], at);
+    integer(required(fallback, 'index', at), `${at}.index`, 0, MAX_WORKER_FALLBACKS - 1); text(required(fallback, 'reason', at), `${at}.reason`, 1000); integer(required(fallback, 'at', at), `${at}.at`);
+    const primary = validateWorkerSpec(required(fallback, 'primary', at), `${at}.primary`); reference(primary.id === workerId, `${at}.primary.id`, 'Primary identity differs from its worker');
+    const session = required(fallback, 'primarySession', at);
+    if (session !== null) { const kept = object(session, `${at}.primarySession`); keys(kept, ['sessionId', 'sessionFile'], `${at}.primarySession`); for (const key of ['sessionId', 'sessionFile']) nullableText(required(kept, key, `${at}.primarySession`), `${at}.primarySession.${key}`); }
+  }
   if (Object.hasOwn(record, 'pid')) integer(record.pid, `${label}.pid`, 1);
   if (Object.hasOwn(record, 'spawnedAt')) integer(record.spawnedAt, `${label}.spawnedAt`);
   if (Object.hasOwn(record, 'lastObservation')) checkTelemetry(record.lastObservation, `${label}.lastObservation`, workerId, ownerSession);
@@ -847,12 +918,25 @@ export function validateStoredState(value, expected) {
 }
 /** @param {unknown} value @param {string} [label] @returns {asserts value is ReportPayload} */
 function assertReportPayload(value, label = 'report payload') {
-  const payload = object(value, label); keys(payload, ['taskId', 'stepId', 'kind', 'summary', 'question', 'decisions', 'changedFiles', 'checks', 'stepComplete'], label);
+  const payload = object(value, label); keys(payload, ['taskId', 'stepId', 'kind', 'summary', 'question', 'decisions', 'changedFiles', 'checks', 'acceptance', 'stepComplete'], label);
   id(required(payload, 'taskId', label), `${label}.taskId`); id(required(payload, 'stepId', label), `${label}.stepId`); const kind = choice(required(payload, 'kind', label), ['question', 'checkpoint', 'blocked', 'final_review'], `${label}.kind`);
   const summary = text(required(payload, 'summary', label), `${label}.summary`, 8000); invariant(summary.length >= 1, `${label}.summary must not be empty`, `${label}.summary`);
   if (Object.hasOwn(payload, 'question')) { const question = text(payload.question, `${label}.question`, 4000); invariant(question.length >= 1, `${label}.question must not be empty`, `${label}.question`); }
   for (const key of ['decisions', 'changedFiles']) if (Object.hasOwn(payload, key)) { const entries = array(payload[key], `${label}.${key}`); const maximum = key === 'decisions' ? 24 : 200; invariant(entries.length <= maximum, `${label}.${key} is too large`, `${label}.${key}`); entries.forEach((entry, index) => { const item = text(entry, `${label}.${key}[${index}]`, key === 'decisions' ? 2000 : 1024); invariant(item.length >= 1, `${label}.${key}[${index}] must not be empty`, `${label}.${key}[${index}]`); }); }
   if (Object.hasOwn(payload, 'checks')) { const checks = array(payload.checks, `${label}.checks`); invariant(checks.length <= 32, `${label}.checks is too large`, `${label}.checks`); checks.forEach((entry, index) => { const checkLabel = `${label}.checks[${index}]`, check = object(entry, checkLabel); keys(check, ['name', 'result', 'detail'], checkLabel); const name = text(required(check, 'name', checkLabel), `${checkLabel}.name`, 200); invariant(name.length >= 1, `${checkLabel}.name must not be empty`, `${checkLabel}.name`); choice(required(check, 'result', checkLabel), ['pass', 'fail', 'not_run'], `${checkLabel}.result`); if (Object.hasOwn(check, 'detail')) { const detail = text(check.detail, `${checkLabel}.detail`, 2000); invariant(detail.length >= 1, `${checkLabel}.detail must not be empty`, `${checkLabel}.detail`); } }); }
+  // Acceptance: the step's own criteria with the worker's verdict on each, so Main reads a verdict per criterion
+  // instead of having to infer it from a summary. The evidence is the worker's claim like any other.
+  if (Object.hasOwn(payload, 'acceptance')) {
+    const claims = array(payload.acceptance, `${label}.acceptance`);
+    invariant(claims.length <= 32, `${label}.acceptance is too large`, `${label}.acceptance`);
+    claims.forEach((entry, index) => {
+      const at = `${label}.acceptance[${index}]`, claim = object(entry, at); keys(claim, ['criterion', 'met', 'evidence'], at);
+      const criterion = text(required(claim, 'criterion', at), `${at}.criterion`, 200);
+      invariant(criterion.trim().length >= 1, `${at}.criterion must not be empty`, `${at}.criterion`);
+      bool(required(claim, 'met', at), `${at}.met`);
+      if (Object.hasOwn(claim, 'evidence')) { const evidence = text(claim.evidence, `${at}.evidence`, 500); invariant(evidence.trim().length >= 1, `${at}.evidence must not be empty`, `${at}.evidence`); }
+    });
+  }
   if (Object.hasOwn(payload, 'stepComplete')) bool(payload.stepComplete, `${label}.stepComplete`);
   if (kind === 'question') invariant(typeof payload.question === 'string' && payload.question.trim().length > 0, 'question reports need a question', `${label}.question`);
 
@@ -899,8 +983,18 @@ export function validateReportEnvelope(value, label = 'report') { assertReportEn
 
 /** @param {unknown} value @param {ExpectedIdentity} [expected] @returns {asserts value is Authority} */
 function assertAuthority(value, expected = {}) {
-  const authority = object(value, 'authority'); keys(authority, ['version', 'ownerSession', 'ownerEpoch', 'workerId', 'workerGeneration', 'phase', 'leaseId', 'attemptId', 'readOnly', 'model', 'repoRoot', 'task', 'updatedAt', 'cacheWarming'], 'authority');
+  const authority = object(value, 'authority'); keys(authority, ['version', 'ownerSession', 'ownerEpoch', 'workerId', 'workerGeneration', 'phase', 'leaseId', 'attemptId', 'readOnly', 'model', 'repoRoot', 'task', 'updatedAt', 'cacheWarming', 'enforceStepScope', 'shellGuard'], 'authority');
   if (Object.hasOwn(authority, 'cacheWarming')) choice(authority.cacheWarming, ['off', 'active'], 'authority.cacheWarming');
+  if (Object.hasOwn(authority, 'enforceStepScope')) bool(authority.enforceStepScope, 'authority.enforceStepScope');
+  // The shell guard a Pi worker applies to its own calls. Optional, so authority files written before it still load;
+  // a worker with none runs only the gate its runtime gives it.
+  if (Object.hasOwn(authority, 'shellGuard')) {
+    const guard = object(authority.shellGuard, 'authority.shellGuard'); keys(guard, ['blockedCommands', 'defaultShellTimeoutS'], 'authority.shellGuard');
+    const patterns = array(required(guard, 'blockedCommands', 'authority.shellGuard'), 'authority.shellGuard.blockedCommands');
+    invariant(patterns.length <= 64, 'authority.shellGuard.blockedCommands must hold at most 64 patterns', 'authority.shellGuard.blockedCommands');
+    patterns.forEach((pattern, index) => text(pattern, `authority.shellGuard.blockedCommands[${index}]`, 500));
+    integer(required(guard, 'defaultShellTimeoutS', 'authority.shellGuard'), 'authority.shellGuard.defaultShellTimeoutS', 0, 86400);
+  }
   integer(required(authority, 'version', 'authority'), 'authority.version', WIRE_VERSION, WIRE_VERSION); const ownerSession = text(required(authority, 'ownerSession', 'authority'), 'authority.ownerSession', 10000); const ownerEpoch = integer(required(authority, 'ownerEpoch', 'authority'), 'authority.ownerEpoch', 1); const workerId = id(required(authority, 'workerId', 'authority'), 'authority.workerId'); const phase = choice(required(authority, 'phase', 'authority'), AUTHORITY_PHASES, 'authority.phase'); const workerGeneration = integer(required(authority, 'workerGeneration', 'authority'), 'authority.workerGeneration', phase === 'stopped' ? 0 : 1);
   if (expected.ownerSession !== undefined) invariant(ownerSession === expected.ownerSession, 'Pair authority owner session mismatch'); if (expected.ownerEpoch !== undefined) invariant(ownerEpoch === expected.ownerEpoch, 'Pair authority owner epoch mismatch'); if (expected.workerId !== undefined) invariant(workerId === expected.workerId, 'Pair authority worker mismatch'); if (expected.workerGeneration !== undefined) invariant(workerGeneration === expected.workerGeneration, 'Pair authority worker generation mismatch');
   token(required(authority, 'leaseId', 'authority'), 'authority.leaseId'); const attemptId = required(authority, 'attemptId', 'authority'); invariant(attemptId === null || typeof attemptId === 'string', 'authority.attemptId must be null or an ID'); if (typeof attemptId === 'string') id(attemptId, 'authority.attemptId'); bool(required(authority, 'readOnly', 'authority'), 'authority.readOnly');

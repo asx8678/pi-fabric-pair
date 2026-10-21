@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { ACTION_HELP, ACTION_HELP_MAX, createDashboard, createFollowView, dashboardAction, dashboardItems, dashboardKeys, dashboardLines, dashboardMenu, dashboardMoreKeys, dashboardView, menu } from '../src/ui.js';
+import { ACTION_HELP, ACTION_HELP_MAX, createDashboard, createFollowView, dashboardAction, dashboardItems, dashboardKeys, dashboardLines, dashboardMenu, dashboardMoreKeys, dashboardView, menu, statusText } from '../src/ui.js';
 
 const NOW = 1_700_000_000_000;
 const strip = (/** @type {string} */ text) => text.replace(/\u001b\[[0-9;]*m/g, '');
@@ -954,4 +954,21 @@ test('without the TUI, the menu names the worker an action is for, so each choic
   assert.ok(offered.includes('Status'), 'a label that appears once is offered as it is');
   assert.equal(await pick('Close'), undefined);
   assert.equal(await pick(/** @type {any} */ (undefined)), undefined, 'a dismissed select chooses nothing');
+});
+
+test('a worker on a provider fallback shows the fallback model in the roster and in /pair status', () => {
+  const fallback = { model: 'openai/gpt-backup', backend: 'low', reason: '429 rate limit', at: NOW - 60000 };
+  const two = summary({ workers: [worker({ fallback, backend: 'pi' }), worker({ id: 'w2', status: 'ready', task: null })] });
+  for (const width of [60, 100]) {
+    const lines = dashboardLines(two, width, NOW).map(strip);
+    const row = lines.find(line => line.includes('w1') && line.includes('working'));
+    assert.ok(row && /gpt-backup|fallback/.test(row), lines.join('\n'));
+    assert.ok(lines.every(line => visibleWidth(line) <= width), lines.join('\n'));
+  }
+  const wide = dashboardLines(two, 100, NOW).map(strip).find(line => line.includes('w1') && line.includes('working'));
+  assert.match(String(wide), /openai\/gpt-backup · fallback · low/);
+  assert.doesNotMatch(String(wide), /claude-opus/);
+  const text = statusText(two, null, NOW);
+  assert.match(text, /Fallback\s+openai\/gpt-backup · low for the rest of this task/);
+  assert.doesNotMatch(statusText(summary(), null, NOW), /Fallback/);
 });

@@ -297,6 +297,7 @@ export class PiRuntime {
   /** @type {Promise<void> | null} */ #abortPromise = null;
   /** @type {ActivationState | null} */ #activation = null;
   /** @type {RuntimeState | null} */ #state = null;
+  /** The bridge's last reported context usage, which is the only token measurement Pair gets from Pi. @type {{tokens: number | null} | null} */ #context = null;
   /** @type {string | null} */ #fault = null;
   /** @type {RpcExit | null} */ #exit = null;
   /** @type {Map<string, {name: string, startedAt: number}>} */ #tools = new Map();
@@ -318,6 +319,8 @@ export class PiRuntime {
   // A compaction between leases is Fabric's maintenance, not a stray run: it is allowed to finish.
   #maintenanceCompaction = false;
   /** @type {ReturnType<typeof setTimeout> | undefined} */ #compactionTimer;
+  /** The effort a step asked for, when it differs from the worker's own; null while the worker runs at its own. @type {string | null} */
+  #stepEffort = null;
   /** @type {Set<string>} */ #strayTools = new Set();
   #startupController = new AbortController();
   /** @type {Set<() => void>} */ #waiters = new Set();
@@ -348,6 +351,71 @@ export class PiRuntime {
   get currentTool() { return this.#tools.values().next().value?.name || null; }
   /** The last provider error the worker reported, cleared when a new activation is accepted. */
   get lastError() { return this.#lastError; }
+
+  /**
+   * The last measured size of this worker's context, in tokens, or null when nothing was measured yet. Pi reports it
+   * in its own state; the controller reads it at dispatch to decide whether the next task should start in the
+   * context that is already there (see compactContext and control.compactBeforeTaskTokens).
+   * @returns {number | null}
+   */
+  contextTokens() {
+    const context = this.#context;
+    return context && typeof context.tokens === 'number' && context.tokens >= 0 ? context.tokens : null;
+  }
+  /**
+   * Set the effort the next work runs at, for a step that asked for its own. This is a Pi command outside a run, the
+   * same class as the between-run compaction: no lease is involved and no agent work happens. The runtime remembers
+   * the level it set, because its drift checks compare Pi's level against the worker's own effort and a per-step
+   * level is a deliberate, controller-owned difference.
+   * @param {string} level @returns {Promise<void>}
+   */
+  async setStepEffort(level) {
+    requireValue(!this.closed && this.ready, 'Worker is not running');
+    requireValue(this.#lifecycleIdle() && !this.#compactions.size, 'The worker is busy; refusing to change effort under a run');
+    requireValue(THINKING.has(level), `Unsupported worker effort: ${level}`);
+    const levels = record(await this.#send('get_available_thinking_levels', {}, null), 'Thinking levels');
+    // Refuse rather than silently ignore: a model that does not offer this level would run at another one.
+    requireValue(Array.isArray(levels.levels) && levels.levels.includes(level), `This model does not offer effort ${level} (it offers ${Array.isArray(levels.levels) ? levels.levels.join(', ') : 'nothing reported'}); widen the worker's effort or drop the step's.`);
+    await this.#send('set_thinking_level', { level }, null);
+    const state = await this.#readState(null);
+    requireValue(state.thinkingLevel === level, 'Pi did not apply the step effort');
+    this.#stepEffort = level;
+  }
+  /**
+   * Put the effort back to the worker's own after a step that set it. Advisory: the next activation's exact-state
+   * check is what refuses to run at the wrong level, so a failure here is reported by that check rather than here.
+   * @returns {Promise<void>}
+   */
+  async clearStepEffort() {
+    if (this.#stepEffort === null || this.closed || !this.ready) return;
+    const restore = this.#options.spec.effort;
+    try {
+      if (this.#lifecycleIdle() && !this.#compactions.size) await this.#send('set_thinking_level', { level: restore }, null);
+    } finally { this.#stepEffort = null; }
+  }
+  /**
+   * Compact the conversation before a task starts, keeping what the next task needs. This is a Pi command, not a
+   * run: no lease is needed, and the compaction events are maintenance so the runtime neither rejects nor aborts
+   * them. Bounded by control.compactionMaxMs through the same allowance a between-run compaction uses.
+   * @param {string} instructions @returns {Promise<void>}
+   */
+  async compactContext(instructions) {
+    requireValue(!this.closed && this.ready, 'Worker is not running');
+    requireValue(this.#lifecycleIdle() && !this.#compactions.size, 'The worker is busy; refusing to compact under a run');
+    requireValue(typeof instructions === 'string' && instructions.trim().length > 0, 'Compaction needs instructions for what to keep');
+    // The compaction this starts is maintenance from the outset: it runs outside a lease and the deadline is armed
+    // by compaction_start. Marking it here as well means the abort timer is in place even if the event is slow.
+    this.#maintenanceCompaction = true; this.#armCompactionDeadline();
+    try {
+      await this.#rpc.send('compact', { customInstructions: instructions }, this.#requestTimeout(), { control: true, guard: () => this.#current(null, true) });
+      // Wait for Pi to finish summarising: the response can precede the last compaction_end. The deadline is the
+      // maintenance allowance, since a compaction is the one thing allowed to take that long here.
+      const deadline = Date.now() + Math.max(this.#requestTimeout(), this.#maintenanceAllowance() || this.#requestTimeout());
+      while (this.#compactions.size && !this.closed && Date.now() < deadline) {
+        await new Promise(resolve => { const done = () => { clearTimeout(timer); this.#waiters.delete(done); resolve(undefined); }; const timer = setTimeout(done, Math.min(250, Math.max(1, deadline - Date.now()))); this.#waiters.add(done); });
+      }
+    } finally { this.#wake(); }
+  }
 
   #wake() {
     for (const wake of this.#waiters) wake();
@@ -525,7 +593,9 @@ export class PiRuntime {
   /** @param {RuntimeState} state @param {boolean} [requireIdle] */
   #exactState(state, requireIdle = true) {
     const spec = this.#options.spec;
-    requireValue(state.model.provider === spec.provider && state.model.id === spec.model && state.thinkingLevel === spec.effort, 'Exact model/thinking selection drifted');
+    // A step's own effort is the controller's deliberate setting, so it is what the selection must be while it applies.
+    const effort = this.#stepEffort ?? spec.effort;
+    requireValue(state.model.provider === spec.provider && state.model.id === spec.model && state.thinkingLevel === effort, `Exact model/thinking selection drifted (expected effort ${effort}, Pi has ${state.thinkingLevel})`);
     if (requireIdle) requireValue(!state.isStreaming && !state.isCompacting && state.pendingMessageCount === 0, 'Worker RPC is not idle');
   }
   /** @param {'probe' | 'load'} operation @param {Activation | null} activation @returns {Promise<Readiness>} */
@@ -555,12 +625,14 @@ export class PiRuntime {
       requireValue(probe.nonce === o.nonce && probe.workerId === o.workerId && probe.ownerSession === o.ownerSession && probe.ownerEpoch === o.ownerEpoch && probe.workerGeneration === o.workerGeneration && probe.pid === this.pid, 'Wrong/stale bridge identity');
       requireValue(probe.checkedAt >= began && probe.checkedAt <= Date.now(), 'Bridge did not produce a fresh probe');
       const state = await this.#readState(activation); this.#exactState(state);
-      requireValue(probe.sessionId === state.sessionId && probe.sessionFile === state.sessionFile && probe.cwd === o.cwd && probe.model?.provider === o.spec.provider && probe.model.id === o.spec.model && probe.thinkingLevel === o.spec.effort, 'Bridge/RPC exact identity or selection mismatch');
+      const effort = this.#stepEffort ?? o.spec.effort;
+      requireValue(probe.sessionId === state.sessionId && probe.sessionFile === state.sessionFile && probe.cwd === o.cwd && probe.model?.provider === o.spec.provider && probe.model.id === o.spec.model && probe.thinkingLevel === effort && state.thinkingLevel === effort, 'Bridge/RPC exact identity or selection mismatch');
       requireValue(this.#lifecycleIdle(), 'Agent activity occurred during bridge verification');
       await this.#verifyRetainedHistory(activation, operation); this.#assertCurrent(activation);
       const finalState = await this.#readState(activation); this.#exactState(finalState);
       requireValue(this.#lifecycleIdle() && isDeepStrictEqual(state, finalState), 'State changed while verifying bridge/history');
-      checkReadiness(probe, finalState, o.config, o.spec, o.cwd, meshRootFor(o.dir));
+      // The level this activation will actually run at: a step's own effort when one applies, else the worker's.
+      checkReadiness(probe, finalState, o.config, o.spec, o.cwd, meshRootFor(o.dir), this.#stepEffort ?? o.spec.effort);
       this.#assertCurrent(activation); return { state, probe: freeze(probe) };
     } finally { this.#bridge = false; }
   }
@@ -612,6 +684,8 @@ export class PiRuntime {
       this.#assertCurrent(activation); await this.ensureStarted(); this.#assertCurrent(activation);
       await this.#waitIdle(this.#requestTimeout(), activation); this.#assertCurrent(activation);
       const readiness = await this.#bridgeCommand('probe', activation); this.#assertCurrent(activation);
+      // The probe carries Pi's context usage: the size the next task would start at.
+      this.#context = readiness.probe.context ?? null;
       requireValue(this.#activation && !this.#activation.attempted, 'Activation already attempted');
       this.#activation.prepared = true; return readiness;
     } catch (error) {
@@ -873,7 +947,8 @@ export class PiRuntime {
       }
       case 'turn_start': this.#idleKnown = false; break;
       case 'entry_appended': this.#appended++; return;
-      case 'thinking_level_changed': if (this.ready && event.level !== this.#options.spec.effort) this.#hold(new Error('Worker thinking level drifted')); return;
+      // The controller sets a step's effort itself and remembers it (#stepEffort); any other level is a drift.
+      case 'thinking_level_changed': if (this.ready && event.level !== (this.#stepEffort ?? this.#options.spec.effort)) this.#hold(new Error('Worker thinking level drifted')); return;
       default: if (unauthorizedActivity) activityError(); return; // deltas/args/results never retained
     }
     if (unauthorizedActivity) activityError();

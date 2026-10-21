@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // A stand-in for the low CLI with the same inbox protocol as low --serve / low --send (low's src/serve.rs).
 // FAKE_LOW_RESULTS names a JSON file with one entry per task, in order: {result, delayMs, what, plan, stuck, lateSteers}.
+// FAKE_LOW_FREEZE_MS stops the server writing status.json (and answering /steer or /abort) that many ms into a task,
+// as a hung server loop does: the process stays up. FAKE_LOW_CRASH_MS exits the server that many ms into a task.
 // A task that is aborted while it waits returns low's stopped result. While a task waits the server keeps status.json
 // in the inbox as low does: `what` is the run under way, `plan` low's plan, `stuck` keeps `moved` at the task's start,
 // and `lateSteers` leaves steers untaken (the result counts them as dropped). FAKE_LOW_NO_STATUS=1 writes no status
@@ -44,7 +46,11 @@ async function serve() {
     const began = Date.now(), end = began + (step.delayMs || 0), steers = { pending: 0, taken: 0 };
     let moved = began;
     fs.appendFileSync(file, `${JSON.stringify({ role: 'assistant', tool_calls: [{ id: 'c1' }] })}\n`);
+    const freezeAt = Number(process.env.FAKE_LOW_FREEZE_MS || 0), crashAt = Number(process.env.FAKE_LOW_CRASH_MS || 0);
     while (Date.now() < end) {
+      // A hung server: the process lives, but its loop no longer writes the heartbeat or takes control files.
+      if (freezeAt && Date.now() - began >= freezeAt) { await sleep(50); continue; }
+      if (crashAt && Date.now() - began >= crashAt) { log({ kind: 'crash' }); process.exit(9); }
       for (const n of fs.readdirSync(inbox).filter(n => n.endsWith('.steer') || n.endsWith('.abort')).sort()) {
         const text = JSON.parse(fs.readFileSync(path.join(inbox, n), 'utf8')).text; fs.rmSync(path.join(inbox, n));
         if (n.endsWith('.abort')) { log({ kind: 'abort' }); reply = { session: file, id, status: 'stopped', exit: 5, verdict: 'STOPPED', good: false, answer: null, changes: [] }; }

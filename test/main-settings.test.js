@@ -580,3 +580,18 @@ test('Edit as JSON writes a valid layer and never writes an invalid one', () => 
   f.screens[2].component.handleInput('q');
   await settings;
 }, { mode: 'tui', project: { version: 2, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('worker add and remove edit the file that lists the workers, not the scope the session last saved to', () => fixture(async f => {
+  // The workers live in the global file; this trusted project saves to its own file by default. Before, a removal
+  // wrote the remaining workers into the project file and left the global list (and the "removed" worker) as it was.
+  await f.command('worker remove ds2');
+  const global = JSON.parse(await fs.readFile(f.files.global, 'utf8')), project = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  assert.deepEqual(global.workers.map(worker => worker.id), ['worker'], 'removed from the list that had it');
+  assert.equal('workers' in project, false, 'the project file was not given a copy of the list');
+  assert.deepEqual(f.getController().config.workers.map(worker => worker.id), ['worker']);
+  assert.ok(f.notices.some(item => /Removed worker ds2/.test(item.message)), JSON.stringify(f.notices));
+  await f.command('worker add third test/model low');
+  assert.deepEqual(JSON.parse(await fs.readFile(f.files.global, 'utf8')).workers.map(worker => worker.id), ['worker', 'third']);
+  assert.equal('workers' in JSON.parse(await fs.readFile(f.files.project, 'utf8')), false);
+}, { global: { version: 2, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }, { id: 'ds2', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] },
+  project: { version: 2, enabled: true, autoStart: false } }));

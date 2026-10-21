@@ -116,16 +116,49 @@ export function processState(pid) {
   try { process.kill(pid, 0); return 'alive'; }
   catch (e) { return plain(e) && e.code === 'ESRCH' ? 'dead' : plain(e) && e.code === 'EPERM' ? 'foreign' : 'alive'; }
 }
-/** @param {number} pid @returns {Promise<number | null>} */
+/**
+ * Parse `ps -o etime=`: `[[dd-]hh:]mm:ss`, the process's elapsed time.
+ * @param {string} text @returns {number | null} seconds, or null if the field is not in that shape
+ */
+export function parseElapsed(text) {
+  const match = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(String(text).trim());
+  if (!match) return null;
+  const [, days, hours, minutes, seconds] = match;
+  return (Number(days || 0) * 86400) + (Number(hours || 0) * 3600) + (Number(minutes) * 60) + Number(seconds);
+}
+/**
+ * When a process started, from its elapsed time.
+ *
+ * `ps -o lstart=` looks like the obvious source and is not: it prints a local-time string, and `Date.parse` reads
+ * it in the host's zone, so on a machine whose zone differs from the one the string was rendered in — or across a
+ * daylight-saving boundary — the answer is off by an hour. An hour is exactly the scale that silently defeats a
+ * "did this number get reused?" check. `etime` is a duration, so no zone and no clock can perturb it.
+ * @param {number} pid @returns {Promise<number | null>}
+ */
 export async function processStartedAt(pid) {
   if (process.platform === 'win32' || !Number.isSafeInteger(pid) || pid <= 0) return null;
   const { execFile } = await import('node:child_process');
   return new Promise(resolve => {
-    execFile('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 5000, env: { ...process.env, LC_ALL: 'C' } }, (error, stdout) => {
-      const at = error ? NaN : Date.parse(String(stdout).trim());
-      resolve(Number.isFinite(at) ? at : null);
+    execFile('ps', ['-o', 'etime=', '-p', String(pid)], { timeout: 5000, env: { ...process.env, LC_ALL: 'C' } }, (error, stdout) => {
+      const elapsed = error ? null : parseElapsed(stdout);
+      resolve(elapsed === null ? null : Date.now() - elapsed * 1000);
     });
   });
+}
+/**
+ * Whether the process now holding `pid` started after `at`, which means the number was reused by somebody else.
+ * A PID alone proves nothing: the number of a worker that crashed is free again a moment later, and any process on
+ * the machine can take it. The start time is what distinguishes "the worker is still running" from "an unrelated
+ * process inherited the number". `null` when the platform cannot say (Windows, or `ps` unavailable).
+ *
+ * `ps lstart` reports a start time to the second and `at` is recorded just after the spawn, so the comparison uses
+ * the same 2 s tolerance `ownerAlive` does: a process that began more than that after the spawn was recorded cannot
+ * be the process that was spawned.
+ * @param {number} pid @param {number} at @returns {Promise<boolean | null>}
+ */
+export async function pidWasReused(pid, at) {
+  const started = await processStartedAt(pid);
+  return started === null ? null : started > at + 2000;
 }
 const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
 /** @param {unknown} owner @returns {Promise<boolean>} */

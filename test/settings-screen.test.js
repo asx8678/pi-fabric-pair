@@ -56,10 +56,35 @@ async function open(host, { start = base(), scope = 'project', onApply, options 
   host.state.run = run;
 }
 const press = (host, ...keys) => { for (const key of keys) host.state.component.handleInput(key); };
+/** Empty an open inline input: its prefill is the stored value, whose length a test should not have to know. */
+const clearInput = (host, times = 24) => { for (let index = 0; index < times; index++) host.state.component.handleInput('\u007f'); };
 const text = (host, width = 100) => strip(host.state.component.render(width).join('\n'));
 
 /** Down `count` rows on the page, then Enter. */
 const commitRow = (host, count) => { for (let index = 0; index < count; index++) press(host, 'j'); press(host, '\r'); };
+/**
+ * Move down to the row with this label, then Enter. A row inserted above it cannot renumber the test, which is what
+ * counting rows does; the label has to be the selected row's, so a wrong name fails loudly instead of pressing Enter
+ * on whatever happens to be there.
+ * @param {ReturnType<typeof screenHost>} host @param {string} label
+ */
+/** Move the cursor to a row without entering it, for a test that reads the selected row's hint. */
+const selectRow = (host, rowId) => {
+  for (let step = 0; step < 40; step++) {
+    if (host.state.component.view.currentRow().id === rowId) return;
+    press(host, 'j');
+  }
+  throw new Error(`No row ${rowId} on this page`);
+};
+const openRow = (host, rowId) => {
+  // The component exposes the selected row's id, so a test names the row the screen itself names: inserting a row
+  // above it cannot renumber the test, and a renamed row fails here instead of pressing Enter on a neighbour.
+  for (let step = 0; step < 40; step++) {
+    if (host.state.component.view.currentRow().id === rowId) { press(host, '\r'); return; }
+    press(host, 'j');
+  }
+  throw new Error(`No row ${rowId} on this page: ${strip(host.state.component.render(100).join('\n'))}`);
+};
 
 /** The visible page labels come from one list, so a test names a page instead of counting tabs. */
 const PAGE_ORDER = ['Workers', 'Review', 'Supervision', 'Limits', 'Verification', 'Peer review', 'Runtime', 'Requirements', 'Evidence', 'Display', 'General'];
@@ -222,7 +247,7 @@ test('a number row rejects what is out of range with an inline error, then saves
 test('a blank workspace saves null, meaning the same workspace as Main', async () => {
   const host = screenHost();
   await open(host, { start: base({ workers: [{ id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: '/tmp/worker', readOnly: false }] }) });
-  commitRow(host, 3); // Workspace
+  openRow(host, 'workspace');
   assert.match(text(host), /▸ Workspace.*\/tmp\/worker/, 'the row is an open input prefilled with the path');
   for (let index = 0; index < 12; index++) press(host, '\u007f');
   press(host, '\r');
@@ -387,7 +412,7 @@ test('Esc, Kitty Esc and q close the screen, while q typed into an input does no
   }
   const host = screenHost();
   await open(host);
-  commitRow(host, 3); // Workspace, an inline Input
+  openRow(host, 'workspace');
   press(host, 'q', 'u', 'i', 'e', 't', ' ');
   assert.match(text(host), /quiet/, 'printable keys reach the input, q included');
   press(host, '\u001b');
@@ -422,7 +447,7 @@ test('the worker page can make a worker the default, move it up and remove it', 
   press(host, 'j', ENTER); await tick(); // choose the second worker
   assert.match(text(host), /Editing +second/);
   // Choosing a slot leaves the page on Model; below it are effort, read-only and workspace, then Make default.
-  commitRow(host, 4); await tick();
+  openRow(host, 'default'); await tick();
   assert.equal(host.state.applied.length, 1, 'defaulting a worker saves once');
   assert.deepEqual(host.state.applied[0][0].workers.map(worker => worker.id), ['second', 'worker']);
   assert.match(text(host), /✔ Saved — Worker: second \(default\)/);
@@ -435,7 +460,7 @@ test('remove closes the screen and asks the host, which owns the conversation ch
   const asked = [];
   await open(host, { start, options: { removeWorker: async id => { asked.push(id); return { ...start, workers: start.workers.filter(worker => worker.id !== id) }; } } });
   // From Model: effort, read-only, workspace, default, move up, move down, duplicate, then Remove.
-  commitRow(host, 8); await tick();
+  openRow(host, 'remove'); await tick();
   assert.deepEqual(asked, ['worker'], 'the screen asks the host to remove the worker it shows');
   // The screen reopened on the next worker with the outcome in its status line.
   assert.match(text(host), /Removed worker worker|Worker +second/);
@@ -446,10 +471,7 @@ test('the last worker cannot be removed from the screen', async () => {
   const host = screenHost();
   const asked = [];
   await open(host, { options: { removeWorker: async id => { asked.push(id); return null; } } });
-  // With one worker the page has no Editing row either: Remove is eight rows below Model
-  // (effort, read-only, workspace, default, move up, move down, duplicate, remove).
-  for (let index = 0; index < 8; index++) press(host, 'j');
-  press(host, '\r'); await tick();
+  openRow(host, 'remove'); await tick();
   assert.deepEqual(asked, [], 'nothing was asked: there is no second worker to fall back on');
   assert.match(text(host), /at least one worker/);
 });
@@ -523,7 +545,7 @@ test('an Input opened later still receives the focus Pi granted the overlay', as
   assert.equal(host.state.component.focused, false, 'nothing is focused in list mode');
   host.state.component.focused = true;
   assert.equal(host.state.component.focused, true, 'the view remembers it');
-  press(host, 'j', 'j', 'j', '\r'); // Workspace
+  openRow(host, 'workspace');
   assert.match(text(host), /\u001b_pi:c\u0007/, 'the open Input emits the hardware-cursor marker');
   press(host, '\u001b');
   await quit(host);
@@ -641,12 +663,16 @@ test('every leaf field of DEFAULTS except version has a row somewhere in the scr
     'mainReadOnlyDuringTasks': 'mainReadOnly', 'workers': 'slot:worker',
     'supervision.mode': 'policy', 'supervision.summaryDetail': 'detail', 'supervision.maxRevisionsPerStep': 'revisionsPerStep',
     'verification.commands': 'verification', 'autoDeliverReports': 'autoDeliver', 'attentionCue': 'cue' };
+  // Config-only fields, documented rather than edited here: a regex list is not a thing to type into a 60-column row,
+  // and a wrong pattern there silently stops matching the commands it was meant to block. docs/ and the README say
+  // where to set it.
+  const configOnly = new Set(['control.blockedCommands']);
   /** @type {string[]} */
   const missing = [];
   /** @param {string} field @param {unknown} value */
   const walk = (field, value) => {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      if (field === 'version') return;
+      if (field === 'version' || configOnly.has(field)) return;
       const id = renamed[field] ?? field.split('.').at(-1);
       if (!rowIds.has(id)) missing.push(field);
       return;
@@ -753,8 +779,7 @@ test('a worker can be duplicated under a new id, right after the original', asyn
     { id: 'second', provider: 'beta', model: 'two', effort: 'high', cwd: null, readOnly: false }] });
   await open(host, { start });
   press(host, 'k', '\r', 'j', '\r'); await tick(); // Editing -> second
-  // From Model: effort, read-only, workspace, default, move up, move down, duplicate — seven rows down.
-  press(host, 'j', 'j', 'j', 'j', 'j', 'j', 'j', '\r');
+  openRow(host, 'duplicate');
   assert.match(text(host), /Copy this worker under a new id/, 'the copy asks for its id in place');
   assert.match(text(host), /enter save {2}esc cancel/, 'the input is open');
   for (const key of ['t', 'h', 'i', 'r', 'd']) press(host, key);
@@ -773,7 +798,7 @@ test('a duplicate id is refused with the reason and saves nothing', async () => 
     { id: 'second', provider: 'beta', model: 'two', effort: 'high', cwd: null, readOnly: false }] });
   await open(host, { start });
   press(host, 'k', '\r', 'j', '\r'); await tick();
-  press(host, 'j', 'j', 'j', 'j', 'j', 'j', 'j', '\r');
+  openRow(host, 'duplicate');
   for (const key of ['w', 'o', 'r', 'k', 'e', 'r']) press(host, key);
   press(host, '\r');
   await tick();
@@ -789,8 +814,7 @@ test('move down reorders the list and says where the worker now sits', async () 
     { id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: null, readOnly: false },
     { id: 'second', provider: 'beta', model: 'two', effort: 'high', cwd: null, readOnly: false }] });
   await open(host, { start });
-  // From Model: effort, read-only, workspace, default, move up, move down.
-  press(host, 'j', 'j', 'j', 'j', 'j', 'j', '\r');
+  openRow(host, 'moveDown');
   await tick();
   assert.equal(host.state.applied.length, 1);
   assert.deepEqual(host.state.applied[0][0].workers.map(worker => worker.id), ['second', 'worker']);
@@ -1028,5 +1052,184 @@ test('cancelling Edit as JSON changes nothing', async () => {
   press(host, '\r'); await tick();
   assert.equal(saves, 0);
   assert.match(text(host), /JSON editing cancelled; the file is unchanged\./);
+  await quit(host);
+});
+
+test('the Workers page shows the resolved backend, offers the project default, and adds low rows only for low', async () => {
+  const host = screenHost();
+  await open(host);
+  assert.match(text(host), /Backend +pi \(project default\)/, 'the row says the worker follows the project, not just what that is now');
+  openRow(host, 'backend');
+  // The list marks 'project default' — the state the worker is in — not the 'pi' it resolves to.
+  // The option list marks the current entry with the cursor; its hint names the state it means.
+  assert.match(text(host), /\u25b8 +project default/, 'the list opens on the state the worker is in, not on the value it resolves to');
+  assert.match(text(host), /Use runtime\.backend, now pi\./, 'and says what that state means');
+  assert.match(text(host), /project default/, 'following the project is a choice you can see, not a hidden state');
+  press(host, '\u001b'); await tick();
+  await quit(host);
+
+  const lowHost = screenHost();
+  await open(lowHost, { start: validateConfig({ version: 2, enabled: true, runtime: { backend: 'pi', lowCommand: '/usr/local/bin/low' },
+    workers: [{ id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: null, readOnly: false, backend: 'low' }] }) });
+  assert.match(text(lowHost), /low program +\/usr\/local\/bin\/low/, 'the resolved low command is shown');
+  assert.match(text(lowHost), /low arguments/, 'a low worker has the extra rows');
+  await quit(lowHost);
+});
+
+test('choosing low saves the worker backend, and the project default choice removes it again', async () => {
+  const host = screenHost();
+  await open(host);
+  // The list opens on 'project default' (the state this worker is in); one step down is 'pi', two is 'low'.
+  openRow(host, 'backend');
+  press(host, 'j', 'j', '\r'); await tick(); // project default -> pi -> low
+  assert.equal(host.state.applied.length, 1, 'the choice was saved');
+  assert.equal(host.state.applied[0][0].workers[0].backend, 'low');
+  assert.equal(host.state.applied[0][0].runtime.backend, 'pi', 'the project default is untouched');
+  // 'project default' is how an override is removed: the field is gone, so the worker follows runtime.backend again.
+  // It is the next entry after 'low' in the list (pi, low, project default); the list wraps, so pressing past it
+  // would land on pi and store an explicit override instead.
+  openRow(host, 'backend');
+  press(host, 'j', '\r'); await tick();
+  assert.equal(host.state.applied.length, 2);
+  assert.equal(Object.hasOwn(host.state.applied[1][0].workers[0], 'backend'), false, 'inheriting stores no field');
+  await quit(host);
+});
+
+test('a worker low command is saved only when it differs from the project value', async () => {
+  const host = screenHost();
+  await open(host, { start: validateConfig({ version: 2, enabled: true, runtime: { backend: 'pi', lowCommand: 'low' },
+    workers: [{ id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: null, readOnly: false, backend: 'low' }] }) });
+  openRow(host, 'workerLowCommand');
+  for (let index = 0; index < 8; index++) press(host, '\u007f');
+  press(host, '/opt/low', '\r'); await tick();
+  assert.equal(host.state.applied[0][0].workers[0].lowCommand, '/opt/low');
+  openRow(host, 'workerLowCommand');
+  for (let index = 0; index < 12; index++) press(host, '\u007f');
+  press(host, '\r'); await tick();
+  assert.equal(Object.hasOwn(host.state.applied[1][0].workers[0], 'lowCommand'), false, 'blank means inherit, not an empty command');
+  await quit(host);
+});
+test('Edit as JSON cannot save a read-only low worker', async () => {
+  const host = screenHost();
+  let saves = 0;
+  host.ctx.ui.editor = async () => host.state.editor;
+  host.ctx.ui.confirm = async () => false;
+  host.state.options = { readLayer: async () => ({ version: 2 }), saveLayer: async () => { saves++; return base(); } };
+  // The file this scope would write: a low worker with readOnly, which Pair will never run.
+  host.state.editor = JSON.stringify({ version: 2, workers: [{ id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: null, readOnly: true, backend: 'low' }] });
+  await open(host);
+  goPage(host, 'General');
+  while (host.state.component.view.currentRow().id !== 'json') press(host, 'j');
+  press(host, '\r'); await tick();
+  assert.equal(saves, 0, 'the illegal combination never reaches the file');
+  assert.match(text(host), /✖ Not saved: worker\.readOnly cannot be used with a low backend/);
+  assert.ok(host.state.calls.some(call => call[0] === 'notify' && /not saved/i.test(String(call[1]))), 'and in a notification: ' + JSON.stringify(host.state.calls));
+});
+
+test('the shell timeout row reads and saves in seconds, and 0 is a value rather than a refusal', async () => {
+  const host = screenHost();
+  const saved = [];
+  await open(host, { onApply: async next => { saved.push(structuredClone(next)); return next; } });
+  goPage(host, 'Supervision');
+  const page = () => text(host);
+  // The stored value is 600 s; the row says it the way a human would.
+  assert.match(page(), /Shell timeout limit +10 min/);
+  selectRow(host, 'defaultShellTimeoutS');
+  assert.match(page(), /list is config only/, 'the hint says where the pattern list lives');
+  // A duration is entered in the row's own terms and stored in seconds, which is what a tool call takes, not
+  // milliseconds like the other control durations.
+  openRow(host, 'defaultShellTimeoutS');
+  clearInput(host);
+  press(host, '3', '0', 's', '\r'); await tick();
+  assert.equal(saved.at(-1)?.control?.defaultShellTimeoutS, 30, 'stored in seconds: ' + JSON.stringify(saved));
+  // 0 is the documented way to leave the worker's commands unbounded: a value, not an error.
+  openRow(host, 'defaultShellTimeoutS');
+  clearInput(host);
+  press(host, '0', '\r'); await tick();
+  assert.equal(saved.at(-1)?.control?.defaultShellTimeoutS, 0, '0 disables it: ' + JSON.stringify(saved));
+  await quit(host);
+});
+
+test('the Supervision page carries both context-hygiene thresholds, and they save as token counts', async () => {
+  const host = screenHost();
+  const saved = [];
+  // A row edit is applied through onApply, which is what the host saves: that is where the stored value is observable.
+  await open(host, { onApply: async next => { saved.push(structuredClone(next)); return next; } });
+  goPage(host, 'Supervision');
+  const page = () => text(host);
+  // Readable labels, not raw digits: 200k is how the setting is discussed.
+  assert.match(page(), /Compact before a task above +200k/);
+  assert.match(page(), /Fresh session above +600k/);
+  // The hint is the selected row's, so it appears once the row is under the cursor.
+  selectRow(host, 'compactBeforeTaskTokens');
+  assert.match(page(), /0 turns it off/, 'the hint says 0 disables it');
+  // A number row opens the screen's own inline input, prefilled with the stored value (200000, not the '200k'
+  // label), so a human clears it first: enough backspaces to empty any threshold.
+  press(host, '\r'); await tick();
+  clearInput(host);
+  press(host, '3', '5', '0', 'k', '\r'); await tick();
+  const written = saved.at(-1);
+  assert.equal(written?.control?.compactBeforeTaskTokens, 350000, 'k is expanded: ' + JSON.stringify(saved));
+  await quit(host);
+  // A value out of range is refused rather than clamped.
+  const second = screenHost();
+  await open(second);
+  goPage(second, 'Supervision');
+  openRow(second, 'freshSessionAboveTokens');
+  clearInput(second);
+  press(second, '9', '9', 'M', '\r'); await tick();
+  assert.match(text(second), /Enter a token count like 200k/, 'the field reports what it accepts');
+  await quit(second);
+});
+
+test('the Workers page edits a worker\'s fallbacks as provider/model[:effort][@backend], and refuses what it cannot read', async () => {
+  const host = screenHost();
+  await open(host);
+  assert.match(text(host), /Fallbacks +none/);
+  openRow(host, 'workerFallbacks');
+  press(host, 'opencode-go/deepseek-v4.1-flash, other/org/model:low@low', '\r'); await tick();
+  assert.equal(host.state.applied.length, 1, 'the list was saved');
+  assert.deepEqual(host.state.applied[0][0].workers[0].fallbacks, [{ provider: 'opencode-go', model: 'deepseek-v4.1-flash' }, { provider: 'other', model: 'org/model', effort: 'low', backend: 'low' }]);
+  assert.match(text(host), /Fallbacks +opencode-go\/deepseek-v4\.1-flash, other\/org\/model:low@low/);
+  openRow(host, 'workerFallbacks'); clearInput(host, 80);
+  press(host, 'no-slash-here', '\r'); await tick();
+  assert.equal(host.state.applied.length, 1, 'an unreadable entry saves nothing');
+  assert.match(text(host), /Write each fallback as provider\/model/);
+  clearInput(host, 80); press(host, '\r'); await tick();
+  assert.equal(Object.hasOwn(host.state.applied.at(-1)[0].workers[0], 'fallbacks'), false, 'blank removes the fallbacks');
+  await quit(host);
+});
+
+test('the waits before a fallback are a Supervision number row', async () => {
+  const host = screenHost();
+  await open(host);
+  goPage(host, 'Supervision');
+  assert.match(text(host), /Waits before a fallback +2/);
+  openRow(host, 'fallbackAfterWaits'); clearInput(host);
+  press(host, '0', '\r'); await tick();
+  assert.equal(host.state.applied.at(-1)[0].control.fallbackAfterWaits, 0);
+  await quit(host);
+});
+
+test('every choice row saves the option chosen: none closes its picker and drops the change', async () => {
+  // The project Backend row (Runtime page) and Review when (Peer review page) used to fall through applyChoice: the
+  // picker closed, nothing was saved and nothing said so. Walk every choice row on every page instead of naming them.
+  const host = screenHost();
+  const start = base({ peerReview: { enabled: true, provider: 'alpha', model: 'one' } });
+  await open(host, { start });
+  const view = host.state.component.view, seen = [];
+  for (const page of PAGE_ORDER) {
+    goPage(host, page);
+    for (const row of view.rowsFor(view.session.page)) {
+      if (row.kind !== 'choice' || row.id === 'worker' || row.id === 'scope' || !row.options?.length || row.options.length < 2) continue;
+      const before = host.state.applied.length;
+      openRow(host, row.id); press(host, 'j', ENTER); await tick();
+      assert.equal(host.state.applied.length, before + 1, `${page} · ${row.label} (${row.id}) saved nothing: ${lineOf(host, /Not saved|✖/)}`);
+      assert.notDeepEqual(host.state.applied.at(-1)[0], start, `${row.id} saved a change`);
+      seen.push(row.id);
+    }
+  }
+  for (const id of ['runtimeBackend', 'peerOn', 'effort', 'backend']) assert.ok(seen.includes(id), `${id} was walked: ${seen.join(', ')}`);
+  assert.equal(host.state.applied.find(([next]) => next.runtime.backend === 'low')?.[0].runtime.backend, 'low', 'the project backend reaches the saved config');
   await quit(host);
 });

@@ -102,7 +102,9 @@ Example arguments (the worker must already be configured):
       "id": "retry",
       "title": "Implement bounded retry",
       "instructions": "Implement the retry behavior and relevant unit tests, then report a checkpoint.",
-      "acceptance": ["Existing tests pass", "Retries are bounded"]
+      "acceptance": ["Existing tests pass", "Retries are bounded"],
+      "scope": ["src/auth/**", "test/auth.test.js"],
+      "effort": "high"
     },
     {
       "id": "verify",
@@ -113,6 +115,16 @@ Example arguments (the worker must already be configured):
   ]
 }
 ```
+
+A step may also carry `scope` (repository-relative globs such as `src/auth/**`;
+absolute paths and `..` are refused) and `effort`. An out-of-scope change is named
+in the report as `STEP_SCOPE`; with `supervision.enforceStepScope` on, a Pi worker
+cannot write outside the scope and such a checkpoint cannot be approved. Use
+`scope` when a plan's steps touch different areas, and `effort` to give one hard
+step a higher level than the worker's own (Pi only: a low worker serves one effort
+and refuses a step that asks for another). When the worker reports, read its
+`acceptance` claims — one verdict per criterion — as claims to verify, not as
+verified results.
 
 A successful dispatch is an acknowledgement, not completion. Do not wait inside
 a tool, start a polling loop, or resend an uncertain request under a new ID.
@@ -137,9 +149,10 @@ any task is unfinished, a new dispatch or start — to any worker — is refused
 "allows one unresolved assignment; finish or cancel it first". Finish or cancel the
 task in the worker that has it, then dispatch again. `/pair worker list` shows the
 roster with each worker's state ("not started" for one that never ran);
-`/pair worker add <id> [provider/model] [effort]`,
+`/pair worker add <id> [provider/model] [effort] [pi|low]`,
 `/pair worker remove <id> [keep|discard]` and `/pair worker default <id>` change the
-configuration, and the last worker cannot be removed. The
+configuration, and the last worker cannot be removed. Removing a worker that runs or
+holds a task stops it and cancels the task first, after the human confirms. The
 dashboard and the settings screen's Workers page do the same things with keys, and
 duplicating a worker there copies its model and effort under a new id. Adding,
 removing or reordering a worker is a configuration change like any other: it goes
@@ -149,6 +162,16 @@ Because workers, runtime, requirements and evidence settings shape what a proces
 starts with, a change to them applies at the next worker restart; saving one while a
 task runs stages it and says so. Reordering the roster (make default, move up,
 move down) is a plain configuration change: it does not restart anything.
+
+## A worker on low
+
+A worker may run on low rather than Pi (`runtime.backend: "low"`). Nothing about your side changes: you dispatch,
+inspect, decide, steer and cancel exactly as above, and reports arrive in the same shape. What differs is inside
+the worker — it has low's `run()` sandbox instead of Pi's tools, no Fabric, Fovea or `pair_report`, and its answer
+becomes the report — so do not ask it to use Fabric tools, and do not expect `pair_peek`'s tool column to name a
+Pi tool (a low run shows as `run`). low reports usage once per task, and its verdict arrives as the `low verdict`
+check: still the worker's claim, so verify the code yourself. A low worker cannot be read-only, and the Fabric and
+Fovea requirements are not checked for it. See [docs/low-backend.md](../../docs/low-backend.md).
 
 ## Reports and review
 
@@ -193,8 +216,13 @@ have missed. It is a navigation aid: read the suggested code before citing it in
 revision.
 
 Answer a question using `action:"answer"` with the same IDs. Request changes using
-`action:"revise"` and concrete findings. Approve only a reviewed, current snapshot
-with `action:"approve"` and its exact `checkpointHash`:
+`action:"revise"` and concrete findings. Both work after you or the user edited the
+workspace while the report waited: the result's `workspaceChanged` lists the files that
+changed, the worker is given the same list and told to build on them, and it continues
+from exactly that workspace (a further edit before it starts refuses the decision with
+`STALE_CHECKPOINT`; decide again). Approve only a reviewed, current snapshot
+with `action:"approve"` and its exact `checkpointHash` — approval still requires the
+workspace to match the checkpoint:
 
 ```json
 {

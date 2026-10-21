@@ -401,7 +401,7 @@ function stubContinuation(runtime, record) {
   return prompts;
 }
 
-test('an answer after workspace drift is rejected before it is recorded; the question stays decidable', async () => {
+test('an answer after workspace edits is accepted and tells the worker which files changed', async () => {
   const { controller, repo, task, record, runtime, workerDir, base } = await fixture();
   try {
     const report = envelope({ controller, task, record, runtime, kind: 'question', reportId: 'report-drift-q' });
@@ -410,23 +410,56 @@ test('an answer after workspace drift is rejected before it is recorded; the que
     await runScan(controller);
     assert.equal(task.status, 'question');
     const prompts = stubContinuation(runtime, record);
-    const drift = path.join(repo, 'human-note.txt');
-    await fs.writeFile(drift, 'edited after the question\n');
-    const answer = { workerId: 'worker', taskId: task.id, reportId: report.reportId, action: 'answer', feedback: 'Use foo' };
-    await assert.rejects(controller.decide(answer), /STALE_CHECKPOINT: the workspace changed after this report/);
-    assert.equal(task.decisions[report.reportId], undefined, 'a rejected decision is not recorded');
-    assert.equal(task.status, 'question', 'the question stays open');
-    assert.notEqual(record.status, 'error', 'the worker is not contained');
-    assert.notEqual(controller.state.notices[report.reportId].status, 'resolved');
-    assert.equal(prompts.length, 0);
-    await assert.rejects(controller.decide({ ...answer, action: 'revise' }), /STALE_CHECKPOINT/, 'revise is guarded the same way');
-    assert.equal(task.revisions, 0, 'a rejected revision does not consume the revision budget');
-    await fs.rm(drift);
-    const result = await controller.decide(answer);
-    assert.equal(result.duplicate, undefined, 'restoring the reported state makes the same answer admissible');
+    await fs.writeFile(path.join(repo, 'human-note.txt'), 'edited after the question\n');
+    const result = await controller.decide({ workerId: 'worker', taskId: task.id, reportId: report.reportId, action: 'answer', feedback: 'Use foo' });
+    assert.deepEqual(result.workspaceChanged, ['human-note.txt'], 'Main is told what changed');
     assert.equal(task.decisions[report.reportId].action, 'answer');
+    assert.equal(task.revisions, 0);
     await Promise.all([...controller.activations]);
     assert.equal(prompts.length, 1, 'the answer reaches the worker');
+    const sent = JSON.stringify(prompts[0]);
+    assert.match(sent, /workspaceChanged/);
+    assert.match(sent, /human-note\.txt/);
+    assert.match(sent, /do not revert them/);
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('an answer without workspace edits carries no changed-file list', async () => {
+  const { controller, task, record, runtime, workerDir, base } = await fixture();
+  try {
+    const report = envelope({ controller, task, record, runtime, kind: 'question', reportId: 'report-clean-q' });
+    report.payload.question = 'Which name?'; report.payloadHash = digest(report.payload);
+    await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
+    await runScan(controller);
+    const prompts = stubContinuation(runtime, record);
+    const result = await controller.decide({ workerId: 'worker', taskId: task.id, reportId: report.reportId, action: 'answer', feedback: 'Use foo' });
+    assert.equal(result.workspaceChanged, undefined);
+    await Promise.all([...controller.activations]);
+    assert.equal(prompts.length, 1);
+    assert.doesNotMatch(JSON.stringify(prompts[0]), /workspaceChanged/);
+  } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('a revise after workspace edits is accepted; approve still needs the exact checkpoint', async () => {
+  const { controller, repo, task, record, runtime, workerDir, base } = await fixture();
+  try {
+    const report = envelope({ controller, task, record, runtime, reportId: 'report-drift-r' });
+    await fs.writeFile(path.join(workerDir, 'inbox', `${report.reportId}.json`), JSON.stringify(report));
+    await runScan(controller);
+    assert.equal(task.status, 'review');
+    const prompts = stubContinuation(runtime, record);
+    const drift = path.join(repo, 'human-note.txt');
+    await fs.writeFile(drift, 'edited during review\n');
+    const decision = { workerId: 'worker', taskId: task.id, reportId: report.reportId, feedback: 'Rename it' };
+    task.report.inspectedAt = Date.now();
+    await assert.rejects(controller.decide({ ...decision, action: 'approve', checkpointHash: task.report.checkpoint.checkpointHash }), /STALE_CHECKPOINT: the workspace changed after this report/);
+    assert.equal(task.decisions[report.reportId], undefined, 'a rejected approval is not recorded');
+    const result = await controller.decide({ ...decision, action: 'revise' });
+    assert.deepEqual(result.workspaceChanged, ['human-note.txt']);
+    assert.equal(task.revisions, 1);
+    await Promise.all([...controller.activations]);
+    assert.equal(prompts.length, 1, 'the revision reaches the worker');
+    assert.match(JSON.stringify(prompts[0]), /human-note\.txt/);
   } finally { runtime.closed = true; await controller.close().catch(() => {}); await fs.rm(base, { recursive: true, force: true }); }
 });
 

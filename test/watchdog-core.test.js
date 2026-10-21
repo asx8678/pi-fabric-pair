@@ -17,8 +17,12 @@ const ZERO_USAGE = { input: 0, cacheRead: 0, cacheWrite: 0, totalInput: 0, outpu
 
 test('control settings validate with the documented defaults and bounds', () => {
   assert.deepEqual(DEFAULTS.control, { watchdog: true, silentMs: 300000, pingTimeoutMs: 20000, toolMaxMs: 900000, stepNudgeMs: 1200000,
-    maxAutoRecoveriesPerStep: 2, noReportNudges: 1, maxSteersPerStep: 6, providerCooldownMs: 60000, quotaCooldownMs: 900000, maxProviderWaits: 4,
-    compactionMaxMs: 600000, mainHeartbeat: 'off', mainHeartbeatMs: 900000 });
+    maxAutoRecoveriesPerStep: 2, autoRepairsPerStep: 2, noReportNudges: 1, maxSteersPerStep: 6, providerCooldownMs: 60000, quotaCooldownMs: 900000, maxProviderWaits: 4, fallbackAfterWaits: 2,
+    blockedCommands: ['git\\s+commit\\b', 'git\\s+push\\b', 'git\\s+reset\\s+--hard\\b', 'git\\s+checkout\\s+--\\s', 'git\\s+clean\\s+-[a-z]*f',
+      'git\\s+rebase\\b', 'git\\s+stash\\b', 'git\\s+branch\\s+-D\\b', '(npm|pnpm|yarn|bun)\\s+publish\\b', 'sudo(\\s|$)', 'rm\\s+-[a-zA-Z]*[rR][a-zA-Z]*[fF][a-zA-Z]*\\s+(/|~)',
+      'rm\\s+-[a-zA-Z]*[fF][a-zA-Z]*[rR][a-zA-Z]*\\s+(/|~)', 'rm\\s+(?:-[rR]\\s+-[fF]|-[fF]\\s+-[rR])\\s+(/|~)'],
+    defaultShellTimeoutS: 600,
+    compactionMaxMs: 600000, compactBeforeTaskTokens: 200000, freshSessionAboveTokens: 600000, mainHeartbeat: 'off', mainHeartbeatMs: 900000 });
   const merged = validateConfig({ version: 2, control: { stepNudgeMs: 60000, mainHeartbeat: 'note' } });
   assert.equal(merged.control.stepNudgeMs, 60000);
   assert.equal(merged.control.mainHeartbeat, 'note');
@@ -27,6 +31,11 @@ test('control settings validate with the documented defaults and bounds', () => 
   assert.throws(() => validateConfig({ version: 2, control: { silentMs: 1000 } }), /control.silentMs must be 10000–3600000/);
   assert.throws(() => validateConfig({ version: 2, control: { mainHeartbeat: 'always' } }), /control.mainHeartbeat must be off, note or wake/);
   assert.throws(() => validateConfig({ version: 2, control: { maxAutoRecoveriesPerStep: 99 } }), /control.maxAutoRecoveriesPerStep must be 0–20/);
+  assert.throws(() => validateConfig({ version: 2, control: { autoRepairsPerStep: 99 } }), /control.autoRepairsPerStep must be 0–20/);
+  assert.throws(() => validateConfig({ version: 2, control: { defaultShellTimeoutS: 86401 } }), /control.defaultShellTimeoutS must be 0–86400/);
+  // A pattern that does not compile is refused here, not silently never matched inside a worker.
+  assert.throws(() => validateConfig({ version: 2, control: { blockedCommands: ['(unclosed'] } }), /control.blockedCommands has an invalid pattern/);
+  assert.equal(validateConfig({ version: 2, control: { blockedCommands: [] } }).control.blockedCommands.length, 0, 'an empty list is allowed: it blocks nothing');
   assert.throws(() => validateConfig({ version: 2, control: { watchdog: 'yes' } }), /control.watchdog must be boolean/);
   assert.throws(() => validateConfig({ version: 2, control: { unknownKnob: 1 } }), /Unknown control setting/);
 });
@@ -221,7 +230,7 @@ test('state written before the watchdog fields existed still loads, and the reco
     assert.equal(stored.workers.worker.task.watchdog, undefined);
     assert.doesNotThrow(() => validateStoredState(stored, { ownerSession: controller.ownerSession, cwd: controller.cwd }));
     // A full record round-trips through strict validation.
-    task.watchdog = { step: 0, recoveries: 1, noReportNudges: 1, steers: 2, nudged: true, nudgedAttemptId: task.attemptId, providerWaits: 1, retryAt: Date.now(), retryReason: 'rate limited' };
+    task.watchdog = { step: 0, recoveries: 1, autoRepairs: 1, repairs: [{ reasons: ['Configured check failed'], at: Date.now() }], noReportNudges: 1, steers: 2, nudged: true, nudgedAttemptId: task.attemptId, providerWaits: 1, retryAt: Date.now(), retryReason: 'rate limited' };
     await controller.persist();
     const again = JSON.parse(await fs.readFile(path.join(controller.dir, 'state.json'), 'utf8'));
     assert.deepEqual(again.workers.worker.task.watchdog, task.watchdog);
@@ -229,7 +238,7 @@ test('state written before the watchdog fields existed still loads, and the reco
     // The bookkeeping resets when the step position changes.
     task.stepIndex = 1;
     const fresh = controller.watchdogFor(task);
-    assert.deepEqual(fresh, { step: 1, recoveries: 0, noReportNudges: 0, steers: 0, nudged: false, nudgedAttemptId: null, pingedAt: null, providerWaits: 0, retryAt: null, retryReason: null });
+    assert.deepEqual(fresh, { step: 1, recoveries: 0, noReportNudges: 0, steers: 0, nudged: false, nudgedAttemptId: null, pingedAt: null, providerWaits: 0, retryAt: null, retryReason: null, autoRepairs: 0, repairs: [] });
   } finally { await cleanup(f); }
 });
 

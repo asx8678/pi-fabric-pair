@@ -2,7 +2,7 @@ import test from 'node:test';
 import { statusText } from '../src/ui.js';
 import assert from 'node:assert/strict';
 import { PAIR_COMMANDS, pairCommandDescription, pairCompletions } from '../src/commands.js';
-import { workerListText } from '../src/worker-config.js';
+import { readWorkerTokens, workerListText } from '../src/worker-config.js';
 import { dashboardMoreItems, dashboardItems } from '../src/ui.js';
 
 const ids = ['worker', 'ds2'];
@@ -89,4 +89,22 @@ test('the More menu can add, remove and default a worker, matching /pair worker'
 test('workerListText explains how to add the first worker rather than showing an empty table', () => {
   assert.match(workerListText([]), /No workers are configured\./);
   assert.match(workerListText([]), /worker add/);
+});
+
+// The backend word and the effort word share tokens ('low' is both), so the CLI reading is worth pinning: it decides
+test('a worker added from the CLI reads the backend and the effort apart, including the ambiguous "low"', () => {
+  const spec = tokens => {
+    const { positionals, backend } = readWorkerTokens(tokens);
+    return { effort: positionals[1] || 'medium', backend, model: positionals[0] };
+  };
+  assert.deepEqual(spec(['p/m']), { effort: 'medium', backend: undefined, model: 'p/m' }, 'no backend given: the worker follows the project');
+  // 'low' as the only word after the model keeps its old meaning. A worker added that way must not silently become a
+  // low-backend worker at medium effort.
+  assert.deepEqual(spec(['p/m', 'low']), { effort: 'low', backend: undefined, model: 'p/m' }, "'low' alone is still the effort, as it always was");
+  assert.deepEqual(spec(['p/m', 'high']), { effort: 'high', backend: undefined, model: 'p/m' });
+  assert.deepEqual(spec(['p/m', 'high', 'low']), { effort: 'high', backend: 'low', model: 'p/m' }, 'with the model and effort filled, the next word is the backend');
+  assert.deepEqual(spec(['p/m', 'low', 'low']), { effort: 'low', backend: 'low', model: 'p/m' }, "'low low' is a low worker at low effort");
+  // 'pi' is never an effort level, so it is always the backend, whatever position it is in.
+  assert.deepEqual(spec(['p/m', 'pi']), { effort: 'medium', backend: 'pi', model: 'p/m' });
+  assert.deepEqual(spec(['pi', 'p/m']), { effort: 'medium', backend: 'pi', model: 'p/m' }, 'the backend may come first too');
 });

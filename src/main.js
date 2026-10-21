@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { DeliveryDeferred, PairController, humanPaused } from './controller.js';
-import { changedLayer, configPaths, configForScope, INDICATORS, isIndicator, layerChangedExternally, loadConfig, previewBackupImport, readScopeLayer, saveBackupImport, saveConfig, saveIndicator, validateConfigLayer } from './config.js';
-import { addWorker, describeWorker, duplicateWorker, makeDefault, splitModel, workerListText } from './worker-config.js';
+import { changedLayer, configPaths, configForScope, INDICATORS, isIndicator, layerChangedExternally, loadConfig, previewBackupImport, readScopeLayer, saveBackupImport, saveConfig, saveIndicator, validateConfigLayer, workerBackend } from './config.js';
+import { addWorker, describeWorker, duplicateWorker, lowBackendGuardNote, makeDefault, readWorkerTokens, removeWorker as removeWorkerEntry, splitModel, workerListText } from './worker-config.js';
 import { VERSION as PI_VERSION } from '@earendil-works/pi-coding-agent';
 import { decisionSchema, dispatchSchema, inspectSchema, peekSchema, statusSchema, steerSchema, yieldSchema, validate, validateDecision, validateDispatch } from './schema.js';
 import { applyNativeProfileRepairs, excludedExtension, signedIn, loadedCapabilities, pairToolRoute, toolPlacement, FABRIC_CACHE_VERSION, FABRIC_FILE_WRITERS, FABRIC_PROGRAM_RUNNERS, ensureCacheLifetime, fabricHasCache, fabricVersion, isDirectMutation, nativeProfileBlockers, nativeProfileRepairs, nativeSettings, prewalkAutoArms, probeNative, programCalls, providerFileWrite, reviewWarmingAction, scopedCacheWarming, shortWarmReplay, sourcePaths, turnStartingExtensions } from './native.js';
@@ -442,7 +442,7 @@ These reports will not be delivered automatically: call pair_yield to receive th
     const s = c.summary(), configuration = configObservation();
     return { enabled: s.enabled, autoDeliverReports: s.autoDeliverReports, settingsPending: s.settingsPending, waitingReports: s.waitingReports, mainPhase: s.mainPhase?.status ?? null,
       workers: s.workers.map(w => ({ id: w.id, model: w.model, effort: w.effort, readOnly: w.readOnly, status: w.status, cwd: w.cwd, workspaceGit: w.workspaceGit,
-        task: w.task, lastExchange: w.lastExchange, error: w.error, pendingConfiguration: w.pendingConfiguration,
+        task: w.task, lastExchange: w.lastExchange, error: w.error, pendingConfiguration: w.pendingConfiguration, fallback: w.fallback,
         // What the worker is doing right now: state, how long since its last event, its tool, retry, error, context.
         liveness: w.liveness })),
       configuration: { version: configuration.version, scope: configuration.scope, pendingMigrations: configuration.pendingMigrations } };
@@ -592,6 +592,36 @@ These reports will not be delivered automatically: call pair_yield to receive th
 
   /** Record a human pause/cancel in Main's context without starting a turn. @param {string} text */
   function informMain(text) { if (config?.mainSupervision && !stopped) pi.sendMessage({ customType: 'fabric-pair.notice', content: `FABRIC PAIR NOTICE — ${text}`, display: true }, { triggerTurn: false }); }
+  /**
+   * The scope whose file holds the worker list. A list in the project file replaces the global one when the two
+   * merge, so a worker added to, moved in or removed from the global list while the project has its own list would
+   * not appear, or would come back. Saving the merged config to the global file also copied the project's workers
+   * into it.
+   * @returns {import('./config.js').ConfigScope}
+   */
+  function workersScope() {
+    const project = configState?.layers.project;
+    return project && Object.hasOwn(project, 'workers') ? 'project' : 'global';
+  }
+  /**
+   * Remove a worker the way the human means it: a task it holds is cancelled and its process stopped first (the
+   * controller still refuses when the exit cannot be proven), and the entry goes from the file that lists it.
+   * @param {PairController} c @param {string} id @param {boolean} keepConversation
+   */
+  async function removeWorkerSlot(c, id, keepConversation) {
+    const target = workersScope();
+    return c.removeWorker(id, { keepConversation, stopFirst: true, save: async () => apply(removeWorkerEntry(await readScope(target), id), target) });
+  }
+  /**
+   * What removing this worker will also do, said before the human confirms. Empty for an idle, stopped worker.
+   * @param {PairController} c @param {string} id @returns {string}
+   */
+  function removalNote(c, id) {
+    const w = c.summary().workers.find(worker => worker.id === id);
+    const task = w?.task && !['completed', 'cancelled'].includes(w.task.status) ? w.task : null;
+    if (task) return `Its task (step ${task.step}/${task.steps}) is cancelled and the worker stopped first; files it changed stay as they are.`;
+    return w?.pid ? 'It is running, so it is stopped first.' : '';
+  }
   /** @param {import('./config.js').ConfigScope} targetScope */
   async function readScope(targetScope) {
     assert(ctxRef && configState, 'Pair configuration is not loaded');
@@ -679,9 +709,10 @@ These reports will not be delivered automatically: call pair_yield to receive th
       taskRunning: () => !!controller && Object.values(controller.state.workers).some(record => record.task && !['completed', 'cancelled'].includes(record.task.status)),
       // Duplicating a worker is a config edit like adding one, so it saves through the same merge path.
       duplicateWorker: async (workerId, newId) => {
-        const currentConfig = config; assert(currentConfig, 'Pair configuration is not loaded');
-        const next = duplicateWorker(currentConfig, workerId, newId);
-        await apply(next, scope);
+        assert(config, 'Pair configuration is not loaded');
+        const listScope = workersScope();
+        const next = duplicateWorker(await readScope(listScope), workerId, newId);
+        await apply(next, listScope);
         ctx.ui.notify(`Copied worker ${workerId} to ${newId}.`, 'info');
         return config ?? null;
       },
@@ -690,12 +721,13 @@ These reports will not be delivered automatically: call pair_yield to receive th
       removeWorker: async workerId => {
         const bound = controller; assert(bound && config, 'Pair configuration is not loaded');
         // Keep is the default choice, and the only one that is not destructive: discard deletes the conversation.
-        const choice = await ctx.ui.select(`Remove worker ${workerId} — what about its conversation?`,
+        const busy = removalNote(bound, workerId);
+        const choice = await ctx.ui.select(`Remove worker ${workerId}${busy ? ` — ${busy}` : ''} What about its conversation?`,
           ['Keep it (adding the same id later resumes it)', 'Discard it (delete its session, inbox, archive and mesh)', 'Cancel']);
         if (!choice || choice.startsWith('Cancel')) return null;
         const keepConversation = choice.startsWith('Keep');
         try {
-          await bound.removeWorker(workerId, { keepConversation, save: next => apply(next, scope) });
+          await removeWorkerSlot(bound, workerId, keepConversation);
         } catch (error) { ctx.ui.notify(`Pair: ${briefError(error)}`, 'error'); return null; }
         ctx.ui.notify(`Removed worker ${workerId}; its conversation was ${keepConversation ? 'kept' : 'discarded'}.`, 'info');
         return config ?? null;
@@ -810,24 +842,27 @@ These reports will not be delivered automatically: call pair_yield to receive th
   async function workerCommand(ctx, c, verb, rest) {
     const [first, second, third] = rest;
     assert(config, 'Pair configuration is not loaded');
-    const current = config;
+    // The worker list is edited in the file that holds it, not the scope the settings screen last showed.
+    const listScope = workersScope(), current = await readScope(listScope);
     if (!verb || verb === 'list') {
       await textView(ctx, 'Pair · Workers', workerListText(c.summary().workers), { panel: true });
       return;
     }
     if (verb === 'add') {
-      assert(first, 'Use /pair worker add <id> [provider/model] [effort]');
-      const model = splitModel(current, second), effort = third || 'medium';
-      const next = addWorker(current, { id: first, provider: model.provider, model: model.model, effort });
-      await apply(next, scope);
+      assert(first, 'Use /pair worker add <id> [provider/model] [effort] [pi|low]');
+      const { positionals, backend: explicitBackend } = readWorkerTokens(rest.slice(1));
+      const model = splitModel(current, positionals[0]), effort = positionals[1] || 'medium';
+      const next = addWorker(current, { id: first, provider: model.provider, model: model.model, effort, ...(explicitBackend ? { backend: explicitBackend } : {}) });
+      await apply(next, listScope);
       const added = next.workers.find(worker => worker.id === first);
-      ctx.ui.notify(`Added worker ${first}${model.model ? ` (${model.provider}/${model.model}, ${effort})` : ''}. ${added ? describeWorker(added) : ''}`, 'info');
+      const on = explicitBackend ? `, ${explicitBackend}` : '';
+      ctx.ui.notify(`Added worker ${first}${model.model ? ` (${model.provider}/${model.model}, ${effort}${on})` : ''}. ${added ? describeWorker(added) : ''}`, 'info');
       return;
     }
     if (verb === 'default') {
       assert(first, 'Use /pair worker default <id>');
       const next = makeDefault(current, first);
-      if (next !== current) await apply(next, scope);
+      if (next !== current) await apply(next, listScope);
       ctx.ui.notify(`Worker ${first} is now first: /pair start and a dispatch to a worker both use it.`, 'info');
       return;
     }
@@ -841,10 +876,13 @@ These reports will not be delivered automatically: call pair_yield to receive th
     // Removing is destructive in the config, and 'discard' also deletes the conversation: always ask.
     const detail = keepConversation ? 'Its conversation is kept, so adding a worker with the same id later resumes it.'
       : 'Its session, inbox, archive and Fabric mesh are deleted. The task history inside them is not recoverable.';
+    const busy = removalNote(c, first);
     if (!await ctx.ui.confirm('Remove worker', `Remove worker ${first}?
 
-${detail}`)) return;
-    const removed = await c.removeWorker(first, { keepConversation, save: next => apply(next, scope) });
+${busy ? `${busy}
+
+` : ''}${detail}`)) return;
+    const removed = await removeWorkerSlot(c, first, keepConversation);
     ctx.ui.notify(`Removed worker ${first}${removed.archived ? ' (its state record was archived)' : ''}; ${removed.conversation === 'kept' ? 'its conversation was kept' : 'its conversation was discarded'}.`, 'info');
   }
   /**
@@ -1073,7 +1111,11 @@ ${detail}`)) return;
           const starters = (await turnStartingExtensions(inherited)).filter(s => !required.has(s.name));
           const workerSpec = c.config.workers.find(worker => worker.id === id), workspace = workerSpec ? c.workspaceFor(workerSpec) : null;
           const fabricStateShown = !!workspace && c.workspaceGit.get(workspace) !== false && !await gitIgnores(workspace, '.pi/fabric/mcp-cache.json').catch(() => true);
+          // A low worker has no in-worker gate at all, so the shell guard is not a policy it can be given: its sandbox is
+          // the only thing between it and git push. Doctor says so plainly, where a human looks for blockers.
+          const lowGuardNote = workerSpec ? lowBackendGuardNote(id, workerBackend(workerSpec, runtime)) : null;
           const notes = [
+            ...(lowGuardNote ? [lowGuardNote] : []),
             ...(starters.length ? [`Worker inherits extensions that can start turns on their own: ${starters.map(s => s.name).join(', ')}. Pair aborts such turns; list the ones the worker does not need in runtime.excludeExtensions`] : []),
             ...(main.capabilities.fabric && pairToolRoute(toolPlacement(pi, ['pair_status']), 'pair_status', true) === 'unreachable' ? ['Fabric Schema enforce mode hides Pair\'s tools from Main and the worker: Pair cannot be used until Fabric leaves enforce mode'] : []),
             ...(piTested(PI_VERSION) ? [] : [`Pi ${PI_VERSION} is outside the tested range (${TESTED_PI}); Pair depends on Pi's run lifecycle and RPC details`]),

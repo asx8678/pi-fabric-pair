@@ -72,11 +72,16 @@ test('low\'s extras are dropped before the answer is shortened', () => {
   assert.deepEqual(payload.decisions, ['Done means: add(2, 3) == 5']);
 });
 
-/** @param {object[]} plan @param {Record<string, unknown>} [runtime] @param {Record<string, string>} [env] */
-async function fixture(plan, runtime = {}, env = {}) {
+/** @param {object[]} plan @param {Record<string, unknown>} [runtime] @param {Record<string, string>} [env] @param {{now?: () => number, heartbeatMs?: number, beforePublish?: () => void | Promise<void>}} [lowOptions] */
+async function fixture(plan, runtime = {}, env = {}, lowOptions = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-low-'));
   const home = path.join(base, 'home'), results = path.join(base, 'results.json');
   await fs.mkdir(path.join(base, 'repo', '.pi'), { recursive: true }); await fs.mkdir(home);
+  // low keeps its sessions under $HOME/.low. Point the whole fixture at this one home — the process (which is what
+  // os.homedir() reads, and so what the runtime's resume check reads) and the spawned low alike — so resume is
+  // decided by configuration rather than by mutating os.homedir() midway through a test.
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
   await fs.writeFile(results, JSON.stringify(plan));
   const repo = await fs.realpath(path.join(base, 'repo'));
   execFileSync('git', ['init', '-q'], { cwd: repo });
@@ -96,10 +101,11 @@ async function fixture(plan, runtime = {}, env = {}) {
     callbacks: { notifyUser: message => { notices.push(message); }, promptUser: async () => ({ cancelled: true }) },
     spawnLow: /** @type {any} */ ((/** @type {string} */ _command, /** @type {string[]} */ args, /** @type {any} */ options) =>
       spawn(process.execPath, [FAKE, ...args], { ...options, env: { ...options.env, HOME: home, FAKE_LOW_RESULTS: results, ...env } })),
+    lowOptions,
   });
   await controller.init();
   const log = async () => (await fs.readFile(path.join(home, 'fake-low.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
-  return { base, repo, home, controller, notices, log };
+  return { base, repo, home, controller, notices, log, previousHome };
 }
 /** @param {() => boolean | Promise<boolean>} condition @param {string} what */
 async function until(condition, what, ms = 15000) {
@@ -109,6 +115,7 @@ async function until(condition, what, ms = 15000) {
 /** @param {Awaited<ReturnType<typeof fixture>>} f */
 async function cleanup(f) {
   await f.controller.close().catch(() => {});
+  if (f.previousHome === undefined) delete process.env.HOME; else process.env.HOME = f.previousHome;
   await fs.rm(f.base, { recursive: true, force: true }).catch(() => {});
 }
 const dispatch = { workerId: 'worker', requestId: 'req-1', objective: 'Fix add()', context: 'calc.py', constraints: [], steps };
@@ -180,10 +187,16 @@ test('approving the checkpoint sends the next step to the same low session, and 
     await f.controller.decide({ workerId: 'worker', taskId: t.id, reportId: t.report.reportId, action: 'approve', feedback: 'Good.', checkpointHash: t.report.checkpoint.checkpointHash });
     await until(() => record().task?.status === 'review' && record().task?.report?.payload.kind === 'final_review', 'the final review');
     assert.equal(record().task?.report?.payload.stepId, 's2');
-    const entries = await f.log();
-    assert.equal(entries.filter(e => e.kind === 'serve').length, 1, 'one low --serve held both steps');
-    const tasks = entries.filter(e => e.kind === 'task');
-    assert.equal(tasks.length, 2);
+    // The invariant is "one low process, one session, both steps". Its source of truth is the runtime Pair owns and
+    // the session record it kept — not the fake's log, which is a second write that can lag the state it describes.
+    // So the runtime is what the test waits on and asserts; the log is only used afterwards to read what low was told.
+    const first = /** @type {any} */ (f.controller.handles.get('worker'));
+    await until(async () => (await f.log()).filter(entry => entry.kind === 'task').length === 2, 'the second step to reach low');
+    assert.equal(record().sessionId, first.sessionId, 'the next step ran in the session the first step used');
+    assert.ok(!first.closed, 'the same low --serve is still the live one');
+    assert.equal(record().pid, first.pid, 'the same low process served both steps');
+    const tasks = (await f.log()).filter(entry => entry.kind === 'task');
+    assert.equal(tasks.length, 2, 'low received both steps as tasks');
     assert.match(tasks[1].task, /MAIN DECISION/);
   } finally { await cleanup(f); }
 });
@@ -193,12 +206,23 @@ test('a restarted worker resumes its low session instead of starting a blank one
   try {
     await f.controller.start('worker');
     const first = f.controller.state.workers.worker.sessionId;
+    const runtime = /** @type {any} */ (f.controller.handles.get('worker'));
     await f.controller.stop('worker');
     await until(() => f.controller.state.workers.worker.status === 'stopped', 'the worker to stop');
-    assert.ok((await f.log()).some(e => e.kind === 'stop'), 'the server was stopped with /stop');
-    // The fake's sessions live under its own HOME, so point the runtime's resume check there too.
-    const original = os.homedir; os.homedir = () => f.home;
-    try { await f.controller.start('worker'); } finally { os.homedir = original; }
+    // Wait on the runtime's own state, not on a log line. Pair sends low `/stop` first but falls back to signalling the
+    // process group, and that send is best effort: under load it can fail to spawn at all (EAGAIN) or arrive as the
+    // server is already going. A /stop line is therefore a side effect the product deliberately does not guarantee,
+    // while a closed runtime with an expected, proven exit is the guarantee. Waiting for the side effect made this test
+    // fail for a correctly stopped worker — proved directly by making the /stop send fail: the worker still closed with
+    // an expected SIGTERM exit, reported 'stopped', and resumed the same session with no /stop line written.
+    const exit = runtime.snapshot().exit;
+    assert.ok(runtime.closed, 'the runtime is closed');
+    assert.ok(exit, 'the runtime recorded an exit');
+    assert.equal(exit.expected, true, 'the exit was the stop Pair asked for, not a crash');
+    assert.equal(f.controller.state.workers.worker.status, 'stopped');
+    // The fixture points $HOME at its own home, so the runtime's resume check and the fake's sessions agree without
+    // any mid-test patching: the restart is decided by the same rule production uses.
+    await f.controller.start('worker');
     const serves = (await f.log()).filter(e => e.kind === 'serve');
     assert.equal(serves.length, 2);
     assert.deepEqual(serves[1].args.slice(-2), ['--session', first]);
