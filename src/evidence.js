@@ -36,6 +36,9 @@ export function snapshotDelta(before, after) {
       if (typeof record.path !== 'string' || !record.path) continue;
       // A missing entry is the absence of a path, the same as no entry at all.
       if (record.kind === 'missing') continue;
+      // Pair's own configuration is never part of a delta: a snapshot frozen before the exclusion may still hold
+      // it, and comparing it with a capture that excludes it would report Pair's files as the other writer's change.
+      if (pairOwned(record.path)) continue;
       paths.set(record.path, JSON.stringify([record.kind ?? null, record.sha ?? null, record.executable === true]));
     }
     return paths;
@@ -184,6 +187,33 @@ async function indexModes(root) {
 }
 /** Files up to this size are copied into the blob store from the bytes already read for hashing. */
 const MEMORY_COPY_BYTES = 1024 * 1024;
+
+/**
+ * Pair's own configuration, never part of a worker's change set. The project and legacy project files hold the
+ * human's settings, saveConfig leaves ".v<version>.bak" backups next to them, and anything else named
+ * .pi/fabric-pair* belongs to Pair too — editing settings during a task must not make the checkpoint look changed,
+ * and must never make an approval stale.
+ */
+// Anchored to the repository root: a nested dir/.pi/fabric-pair.json is the worker's file, not Pair's, so no
+// worker can hide a change by naming something after Pair's configuration.
+const PAIR_OWNED = [/^\.pi\/(?:fabric-)?pair\.json$/, /^\.pi\/(?:fabric-)?pair\.json\.v[1-9][0-9]{0,2}\.bak(?:\.[1-9][0-9]{0,2})?$/, /^\.pi\/fabric-pair[^/]*$/];
+/** A sibling file that merely starts with a Pair name (docs/.pi/fabric-pair.json.md) is the human's, not Pair's. */
+const NOT_PAIR_OWNED = /\.(?:md|txt|json5|jsonc|ya?ml|toml|log|example)$/;
+/** @param {string} name a repository-relative path @returns {boolean} whether Pair owns it, so it is not worker evidence */
+export function pairOwned(name) { return !NOT_PAIR_OWNED.test(name) && PAIR_OWNED.some(pattern => pattern.test(name)); }
+
+/**
+ * A snapshot with Pair's own files removed and its hash recomputed exactly the way capture hashes one. Reports
+ * frozen before those paths were excluded may still list them; their checks compare against this projection so
+ * such a report still approves while a settings edit leaves the workspace otherwise identical.
+ * @param {Snapshot} snapshot @returns {Snapshot}
+ */
+export function withoutPairOwned(snapshot) {
+  const entries = snapshot.entries.filter(entry => !pairOwned(entry.path));
+  if (entries.length === snapshot.entries.length) return snapshot;
+  const identity = { root: snapshot.root, head: snapshot.head, entries };
+  return { ...identity, hash: digest(identity), capturedAt: snapshot.capturedAt, totalBytes: entries.reduce((sum, entry) => sum + entry.size, 0) };
+}
 export class Evidence {
   /** @param {string} baseDir @param {import('./config.js').EvidenceConfig} limits */
   constructor(baseDir, limits) {
@@ -204,7 +234,9 @@ export class Evidence {
   /** @param {string} root @returns {Promise<Snapshot>} */
   async capture(root) {
     root = await canonical(root); await mkdirPrivate(this.blobs);
-    const names = [...new Set((await git(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])).split('\0').filter(Boolean))].sort();
+    // Pair's own configuration is not part of a worker's change set (see pairOwned): listing settings while a task
+    // runs must not drift the checkpoint, and nothing Pair writes to .pi can end up in a review.
+    const names = [...new Set((await git(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])).split('\0').filter(name => Boolean(name) && !pairOwned(name)))].sort();
     assert(names.length <= this.limits.maxFiles, 'Workspace exceeds evidence.maxFiles; narrow the working tree or increase the reviewed limit');
     const indexed = await indexModes(root);
     const headResult = await runCommand('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root });
@@ -334,6 +366,11 @@ export class Evidence {
     assert(base.root === current.root, 'Checkpoint snapshots belong to different repositories');
     const dir = path.join(this.baseDir, 'reports', taskId, reportId); await mkdirPrivate(dir);
     await this.saveSnapshot(current);
+    // Both sides are projected through withoutPairOwned: the base may have been frozen before Pair's own files were
+    // excluded (older code, or a task that started before an upgrade), and comparing it as it stands would report
+    // .pi/fabric-pair.json as deleted by the worker. The projection also recomputes the hash the way capture does, so
+    // the manifest's baseHash refers to the snapshot the comparison actually used.
+    base = withoutPairOwned(base); current = withoutPairOwned(current);
     const old = new Map(base.entries.map(e => [e.path, e])); const next = new Map(current.entries.map(e => [e.path, e]));
     const names = [...new Set([...old.keys(), ...next.keys()])].sort();
     const changed = names.filter(name => JSON.stringify(old.get(name) || null) !== JSON.stringify(next.get(name) || null));

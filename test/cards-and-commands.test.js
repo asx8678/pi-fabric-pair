@@ -449,7 +449,9 @@ test('an unknown subcommand gets a did-you-mean suggestion within edit distance 
   assert.equal(nearestCommand('indica'), 'indicator');
   // Nothing close keeps the old message.
   assert.equal(unknownCommandMessage('zzz'), 'Unknown Pair command. Use /pair for the dashboard.');
-  assert.equal(unknownCommandMessage('work'), 'Unknown Pair command. Use /pair for the dashboard.');
+  // 'work' is one edit from the new 'worker' command, so it is suggested rather than dropped.
+  assert.equal(unknownCommandMessage('work'), 'Unknown Pair command "work". Did you mean /pair worker?');
+  assert.equal(unknownCommandMessage('blorp'), 'Unknown Pair command. Use /pair for the dashboard.');
   // A known command is never suggested against itself.
   assert.equal(nearestCommand('stop'), 'stop');
 });

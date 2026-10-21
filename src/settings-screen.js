@@ -3,6 +3,7 @@ import { briefError, clone } from './util.js';
 import { INDICATORS, validateConfig } from './config.js';
 import { EFFORT_LEVELS } from './contracts.js';
 import { INDICATOR_LABEL, authorizeVerification, boxFrame, clampEffort, effortHint, hints, isCancel, keyIs, onOff, overlayOptions, overlayRows, packHints, settingsUI, supportedEfforts, workerModel } from './ui.js';
+import { makeDefault, moveWorker } from './worker-config.js';
 
 /** @typedef {import('./ui.js').ApplySettings} ApplySettings */
 /** @typedef {import('./ui.js').SettingsOptions} SettingsOptions */
@@ -17,10 +18,10 @@ import { INDICATOR_LABEL, authorizeVerification, boxFrame, clampEffort, effortHi
 /** @typedef {'worker' | 'review' | 'display' | 'general'} SettingsPage */
 /** @typedef {'list' | 'options' | 'model' | 'input'} ScreenMode */
 /** @typedef {{value: string, label: string, hint: string}} RowOption */
-/** @typedef {{id: string, label: string, value: string, hint: string, kind: 'toggle' | 'choice' | 'number' | 'text' | 'model' | 'add' | 'open', options?: readonly RowOption[], tone?: 'warning', work?: 'verification' | 'migrate'}} SettingsRow */
+/** @typedef {{id: string, label: string, value: string, hint: string, kind: 'toggle' | 'choice' | 'number' | 'text' | 'model' | 'add' | 'open' | 'action', options?: readonly RowOption[], tone?: 'warning', work?: 'verification' | 'migrate'}} SettingsRow */
 /** @typedef {'ok' | 'error' | 'info' | 'none'} StatusTone */
 /** @typedef {{saved: PairConfig, scope: ConfigScope, workerId: string, page: SettingsPage, rowId: string, status: string, tone: StatusTone}} ScreenSession */
-/** @typedef {{run: 'verification'} | {run: 'migrate'} | {run: 'save', next: PairConfig, label: string, value: string}} ScreenAnswer */
+/** @typedef {{run: 'verification'} | {run: 'migrate'} | {run: 'save', next: PairConfig, label: string, value: string} | {run: 'remove', workerId: string}} ScreenAnswer */
 /** @typedef {{terminal?: {rows?: number, columns?: number}, requestRender?(): void}} ScreenTui */
 /** @typedef {{ctx: import('./ui.js').UIContext, session: ScreenSession, models: ScreenModel[], onApply: ApplySettings, options: SettingsOptions, theme: PanelTheme | null, keys: KeyMatcher | null, tui: ScreenTui, done: (value?: ScreenAnswer) => void}} ViewOptions */
 
@@ -136,6 +137,15 @@ class SettingsView {
         hint: 'On: the worker can only read and search; it cannot edit files. Not supported together with Fabric.' });
       rows.push({ id: 'workspace', label: 'Workspace', value: worker.cwd || 'same as Main', kind: 'text',
         hint: "The folder the worker edits, as an absolute path. Blank means Main's workspace." });
+      // The list itself is editable here, not only in the commands: order is what "default" means.
+      const at = saved.workers.findIndex(slot => slot.id === worker.id);
+      rows.push({ id: 'default', label: 'Make default', value: at === 0 ? 'already first' : 'move first', kind: 'action',
+        hint: 'A bare /pair start and a dispatch to a worker use the first entry. Moving this worker first makes it the default.' });
+      rows.push({ id: 'moveUp', label: 'Move up', value: at === 0 ? 'at the top' : `position ${at + 1} of ${saved.workers.length}`, kind: 'action',
+        hint: 'Move this worker one place earlier in the list.' });
+      rows.push({ id: 'remove', label: 'Remove', value: saved.workers.length > 1 ? 'this worker…' : 'last worker',
+        kind: 'action', ...(saved.workers.length > 1 ? {} : { tone: /** @type {const} */ ('warning') }),
+        hint: saved.workers.length > 1 ? 'Remove this worker slot. Its conversation is kept unless you discard it.' : 'Pair needs at least one worker; add another before removing this one.' });
       rows.push({ id: 'add', label: 'Add a worker…', value: '', kind: 'add', hint: 'Add another worker slot. Only one worker runs at a time.' });
       return rows;
     }
@@ -473,6 +483,8 @@ class SettingsView {
   /** @param {SettingsRow} row @param {Activate} how */
   activate(row, how) {
     if (row.kind === 'open') { this.close({ run: /** @type {'verification' | 'migrate'} */ (row.work) }); return; }
+    // The worker list's own operations happen in the screen: they change the list, not a field of one worker.
+    if (row.kind === 'action') { this.rowAction(row.id); return; }
     if (row.kind === 'toggle') { this.toggle(row); return; }
     if (row.kind === 'model') { this.openPicker(); return; }
     if (row.kind === 'number' || row.kind === 'text' || row.kind === 'add') { this.openInput(row); return; }
@@ -666,6 +678,36 @@ class SettingsView {
     this.commit(next, 'Model', `${model.provider}/${model.id}`, effort === before ? '' : ` · thinking effort changed from ${before} to ${effort}`);
   }
 
+  // ---- worker list ----------------------------------------------------------
+
+  /**
+   * Make default, move up, or remove the worker this page edits. Each produces a validated config and goes through
+   * commit(), so it saves by the same merge path as any field and the settings file is never rewritten wholesale.
+   * @param {string} id
+   */
+  async rowAction(id) {
+    const next = clone(this.session.saved), worker = this.nextWorker(next);
+    const at = next.workers.findIndex(slot => slot.id === worker.id);
+    if (id === 'default') {
+      if (at === 0) { this.session.status = `${worker.id} is already the default.`; this.session.tone = 'none'; this.refresh(); return; }
+      const moved = makeDefault(next, worker.id);
+      await this.commit(moved, 'Worker', `${worker.id} (default)`);
+      return;
+    }
+    if (id === 'moveUp') {
+      if (at <= 0) { this.session.status = `${worker.id} is already first.`; this.session.tone = 'none'; this.refresh(); return; }
+      const moved = moveWorker(next, worker.id, -1);
+      await this.commit(moved, 'Worker order', `${worker.id} is now ${moved.workers.findIndex(slot => slot.id === worker.id) + 1} of ${moved.workers.length}`);
+      return;
+    }
+    if (id === 'remove') {
+      if (next.workers.length < 2) { this.session.status = 'Pair needs at least one worker; add another before removing this one.'; this.session.tone = 'error'; this.refresh(); return; }
+      // The screen removes the slot from the config; the conversation is the host's to keep or discard, so it asks
+      // there and returns for the next worker. A refused removal leaves this screen showing the unchanged config.
+      this.close({ run: 'remove', workerId: worker.id });
+    }
+  }
+
   // ---- saving ---------------------------------------------------------------
 
   /** @param {PairConfig} draft @returns {WorkerSpec} */
@@ -685,7 +727,8 @@ class SettingsView {
     this.refresh();
     try {
       await persist(this.session, next, this.onApply);
-      this.session.status = `✔ Saved — ${label}: ${value}${extra} (${scopeName(this.session.scope)})`;
+      const merged = this.options.merged?.() ? ' The file changed outside this screen; your change was merged.' : '';
+      this.session.status = `✔ Saved — ${label}: ${value}${extra} (${scopeName(this.session.scope)}).${merged}`;
       this.session.tone = 'ok';
     } catch (error) {
       this.session.status = `✖ Not saved: ${briefError(error)}`;
@@ -819,6 +862,15 @@ export async function settingsScreen(ctx, original, initialScope, onApply, optio
         const applied = before && !(options.migrationPending?.(session.scope) ?? false);
         session.status = applied ? `✔ Migration applied — ${scopeName(session.scope)}` : 'Migration not applied.';
         session.tone = applied ? 'ok' : 'info';
+        return;
+      }
+      if (answer.run === 'remove') {
+        // Removing a worker also decides its conversation, and that is destructive enough to ask outside the screen.
+        // The host performs it and reopens the screen; a refusal keeps the list as it was.
+        const next = await options.removeWorker?.(answer.workerId);
+        if (next) { session.saved = clone(next); session.workerId = next.workers[0].id; session.rowId = 'worker'; }
+        session.status = next ? `✔ Removed worker ${answer.workerId}` : 'Worker not removed.';
+        session.tone = next ? 'ok' : 'info';
         return;
       }
       const current = session.saved.verification.commands;

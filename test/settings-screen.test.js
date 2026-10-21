@@ -11,6 +11,8 @@ const MODELS = [{ provider: 'alpha', id: 'one', reasoning: true }, { provider: '
   { provider: 'opendesign', id: 'deepseek-v4.1-flash', name: 'DeepSeek Flash', reasoning: true }];
 const strip = string => string.replace(/\u001b\[[0-9;]*m/g, '');
 const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+/** The Enter key, spelled without an escape so an editor cannot turn it into a line break. */
+const ENTER = String.fromCharCode(13);
 
 /**
  * A fake ctx.ui.custom: every custom view becomes the current component, and done() resolves that view's promise,
@@ -369,6 +371,50 @@ test('outside the TUI the select-based settings flow still runs', async () => {
   assert.ok(host.state.calls.some(call => call[0] === 'select'), 'the menu() fallback ran');
 });
 
+test('the worker page can make a worker the default, move it up and remove it', async () => {
+  const host = screenHost();
+  const start = base({ workers: [{ id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: null, readOnly: false },
+    { id: 'second', provider: 'beta', model: 'two', effort: 'high', cwd: null, readOnly: false }] });
+  await open(host, { start });
+  // Rows on the Worker page, in order: Worker, Model, effort, read-only, workspace, default, move up, remove, add.
+  assert.match(text(host), /Make default +already first/);
+  assert.match(text(host), /Move up +at the top/);
+  assert.match(text(host), /Remove +this worker/);
+  // Switch to the second worker, then default it: the list order changes and is saved once.
+  press(host, 'k', ENTER); await tick(); // up from Model onto the Worker row, open the list
+  press(host, 'j', ENTER); await tick(); // choose 'second'
+  assert.match(text(host), /Worker +second/);
+  // The page reopened on Model (the first row with one worker, the second with two): four rows down is 'Make default'.
+  commitRow(host, 4); await tick();
+  assert.equal(host.state.applied.length, 1, 'defaulting a worker saves once');
+  assert.deepEqual(host.state.applied[0][0].workers.map(worker => worker.id), ['second', 'worker']);
+  assert.match(text(host), /✔ Saved — Worker/);
+});
+
+test('remove closes the screen and asks the host, which owns the conversation choice', async () => {
+  const host = screenHost();
+  const start = base({ workers: [{ id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: null, readOnly: false },
+    { id: 'second', provider: 'beta', model: 'two', effort: 'high', cwd: null, readOnly: false }] });
+  const asked = [];
+  await open(host, { start, options: { removeWorker: async id => { asked.push(id); return { ...start, workers: start.workers.filter(worker => worker.id !== id) }; } } });
+  // From Model (row 1 of 9) six rows down is 'Remove'.
+  commitRow(host, 6); await tick();
+  assert.deepEqual(asked, ['worker'], 'the screen asks the host to remove the worker it shows');
+  // The screen reopened on the next worker with the outcome in its status line.
+  assert.match(text(host), /Removed worker worker|Worker +second/);
+  press(host, 'q'); await tick();
+});
+
+test('the last worker cannot be removed from the screen', async () => {
+  const host = screenHost();
+  const asked = [];
+  await open(host, { options: { removeWorker: async id => { asked.push(id); return null; } } });
+  // With one worker the page has no 'Worker' row, so 'Remove' is six rows below Model.
+  commitRow(host, 6); await tick();
+  assert.deepEqual(asked, [], 'nothing was asked: there is no second worker to fall back on');
+  assert.match(text(host), /at least one worker/);
+});
+
 test('the worker slot row switches which worker the page edits, without saving', async () => {
   const host = screenHost();
   const start = base({ workers: [{ id: 'worker', provider: 'alpha', model: 'one', effort: 'medium', cwd: null, readOnly: false },
@@ -505,3 +551,27 @@ test('the list heading and the page height still hold on a short terminal', asyn
   press(host, '\u001b');
   await quit(host);
 });
+
+test('the status line says when a save had to merge into a file that changed', async () => {
+  const host = screenHost();
+  // The host reports that the file changed after this screen loaded.
+  await open(host, { options: { merged: () => true } });
+  press(host, 'j', ' '); // Thinking effort, quick change
+  await tick();
+  assert.equal(host.state.applied.length, 1);
+  // At 100 columns the line truncates, so match the beginning; the 60-column fit is checked elsewhere.
+  assert.match(text(host), /✔ Saved — Thinking effort: .*\. The file changed outside this screen/);
+  press(host, 'q');
+  await host.state.run;
+});
+
+test('an ordinary save says nothing about merging', async () => {
+  const host = screenHost();
+  await open(host, { options: { merged: () => false } });
+  press(host, 'j', ' ');
+  await tick();
+  assert.doesNotMatch(text(host), /merged/);
+  press(host, 'q');
+  await host.state.run;
+});
+

@@ -471,3 +471,26 @@ test('the Main-fix note names the step Main actually fixed', async () => {
     assert.equal(task.stepIndex, 2, 'the task advanced to the third step');
   } finally { await cleanup(f); }
 });
+
+test('Main may edit Pair\'s own settings while a task runs, and no other file', () => mainFixture(async f => {
+  const bound = f.controller;
+  const task = heldTask(bound, f.cwd, {});
+  bound.state.workers.worker = { id: 'worker', cwd: f.cwd, repoRoot: f.cwd, status: 'review', bound: bound.config.workers[0], workerGeneration: 1,
+    sessionId: 'fixture-session', sessionFile: path.join(bound.dir, 'fixture-session.jsonl'), history: [], usage: null, task };
+  const blocks = f.events.get('tool_call'), project = '.pi/fabric-pair.json';
+  const call = (toolName, input) => blocks({ toolName, input }, f.ctx);
+  // Pair's own configuration is editable during a task: that is what the merge-on-save path is for.
+  assert.equal(call('edit', { path: project }), undefined, 'the project Pair config is writable');
+  assert.equal(call('write', { path: '.pi/pair.json' }), undefined, 'and its legacy name');
+  assert.equal(call('write', { file_path: '.pi/fabric-pair.json.v1.bak' }), undefined, 'and a backup next to it');
+  // Everything else stays blocked, and so does a batch that mixes the two.
+  for (const input of [{ path: 'src/app.js' }, { path: '.pi/fabric-pair.json.md' }, { path: 'package.json' }, {}, { files: [{ path: project }, { path: 'src/app.js' }] }])
+    assert.equal(call('edit', input)?.block, true, `${JSON.stringify(input)} is blocked`);
+  assert.match(call('write', { path: 'src/app.js' }).reason, /Main is supervising an active Pair task/);
+  // A Fabric program that can write source files is still refused.
+  assert.equal(call('fabric_exec', { code: 'await tools.call({ ref: "schema.commit", args: {} })' })?.block, true);
+  // Once the task is over, nothing is blocked.
+  delete bound.state.workers.worker.task;
+  assert.equal(call('write', { path: 'src/app.js' }), undefined);
+}));
+

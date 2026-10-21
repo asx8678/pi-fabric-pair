@@ -15,7 +15,9 @@ history incrementally.
   `evidence-deletion`, `evidence-replacement`, `handoff-safety`, `main-settings`,
   `message-cards`, `native-profile`, `removed-limits`, `rpc-framing`,
   `liveness`, `peek-steer`, `runtime-startup`, `step-limit-escape`,
-  `supervision-notices`, `watchdog-core`, `worker-speed`.
+  `supervision-notices`, `watchdog-core`, `worker-speed`, `config-merge`,
+  `pair-owned-paths`, `pair-config-checkpoint`, `worker-management`,
+  `worker-removal`, `worker-commands`.
 - `heartbeat-docs`: the opt-in Main heartbeat (off adds nothing; `note` appends one
   display-only line with state, step, step time, event age and context; `wake` also
   starts a turn), that every supervision setting has an editable `/pair settings` row,
@@ -92,6 +94,36 @@ Re-derived from the current behaviour at the same time:
   unknown level is still rejected.
 - `handoff-safety`: verification records source drift as a failed
   `VERIFICATION_SOURCE_DRIFT` check and stops there, instead of rejecting.
+- `config-merge`: `changedLayer`/`readScopeLayer`/`layerChangedExternally`: a
+  save writes only the fields the edit changed onto the layer read from disk just
+  before saving (a key written externally after load survives; an external change to
+  the same field takes the user's value; an invalid file refuses the save and is
+  left byte for byte untouched; an unchanged edit writes nothing).
+- `pair-owned-paths`: Pair's own config files — the project and legacy project
+  files, `.v<version>.bak` backups, and `.pi/fabric-pair*` — are excluded from
+  `capture` (a tracked config too) and from `checkpoint.changed`; a snapshot frozen
+  before the exclusion still approves after a settings edit (`currentWorkspace`
+  recomputes its hash without those paths); a real source change is still
+  `STALE_CHECKPOINT`; and `writesOnlyPairConfig`/`writtenPaths` decide Main's
+  read-only exception (Pair config only, mixed batches and other paths blocked).
+- `pair-config-checkpoint`: the same exclusion end to end through `registerMain`:
+  dispatch a step, edit `.pi/fabric-pair.json` and a backup while the review waits,
+  approve, and see the checkpoint list only the worker's file; a real source edit
+  after the report is still refused as `STALE_CHECKPOINT`.
+- `worker-management`: `Controller.switchTo` stops an idle live worker and then
+  starts the requested one (the fake `rpcFactory` asserts no two processes overlap),
+  refuses to displace one holding an unresolved task and names that worker and task,
+  is a plain start when nothing is live, and is what a dispatch to a non-live worker
+  uses; a dispatch that is refused outright stops nothing.
+- `worker-removal`: `removeWorker` refuses a live process, an unresolved task, an
+  unknown id and the last worker; it archives the state record the way `reset` does,
+  deletes the worker directory only with `keepConversation: false`, keeps it
+  otherwise so adding the same id resumes the same session file, and restores the
+  record when the config save fails.
+- `worker-commands`: the `/pair worker` completions (verb, then configured IDs only
+  for `remove`/`default`, then keep/discard), `/pair start|stop <id>` IDs,
+  `workerListText` fitting 60 columns and labelling a never-started worker, and
+  `/pair status` reading "not started" for a configured worker that never ran.
 - `main-settings`: the restart variant through the menu goes through More…, as
   bare `/pair` does without the TUI.
 

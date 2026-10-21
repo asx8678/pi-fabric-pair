@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { isDeepStrictEqual } from 'node:util';
 import { PiRpc, isRpcRecord } from './rpc.js';
 import { PiRuntime } from './actor-runtime.js';
-import { Evidence, repositoryRoot, snapshotDelta, verifyConfigured } from './evidence.js';
+import { Evidence, repositoryRoot, snapshotDelta, verifyConfigured, withoutPairOwned } from './evidence.js';
 import { validateConfig } from './config.js';
 import { peerReviewSummary, readPeerReview, runPeerReview } from './peer-review.js';
 import { excludedExtension, liveResidentHosts, meshRootFor, preflightNativeProfile } from './native.js';
@@ -185,6 +185,24 @@ async function terminateProcessGroup(pid) {
   }
 }
 
+/**
+ * Whether the live capture is the workspace the report froze. A report frozen by older code may have captured
+ * Pair's own configuration, which is never worker evidence; its snapshot hash is recomputed without those paths
+ * exactly the way capture hashes one, so editing settings between a report and its approval cannot make a correct
+ * report stale.
+ * @param {import('./evidence.js').Snapshot} live @param {import('./contracts.js').FinalizedReport} report
+ * @param {() => Promise<import('./evidence.js').Snapshot>} [load] reads the report's retained snapshot when it is not in hand
+ * @returns {Promise<boolean>}
+ */
+export async function currentWorkspace(live, report, load) {
+  if (live.hash === report.checkpoint.checkpointHash) return true;
+  if (live.hash !== withoutPairOwned(live).hash) return false; // no Pair-owned path can explain the difference
+  // Reading the frozen snapshot is only worth it when Pair-owned paths could account for the difference.
+  let frozen = report.snapshot ?? null;
+  if (frozen === null && load) { try { frozen = await load(); } catch { frozen = null; } }
+  return frozen !== null && withoutPairOwned(frozen).hash === live.hash;
+}
+
 export class PairController extends EventEmitter {
   /** @param {{config: Parameters<typeof validateConfig>[0], cwd: string, ownerSession: string, sourcePaths?: string[], storageDir?: string, scanIntervalMs?: number, callbacks?: ControllerCallbacks, rpcFactory?: (options: import('./rpc.js').RpcOptions) => PiRpc}} options */
   constructor({ config, cwd, ownerSession, sourcePaths = [], storageDir, scanIntervalMs = 2000, callbacks = {}, rpcFactory = opts => new PiRpc(opts) }) {
@@ -294,6 +312,29 @@ export class PairController extends EventEmitter {
   record(id) { const r = this.state.workers[id]; assert(r, `Worker ${id} has not been started`); return r; }
   /** @param {string} id */
   workerDir(id) { return path.join(this.dir, 'workers', safeId(id)); }
+  /**
+   * The conversation a removed-but-kept worker left behind, if there is exactly one. Only the newest archived state
+   * record is consulted: several sessions in the directory could belong to any past attempt, and guessing would
+   * resume the wrong conversation. A missing directory or record means there is nothing to resume.
+   * @param {string} id
+   * @returns {Promise<{sessionFile: string, sessionId: string | null} | null>}
+   */
+  async keptSession(id) {
+    const dir = this.workerDir(id);
+    let names = [];
+    try { names = (await fs.readdir(dir)).filter(name => name.startsWith('removed-') && name.endsWith('.json')); }
+    catch { return null; }
+    if (!names.length) return null;
+    const newest = /** @type {string} */ (names.sort().at(-1));
+    try {
+      const record = JSON.parse(await fs.readFile(path.join(dir, newest), 'utf8'));
+      const file = record?.sessionFile;
+      // Only a session file that still exists: a stale path would make the retained history unverifiable.
+      if (typeof file !== 'string' || !file.endsWith('.jsonl')) return null;
+      await fs.stat(file);
+      return { sessionFile: file, sessionId: typeof record.sessionId === 'string' ? record.sessionId : null };
+    } catch { return null; }
+  }
   async persist() {
     assert(!this.closePromise || this.releaseLock, 'Pair controller is closed; state is owned elsewhere');
     for (const r of Object.values(this.state.workers)) { if (r.task && this.state.requests[r.task.requestId]) this.state.requests[r.task.requestId].status = r.task.status; }
@@ -442,9 +483,13 @@ export class PairController extends EventEmitter {
       assert(!activeTask(r0) || digest(r0.bound) === digest(spec), 'Worker settings are pending until the active task is finished or cancelled');
       assert(r0.sessionFile, 'Retained session reference is missing; Pair will not create a blank replacement');
     }
+    // A removed worker whose directory was kept (removeWorker with keepConversation) starts again on the same
+    // conversation: adding the same id back resumes it instead of silently opening a blank session.
+    const kept = r0 ? null : await this.keptSession(id);
     /** @type {WorkerRecord} */
-    const r = r0 || { id, cwd, repoRoot, status: 'stopped', sessionId: null, sessionFile: null, workerGeneration: 0, bound: spec, task: null, history: [], usage: null };
-    const dir = this.workerDir(id), freshSession = !r0;
+    const r = r0 || { id, cwd, repoRoot, status: 'stopped', sessionId: kept?.sessionId ?? null, sessionFile: kept?.sessionFile ?? null, workerGeneration: 0, bound: spec, task: null, history: [], usage: null };
+    // A kept conversation is retained history, not a fresh session: the runtime must verify it like any other.
+    const dir = this.workerDir(id), freshSession = !r0 && !kept;
     r.sessionFile ||= path.join(dir, 'sessions', `${uid('pair-session')}.jsonl`);
     r.bound = spec; r.error = null; r.status = 'starting'; r.workerGeneration = incrementCounter(r.workerGeneration, `state.workers.${id}.workerGeneration`);
     delete r.pid; delete r.spawnedAt;
@@ -539,6 +584,92 @@ export class PairController extends EventEmitter {
     const launch = await this.transaction(() => this.reserveStart(id));
     return this.startReserved(launch);
   }
+  /**
+   * A dispatch to a configured worker that is not live must displace an idle live one first, exactly as an explicit
+   * /pair start <id> does, or reserveStart refuses with "one live worker". Runs outside the dispatch transaction
+   * because stopping awaits a process exit; the refusal for a worker holding a task comes from the same place.
+   * @param {string} id
+   */
+  async standDownForDispatch(id) {
+    if (this.handles.has(id)) return;
+    // Every refusal the dispatch transaction would make for the whole assignment is made here first, so a rejected
+    // dispatch never stops an idle worker on its way to being rejected. (A duplicate requestId is idempotent and is
+    // the one case left to the transaction: the worker it starts is the one that request already named.)
+    assert(!this.closing && this.config.enabled, 'Pair is closing or disabled');
+    for (const r of Object.values(this.state.workers)) assert(!activeTask(r), 'UNSUPPORTED_PROFILE: Fabric Pair V1 allows one unresolved assignment; finish or cancel it first.');
+    const other = Object.values(this.state.workers).find(r => r.id !== id && (this.handles.has(r.id) || r.status !== 'stopped'));
+    if (other) await this.switchTo(id);
+  }
+  /**
+   * Start a worker while keeping V1's one-live-worker rule: a different worker's live process is stopped first,
+   * and only when it is idle and holds no unresolved task. A worker with an open task is never displaced, so the
+   * refusal names it. This is what `/pair start <id>` and a dispatch to a non-live worker use.
+   * @param {string} id @returns {Promise<{workerId: string, steppedDown: string | null, steppedDownTask: string | null, record: WorkerRecord}>}
+   */
+  async switchTo(id) {
+    safeId(id, 'workerId');
+    const spec = this.config.workers.find(worker => worker.id === id);
+    assert(spec, `Unknown worker ${id}. Configure it in /pair settings.`);
+    // The displaced worker is chosen under the transaction, then stopped outside it (stopping awaits a process).
+    const holder = await this.transaction(() => {
+      assert(!this.closing, 'Pair is closing or disabled');
+      const other = Object.values(this.state.workers).find(r => r.id !== id && (this.handles.has(r.id) || r.status !== 'stopped'));
+      if (!other) return null;
+      const open = activeTask(other) ? other : null;
+      const handle = this.handles.get(other.id);
+      if (open) throw new Error(`Worker ${other.id} is running task ${open.task?.id ?? '(unknown)'}. Finish or cancel it before starting ${id}: Pair runs one worker at a time.`);
+      // A retained generation whose exit is not yet proven is not one Pair may stand down silently.
+      assert(handle || other.status === 'stopped', `EXIT_UNCONFIRMED: worker ${other.id} may still be running. Use /pair stop ${other.id} or /pair reconcile ${other.id} first.`);
+      return { id: other.id, running: !!handle, status: other.status };
+    });
+    let steppedDown = null;
+    if (holder) { await this.stop(holder.id); steppedDown = holder.id; }
+    const record = await this.start(id);
+    return { workerId: id, steppedDown, steppedDownTask: null, record };
+  }
+  /**
+   * Remove a configured worker. Refused while its process is live (stop it first) or it holds an unresolved task.
+   * The retained state record is archived exactly the way reset() archives it, and the config entry is removed only
+   * after that succeeded, so a failure leaves config and state consistent. With keepConversation false the worker's
+   * directory goes too; with true it stays, so adding the same id later resumes that conversation.
+   * @param {string} id @param {{keepConversation?: boolean, save?: (config: import('./config.js').PairConfig) => Promise<unknown>}} options
+   */
+  async removeWorker(id, { keepConversation = true, save } = {}) {
+    safeId(id, 'workerId');
+    const spec = this.config.workers.find(worker => worker.id === id);
+    assert(spec, `Unknown worker ${id}. Configure it in /pair settings.`);
+    assert(this.config.workers.length > 1, 'Pair needs at least one worker; add another before removing this one');
+    const record = this.state.workers[id];
+    assert(!this.handles.has(id), `Worker ${id} is running. Stop it first (/pair stop ${id}).`);
+    assert(!activeTask(record), `Worker ${id} holds task ${record?.task?.id ?? ''}. Finish or cancel it before removing the worker.`);
+    assert(!record || record.status === 'stopped', `EXIT_UNCONFIRMED: worker ${id} may still be running. Use /pair reconcile ${id} first.`);
+    const intent = this.intent(id);
+    if (record) {
+      // Same archive as reset(), then the record goes: a removed worker disappears from status, reports and menus.
+      await this.transaction(async () => {
+        assert(this.intent(id) === intent && this.state.workers[id] === record && record.status === 'stopped' && !this.handles.has(id), 'Removal was superseded');
+        await atomicJSON(path.join(this.workerDir(id), `removed-${Date.now()}.json`), record);
+        assert(this.intent(id) === intent, 'Removal was superseded while archiving');
+        delete this.state.workers[id]; await this.persist();
+      });
+    }
+    // The config entry goes last: the caller saves through the merge path, so a failed save leaves the worker
+    // configured rather than half-deleted.
+    assert(save, 'Removing a worker needs a save callback');
+    try {
+      const { removeWorker: drop } = await import('./worker-config.js');
+      await save(drop(/** @type {import('./config.js').PairConfig} */ (this.config), id));
+    } catch (error) {
+      if (record) await this.transaction(async () => {
+        if (this.state.workers[id] || this.intent(id) !== intent) return;
+        this.state.workers[id] = record; await this.persist();
+      }).catch(() => {});
+      throw error;
+    }
+    if (!keepConversation) await fs.rm(this.workerDir(id), { recursive: true, force: true });
+    await this.releaseRepoLocks();
+    return { workerId: id, archived: !!record, conversation: keepConversation ? 'kept' : 'discarded' };
+  }
   /** @param {string} id @returns {Promise<WorkerRecord>} */
   async restart(id) {
     const existing = this.restarts.get(id);
@@ -582,6 +713,7 @@ export class PairController extends EventEmitter {
   /** @param {import('./schema.js').DispatchPayload} input */
   async dispatch(input) {
     validateDispatch(input); input = clone(input);
+    await this.standDownForDispatch(input.workerId);
     const reserved = await this.transaction(async () => {
       assert(!this.closing && this.config.enabled, 'Pair is closing or disabled');
       const hash = stableDigest(input), previous = this.state.requests[input.requestId];
@@ -1753,7 +1885,7 @@ export class PairController extends EventEmitter {
       assert(report.inspectedAt, 'Inspect the current checkpoint before fixing it (pair_inspect without a file reads the summary)');
       assert(!t.mainFix, 'A Main fix is already in progress for this task; finish it with "fixed"');
       const live = await this.evidence.capture(control.record.repoRoot); check();
-      assert(live.hash === report.checkpoint.checkpointHash, 'STALE_CHECKPOINT: the workspace changed after this report; restore the reported state, or cancel the task and dispatch again');
+      assert(await currentWorkspace(live, report, () => this.evidence.readSnapshot(report.snapshotRef, control.record.repoRoot)), 'STALE_CHECKPOINT: the workspace changed after this report; restore the reported state, or cancel the task and dispatch again');
       const started = await this.transaction(async () => {
         check();
         t.mainFix = { reportId: report.reportId, startedAt: Date.now() };
@@ -1769,7 +1901,7 @@ export class PairController extends EventEmitter {
     // captures and verifies it instead of requiring it to match the worker's checkpoint.
     if (input.action !== 'cancel' && input.action !== 'fixed') {
       const live = await this.evidence.capture(control.record.repoRoot); check();
-      assert(live.hash === report.checkpoint.checkpointHash, 'STALE_CHECKPOINT: the workspace changed after this report; restore the reported state, or cancel the task and dispatch again');
+      assert(await currentWorkspace(live, report, () => this.evidence.readSnapshot(report.snapshotRef, control.record.repoRoot)), 'STALE_CHECKPOINT: the workspace changed after this report; restore the reported state, or cancel the task and dispatch again');
       if (input.action === 'approve' && t.verification.requirePassing) assert(report.checkpoint.verification.every(v => v.passed), 'Configured verification failed');
     }
     if (input.action === 'fixed') return await this.completeMainFix(control, t, report, input, check, reservation);
@@ -1852,7 +1984,7 @@ export class PairController extends EventEmitter {
           branch: reservation.branch,
           guard: async () => {
             const renewed = await this.evidence.capture(work.record.repoRoot);
-            assert(renewed.hash === report.checkpoint.checkpointHash, 'STALE_CHECKPOINT: the workspace changed between the decision and renewed running authority; request a fresh review');
+            assert(await currentWorkspace(renewed, report, () => this.evidence.readSnapshot(report.snapshotRef, work.record.repoRoot)), 'STALE_CHECKPOINT: the workspace changed between the decision and renewed running authority; request a fresh review');
             assert((this.state.branch ?? 0) === reservation.branch, 'BRANCH_STALE: the conversation branch changed during the decision; re-inspect before deciding');
           } });
         await this.transaction(async () => {

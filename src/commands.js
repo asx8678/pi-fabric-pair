@@ -6,7 +6,7 @@
 /** @typedef {{value: string, label: string, description: string}} PairCompletion */
 
 /** The /pair subcommands, in the order completion lists them. @type {readonly string[]} */
-export const PAIR_COMMANDS = ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'steer', 'yield', 'reconcile', 'indicator', 'inbox', 'transcript', 'doctor', 'reset-worker', 'import-backup'];
+export const PAIR_COMMANDS = ['settings', 'status', 'report', 'diff', 'start', 'restart', 'reload', 'stop', 'pause', 'resume', 'cancel', 'steer', 'yield', 'reconcile', 'indicator', 'inbox', 'transcript', 'doctor', 'worker', 'reset-worker', 'import-backup'];
 
 /** @type {Record<string, string>} */
 const COMMAND_DESCRIPTION = {
@@ -28,6 +28,7 @@ const COMMAND_DESCRIPTION = {
   inbox: 'Inspect retained reports',
   transcript: 'Read the worker transcript',
   doctor: 'Diagnose Pair, Pi and Fabric setup',
+  worker: 'List, add, remove or default a worker',
   'reset-worker': 'Start the next task in a new conversation',
   'import-backup': 'Import retained Pair V1 limits',
 };
@@ -44,7 +45,16 @@ export const INDICATOR_DESCRIPTION = {
 };
 
 /** Subcommands that start a nested token: their next token is completed too. @type {Record<string, readonly string[]>} */
-const NESTED = { indicator: ['minimal', 'compact', 'board', 'off'], 'import-backup': ['global', 'project'] };
+const NESTED = { indicator: ['minimal', 'compact', 'board', 'off'], 'import-backup': ['global', 'project'], worker: ['list', 'add', 'remove', 'default'] };
+/** The /pair worker verbs whose next argument is a configured worker ID. */
+const ID_VERBS = new Set(['remove', 'default']);
+/** What each /pair worker verb does, for its completion. @type {Record<string, string>} */
+const WORKER_VERB_DESCRIPTION = {
+  list: 'Every configured worker with its state',
+  add: 'Add a worker: /pair worker add <id> [provider/model] [effort]',
+  remove: 'Remove a worker, keeping its conversation unless you add discard',
+  default: 'Move a worker first, so start and dispatch use it'
+};
 
 /**
  * Levenshtein distance, bounded to the interesting range. Two rows are enough for short command names.
@@ -126,7 +136,27 @@ export function pairCompletions(prefix, workerIds = []) {
   if (nested && (parts.length === 2 || (parts.length === 1 && endsWithSpace))) {
     return nested.filter(option => option.startsWith(current)).map(option => ({
       value: `${command} ${option}`, label: option,
-      description: command === 'indicator' ? INDICATOR_DESCRIPTION[option] : option === 'global' ? 'Pair-wide settings' : 'This project\'s overrides' }));
+      description: command === 'indicator' ? INDICATOR_DESCRIPTION[option] : command === 'worker' ? WORKER_VERB_DESCRIPTION[option]
+        : option === 'global' ? 'Pair-wide settings' : 'This project\'s overrides' }));
+  }
+  // /pair worker remove|default <id> [keep|discard]: the ID is the third word, the conversation choice the fourth.
+  if (command === 'worker') {
+    // Trailing whitespace is a slot boundary, not a word, so work with words and how many are complete.
+    // `words` are the tokens after 'worker'; `settled` counts the complete slots ('worker default ' = 1).
+    const words = typed.trim().split(/\s+/).slice(1);
+    const verb = words[0]?.toLowerCase() ?? '';
+    const settled = endsWithSpace ? words.length : words.length - 1;
+    const ids = [...new Set(workerIds)];
+    // Only the verbs that take a worker ID complete them; 'worker list ' and 'worker add ' do not.
+    if (settled === 1 && ID_VERBS.has(verb)) {
+      const prefix = words.length > 1 ? words[1] : '';
+      return ids.filter(id => id.startsWith(prefix)).map(id => ({ value: `worker ${verb} ${id}`, label: id, description: `Worker ${id}` }));
+    }
+    if (verb === 'remove' && settled === 2 && ids.includes(words[1])) {
+      const prefix = words.length > 2 ? words[2] : '';
+      return ['keep', 'discard'].filter(option => option.startsWith(prefix)).map(option => ({ value: `worker remove ${words[1]} ${option}`, label: option,
+        description: option === 'keep' ? 'Keep its conversation for a later worker with the same id' : 'Delete its session, inbox, archive and mesh' }));
+    }
   }
   if (WORKER_COMMANDS.includes(command)) {
     const workerPrefix = endsWithSpace ? '' : parts[1] ?? '';

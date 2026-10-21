@@ -10,7 +10,10 @@ import { livenessActive } from './liveness.js';
 /** @typedef {import('@earendil-works/pi-coding-agent').ExtensionContext} UIContext */
 /** @typedef {Readonly<ReturnType<import('./controller.js').PairController['summary']>>} PairSummary */
 /** @typedef {(next: import('./config.js').PairConfig, scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>} ApplySettings */
-/** @typedef {{loadScope?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig>, migrate?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>, migrationPending?: (scope: import('./config.js').ConfigScope) => boolean}} SettingsOptions */
+/**
+ * Host options for both settings UIs. `merged` reports whether a save had to merge into a file that changed after the
+ * screen loaded, so the status line can say so (the note itself comes from apply()).
+ * @typedef {{loadScope?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig>, migrate?: (scope: import('./config.js').ConfigScope) => Promise<import('./config.js').PairConfig | void>, migrationPending?: (scope: import('./config.js').ConfigScope) => boolean, merged?: () => boolean, removeWorker?: (workerId: string) => Promise<import('./config.js').PairConfig | null>}} SettingsOptions */
 
 /** @param {unknown} value @returns {Readonly<import('@earendil-works/pi-coding-agent').ContextUsage> | null} */
 function contextUsage(value) {
@@ -1016,7 +1019,7 @@ export function createIndicatorSurface(ui) {
     clear() { latest = null; removeWidget(); showStatus(undefined); },
   };
 }
-/** @typedef {'report' | 'diff' | 'transcript' | 'yield' | 'pause' | 'resume' | 'cancel' | 'settings' | 'restart' | 'reload' | 'doctor' | 'start' | 'reconcile' | 'stop' | 'status' | 'inbox' | 'worker' | 'more' | 'help' | 'close'} DashboardAction */
+/** @typedef {'report' | 'diff' | 'transcript' | 'yield' | 'pause' | 'resume' | 'cancel' | 'settings' | 'restart' | 'reload' | 'doctor' | 'start' | 'reconcile' | 'stop' | 'status' | 'inbox' | 'worker' | 'more' | 'help' | 'close' | 'add-worker' | 'remove-worker' | 'default-worker'} DashboardAction */
 /** @typedef {{key: string, action: DashboardAction, label: string}} DashboardKeyHint */
 /** What the dashboard resolves with: the chosen action and the worker it was shown for. @typedef {{action: DashboardAction, workerId?: string}} DashboardChoice */
 
@@ -1024,6 +1027,7 @@ export function createIndicatorSurface(ui) {
 const DASHBOARD_MAX_WIDTH = 100;
 /** One line of explanation per action, for the help list. @type {Readonly<Record<DashboardAction, string>>} */
 export const ACTION_HELP = {
+  'add-worker': 'add a worker slot', 'remove-worker': 'remove a worker', 'default-worker': 'make a worker the default',
   report: "read the worker's report", diff: "scroll the checkpoint's changes", transcript: "follow the worker's session",
   yield: 'send waiting reports to Main', pause: 'hold the task after this step', resume: 'continue the held task',
   cancel: 'end the task; changes stay', reconcile: 'check the old process exited',
@@ -2135,7 +2139,7 @@ export function reportCardLines(view) {
   if (view.decisions.length) lines.push('', '## Worker decisions', ...view.decisions.flatMap(d => quoted(`• ${d}`)));
   return lines;
 }
-/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'reconcile' | 'enable' | 'model' | 'effort' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more', workerId?: string, section: string, hint: string, value?: string, tone?: PanelColor}} DashboardItem */
+/** @typedef {{label: string, action: 'report' | 'diff' | 'yield' | 'reconcile' | 'enable' | 'model' | 'effort' | 'start' | 'pause' | 'resume' | 'cancel' | 'transcript' | 'restart' | 'stop' | 'status' | 'inbox' | 'settings' | 'reload' | 'doctor' | 'more' | 'add-worker' | 'remove-worker' | 'default-worker', workerId?: string, section: string, hint: string, value?: string, tone?: PanelColor}} DashboardItem */
 /** @param {PairSummary} summary @returns {string[]} */
 export function dashboardHeader(summary) {
   const many = summary.workers.length > 1;
@@ -2184,8 +2188,14 @@ export function dashboardItems(summary) {
 }
 /** @param {PairSummary} summary @returns {DashboardItem[]} */
 export function dashboardMoreItems(summary) {
-  const many = summary.workers.length > 1;
+  const many = summary.workers.length > 1, first = summary.workers[0]?.id;
   return [...summary.workers.map(w => /** @type {DashboardItem} */ ({ section: 'Maintenance', label: many ? `Restart worker (${w.id})` : 'Restart worker', action: 'restart', workerId: w.id, hint: 'Reread settings and replace the worker process. Its conversation is kept.' })),
+    // The worker list itself: the same operations /pair worker offers, so the menu is not a smaller Pair.
+    ...summary.workers.filter(w => w.id !== first).map(w => /** @type {DashboardItem} */ ({ section: 'Workers', label: `Make ${w.id} the default`, action: 'default-worker', workerId: w.id,
+      hint: 'Move it first: a bare /pair start and a dispatch to a worker use the first entry.' })),
+    ...summary.workers.map(w => /** @type {DashboardItem} */ ({ section: 'Workers', label: many ? `Remove worker (${w.id})` : 'Remove worker', action: 'remove-worker', workerId: w.id,
+      hint: summary.workers.length > 1 ? 'Remove it after confirming. Its conversation is kept unless you choose to discard it.' : 'Pair needs at least one worker; add another before removing this one.' })),
+    { section: 'Workers', label: 'Add a worker…', action: 'add-worker', hint: 'Add a worker slot. Only one worker runs at a time.' },
     { section: 'Maintenance', label: 'Reload configuration', action: 'reload', hint: 'Reread saved Pair settings without restarting Main or starting a worker.' },
     { section: 'Maintenance', label: 'Doctor', action: 'doctor', hint: 'Check Fabric, Fovea and Pair setup. No inference.' }];
 }

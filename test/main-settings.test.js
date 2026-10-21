@@ -22,7 +22,7 @@ async function fixture(run, { global, project = { version: 2, autoStart: false }
   const screens = [];
   const ctx = { cwd, mode, hasUI: true, isProjectTrusted: () => trusted,
     sessionManager: { getSessionId: () => 'settings-test-owner' }, getContextUsage: () => undefined,
-    model: { provider: 'main', id: 'native' }, modelRegistry: { getAvailable: () => [] },
+    model: { provider: 'main', id: 'native' }, modelRegistry: { getAvailable: () => [], find: () => undefined },
     ui: { select: async (_title, rows) => {
       assert.ok(actions.length, 'unexpected dialog'); const next = actions.shift();
       if (next === undefined) return undefined;
@@ -364,4 +364,50 @@ test('/pair settings in a TUI opens the dedicated settings screen, not the selec
   await settings;
   assert.equal(f.notices.length, 0, 'closing the screen says nothing and changes nothing');
 }, { mode: 'tui', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: '', model: '', effort: 'medium', cwd: null, readOnly: false }] } }));
+
+
+test('a settings save from the TUI keeps keys written to the file after the screen loaded, and says it merged', () => fixture(async f => {
+  // The user's real bug: saving one setting rewrote the file from the copy loaded at session start, deleting
+  // mainSupervision, maxMainRecoveries and limits that had been written to it since.
+  const settings = f.command('settings');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const screen = f.screens[0];
+  // Somebody edits the file while the screen is open.
+  const onDisk = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  await fs.writeFile(f.files.project, JSON.stringify({ ...onDisk, mainSupervision: true, maxMainRecoveries: 5 }));
+  screen.component.handleInput('\t');            // Review page
+  screen.component.handleInput(' ');              // flip the first toggle row there
+  for (let waited = 0; waited < 100 && !f.notices.some(n => /settings saved/.test(n.message)); waited++) await new Promise(resolve => setTimeout(resolve, 10));
+  const written = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  assert.equal(written.mainSupervision, true, 'the externally written key survives the save');
+  assert.equal(written.maxMainRecoveries, 5, 'and so does the other one');
+  assert.ok(f.notices.some(n => /settings saved/.test(n.message) && /merged/i.test(n.message)), 'the status reports the merge');
+  screen.component.handleInput('q');
+  await settings;
+}, { mode: 'tui', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('a settings save refuses a file that became invalid instead of overwriting it', () => fixture(async f => {
+  const settings = f.command('settings');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const screen = f.screens[0];
+  const invalid = JSON.stringify({ version: 2, limits: { maxReportsPerTask: 'many' } });
+  await fs.writeFile(f.files.project, invalid);
+  screen.component.handleInput('\t');
+  screen.component.handleInput(' ');
+  for (let waited = 0; waited < 100 && !f.notices.some(n => /not saved|settings saved/i.test(n.message)); waited++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(await fs.readFile(f.files.project, 'utf8'), invalid, 'the invalid file is left exactly as it was');
+  screen.component.handleInput('q');
+  await settings;
+}, { mode: 'tui', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
+
+test('the non-TUI settings menu saves through the same merge path', () => fixture(async f => {
+  // The select menu is the second settings route; both must merge, not rewrite from the session's copy.
+  const onDisk = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  await fs.writeFile(f.files.project, JSON.stringify({ ...onDisk, mainSupervision: true }));
+  f.actions.push('Enabled for new work', undefined);
+  await f.command('settings');
+  const written = JSON.parse(await fs.readFile(f.files.project, 'utf8'));
+  assert.equal(written.enabled, false, `the menu toggle is saved (${JSON.stringify(f.notices)})`);
+  assert.equal(written.mainSupervision, true, 'the key written after the session loaded survives the menu save');
+}, { mode: 'rpc', project: { version: 2, enabled: true, autoStart: false, workers: [{ id: 'worker', provider: 'test', model: 'model', effort: 'low', cwd: null, readOnly: false }] } }));
 

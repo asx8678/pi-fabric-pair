@@ -131,6 +131,15 @@ individually with its `file` argument and inspect relevant surrounding repositor
 context through Fovea/read tools. Do not equate “inspection tool returned” with
 “code is correct.”
 
+Pair's own configuration is never in a checkpoint: `.pi/fabric-pair.json`,
+`.pi/pair.json`, their `.v<version>.bak` backups and any other
+`.pi/fabric-pair*` file are excluded from the captured evidence, so the user may
+edit Pair settings while a task runs without making your report stale or adding a
+changed file. While a worker holds the task you are otherwise read-only in the
+workspace — except for those Pair config files, which you may edit directly. Do not
+use that exception for source: delegate source edits, or take the step with
+`pair_decide` action `"fix"`.
+
 Use Fovea for the blast radius. Every report carries `repositoryRoot` and the actual
 changed files (`actualChangedFiles`, or `changedFiles` in a `pair_yield` summary).
 Copy them into `fovea_impact` inside `fabric_exec`:

@@ -117,6 +117,12 @@ line, and a change that cannot be saved says why, and the screen keeps showing t
 saved value. Esc closes the screen. Save to decides which file an edit goes to: this
 project, or the global defaults every project inherits.
 
+While a worker holds a task, Main is read-only in the workspace — with one
+exception: it may edit Pair's own configuration (`.pi/fabric-pair.json` and its
+backups), because those files are outside the checkpoint's evidence and editing
+them is how you retune Pair mid-task. Every other path stays blocked until the task
+ends or Main owns the step through `pair_decide` action `"fix"`.
+
 Then run:
 
 ```text
@@ -146,7 +152,7 @@ instruction.
 | `/pair status` | A short read-out of state, task progress and observed usage; the legend and cache-warming details live in `/pair doctor`. |
 | `/pair reload` | Reload saved Pair settings while Main stays open. |
 | `/pair restart worker` | Reload settings and restart only the worker, keeping its conversation. Asks first while a task is running. |
-| `/pair start worker` | Start the worker and continue its conversation. |
+| `/pair start [worker]` | Start the worker and continue its conversation. Naming another configured worker switches to it: an idle live worker is stopped first, and one holding a task refuses. |
 | `/pair pause worker` | Pause the task and hold the worker. |
 | `/pair resume worker` | Resume a paused or interrupted task. |
 | `/pair report` | Read the current report as a card: Pair's own checks first, then the worker's claims (read-only; Main still inspects). |
@@ -157,6 +163,10 @@ instruction.
 | `/pair reconcile` | After a Main crash, prove the old worker process exited so the worker can be used again. |
 | `/pair cancel worker` | Cancel the task and keep the conversation. |
 | `/pair stop worker` | Stop the worker process and retain its history. |
+| `/pair worker list` | Every configured worker in list order: the first is the default, and a never-started one says "not started". |
+| `/pair worker add <id> [provider/model] [effort]` | Add a worker slot (a bare model name inherits the first worker's provider). |
+| `/pair worker remove <id> [keep\|discard]` | Remove a worker after confirming. `keep` (the default) leaves its conversation, so adding the same id later resumes it; `discard` deletes its session, inbox, archive and mesh. Refused while it runs or holds a task. |
+| `/pair worker default <id>` | Move a worker first: a bare `/pair start` and a dispatch to a worker use the first entry. |
 | `/pair reset-worker worker` | Start the next task in a new conversation (old session files are archived, not deleted). |
 | `/pair indicator mode` | Choose the footer badge and live line: `minimal`, `compact`, `board` or `off`. |
 | `/pair doctor` | Diagnose Pair, Pi and Fabric setup; also holds the key legend and the cache-warming explanation. |
@@ -167,6 +177,15 @@ open task, because restarting interrupts the current step (a worker with no task
 restarts without a prompt). Interrupted work waits for explicit resume; staged
 model changes require finishing or cancelling the current task.
 Invalid configuration leaves the last valid settings in use.
+
+A save never rewrites the file from the copy the session loaded. Immediately before
+writing, Pair re-reads that scope's layer from disk and applies only the fields your
+edit changed onto it, so a setting somebody else added to the file in the meantime
+survives; if the file changed at all, the status line says so ("The file changed
+outside this screen; your change was merged"). Editing the same field in the screen
+wins over the external value, since that is what you are looking at. If the file has
+become unreadable or invalid, the save is refused and the file is left byte for byte
+untouched.
 
 Pause and cancel ask first, from a command, the menu or the dashboard; stop asks
 while a task is running. None of them undoes file changes. Normal Main shutdown also stops owned
@@ -422,6 +441,16 @@ needs for a bug report.
 
 Approval is tied to an inspected code checkpoint. Source changes after that
 checkpoint invalidate approval.
+
+Pair's own configuration is never part of that evidence. The project config files
+(`.pi/fabric-pair.json`, and the legacy `.pi/pair.json`), the `.v<version>.bak`
+backups `saveConfig` writes next to them, and anything else named
+`.pi/fabric-pair*` are excluded from every checkpoint, so editing your Pair
+settings during a task neither shows up as a changed file nor makes a waiting
+report stale. A report frozen before this exclusion still approves while nothing
+but those files differs: the comparison recomputes its snapshot hash without them.
+Everything else in the repository — including Fabric's own `.pi/fabric.json` — is
+worker evidence as before.
 
 ![Worker implements and reports, the controller captures evidence, and Main inspects and approves or requests a revision in the same session.](docs/assets/pi-fabric-pair-review-loop.svg)
 

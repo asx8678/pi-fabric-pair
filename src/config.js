@@ -219,11 +219,39 @@ function applyChangedFields(target, before, after) {
 
 /** @param {unknown} currentLayer @param {unknown} beforeEffective @param {unknown} afterEffective @returns {ConfigLayer} */
 export function updateConfigLayer(currentLayer, beforeEffective, afterEffective) {
+  return changedLayer(currentLayer, beforeEffective, afterEffective) || (currentLayer && Object.keys(currentLayer).length ? validateConfigLayer(currentLayer) : { version: CONFIG_VERSION });
+}
+
+/**
+ * The layer to write for one edit: only the fields this edit changed, applied to a layer read from disk just
+ * before saving. `before` is what the settings screen showed when it loaded and `after` is what it holds now, so a
+ * key somebody else wrote to the file in between survives the save. Returns null when the edit changes nothing.
+ * @param {unknown} currentLayer the fresh layer from disk (or {} when the file does not exist yet)
+ * @param {unknown} beforeEffective the effective config the screen loaded
+ * @param {unknown} afterEffective the effective config after this edit
+ * @returns {ConfigLayer | null}
+ */
+export function changedLayer(currentLayer, beforeEffective, afterEffective) {
   const before = validateConfig(beforeEffective), after = validateConfig(afterEffective);
   const next = currentLayer && Object.keys(currentLayer).length ? validateConfigLayer(currentLayer) : { version: CONFIG_VERSION };
-  applyChangedFields(next, before, after);
+  if (!applyChangedFields(next, before, after)) return null;
   return validateConfigLayer(next);
 }
+
+/**
+ * Re-read one scope's layer from disk immediately before a save, so nothing written to the file since the screen
+ * loaded is lost. Throws (leaving the file untouched) when the file is unreadable, malformed or fails validation.
+ * @param {string} cwd @param {ConfigScope} scope @param {boolean} trusted @param {NodeJS.ProcessEnv} [env]
+ * @returns {Promise<ConfigLayer>}
+ */
+export async function readScopeLayer(cwd, scope, trusted, env = process.env) {
+  assertScope(scope);
+  assert(scope !== 'project' || trusted, 'Trust this project before saving project settings');
+  return (await loadConfig(cwd, trusted, env)).layers[scope];
+}
+
+/** Whether a file outside this screen changed the layer since the session last read it. @param {unknown} fresh @param {unknown} loaded @returns {boolean} */
+export function layerChangedExternally(fresh, loaded) { return JSON.stringify(fresh) !== JSON.stringify(loaded); }
 
 /** @param {unknown} value @param {string} label @returns {import('./contracts.js').ReviewMode} */
 function migratePolicy(value, label) {

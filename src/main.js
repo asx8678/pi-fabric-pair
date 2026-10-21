@@ -1,10 +1,12 @@
+import path from 'node:path';
 import { DeliveryDeferred, PairController, humanPaused } from './controller.js';
-import { configPaths, configForScope, INDICATORS, isIndicator, loadConfig, previewBackupImport, saveBackupImport, saveConfig, saveIndicator, updateConfigLayer } from './config.js';
+import { changedLayer, configPaths, configForScope, INDICATORS, isIndicator, layerChangedExternally, loadConfig, previewBackupImport, readScopeLayer, saveBackupImport, saveConfig, saveIndicator } from './config.js';
+import { addWorker, describeWorker, makeDefault, splitModel, workerListText } from './worker-config.js';
 import { VERSION as PI_VERSION } from '@earendil-works/pi-coding-agent';
 import { decisionSchema, dispatchSchema, inspectSchema, peekSchema, statusSchema, steerSchema, yieldSchema, validate, validateDecision, validateDispatch } from './schema.js';
 import { applyNativeProfileRepairs, excludedExtension, signedIn, loadedCapabilities, pairToolRoute, toolPlacement, FABRIC_CACHE_VERSION, FABRIC_FILE_WRITERS, FABRIC_PROGRAM_RUNNERS, ensureCacheLifetime, fabricHasCache, fabricVersion, isDirectMutation, nativeProfileBlockers, nativeProfileRepairs, nativeSettings, prewalkAutoArms, probeNative, programCalls, providerFileWrite, reviewWarmingAction, scopedCacheWarming, shortWarmReplay, sourcePaths, turnStartingExtensions } from './native.js';
 import { selectLastMeasuredUsage } from './metrics.js';
-import { gitIgnores } from './evidence.js';
+import { gitIgnores, pairOwned } from './evidence.js';
 import { assert, briefError, canonical, cleanText, digest, Serial } from './util.js';
 import { pairCommandDescription, pairCompletions, unknownCommandMessage } from './commands.js';
 import { createAttentionCue } from './cue.js';
@@ -109,6 +111,49 @@ const cancelSchema = { type: 'object', properties: { workerId: { type: 'string',
  * @typedef {Readonly<{workerId: string, reason: string}>} CancelInput
  * @typedef {Readonly<{version: import('./config.js').PairConfig['version'] | undefined, scope: import('./config.js').ConfigScope, provenance: Readonly<import('./config.js').ConfigProvenance>, pendingMigrations: readonly Readonly<import('./config.js').ConfigMigration>[]} >} ConfigObservation
  */
+/** @param {unknown} input @returns {asserts input is InspectInput} */
+/**
+ * Which paths one tool call would write, as far as its arguments say: read from the argument shapes Pi's own
+ * mutation tools use (`path`, `file_path`, `files`). Pure, so the read-only gate is testable on its own.
+ * @param {unknown} input @returns {string[]}
+ */
+export function writtenPaths(input) {
+  if (input === null || typeof input !== 'object') return [];
+  /** @type {string[]} */
+  const paths = [];
+  const push = (/** @type {unknown} */ value) => { if (typeof value === 'string' && value) paths.push(value); };
+  const record = /** @type {Record<string, unknown>} */ (input);
+  push(record.path); push(record.file_path);
+  if (Array.isArray(record.files)) for (const file of record.files) {
+    if (typeof file === 'string') push(file);
+    else if (file !== null && typeof file === 'object') { push(Reflect.get(file, 'path')); push(Reflect.get(file, 'file_path')); }
+  }
+  return paths;
+}
+
+/**
+ * Whether a tool call writes nothing but Pair's own configuration files. Editing Pair's settings while a task runs
+ * is exactly the moment the merge-on-save path exists for, and those paths are excluded from checkpoints, so the
+ * read-only gate lets them through. Everything else — including a call with no readable path — stays blocked.
+ * @param {unknown} toolName @param {unknown} input @param {string | undefined} cwd
+ */
+export function writesOnlyPairConfig(toolName, input, cwd) {
+  if (!isDirectMutation(toolName) || !cwd) return false;
+  const paths = writtenPaths(input);
+  if (!paths.length) return false;
+  const files = configPaths(cwd);
+  const pairFiles = [files.project, files.legacyProject].map(file => path.resolve(file));
+  return paths.every(name => {
+    const resolved = path.resolve(cwd, name), relative = path.relative(cwd, resolved);
+    // Containment is checked explicitly, not inferred from the ownership pattern: a path outside this workspace is
+    // never Main's to write, whatever it is named.
+    // Only paths inside this workspace: '../other/.pi/fabric-pair.json' must not borrow Pair's exception.
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+    // The same rule capture uses to decide a path is Pair's, and the two scope files by their absolute name.
+    return pairFiles.includes(resolved) || pairOwned(relative.split(path.sep).join('/'));
+  });
+}
+
 /** @param {unknown} input @returns {asserts input is InspectInput} */
 function assertInspectInput(input) { validate(inspectSchema, input); }
 /** @param {unknown} input @returns {asserts input is CancelInput} */
@@ -499,6 +544,8 @@ These reports will not be delivered automatically: call pair_yield to receive th
     if (loaded.migrations.length) ctx.ui.notify(`Pair configuration migration pending for ${loaded.migrations.flatMap(item => item ? [item.scope] : []).join(', ')}. Review each affected scope under /pair settings → General → Review or migrate this scope…`, 'warning');
     return controller;
   }
+  /** Whether the last settings save had to merge into a file that changed after the screen loaded. */
+  let lastSaveMerged = false;
   /** @param {BoundMainContext} ctx @returns {Promise<PairController>} */
   async function ready(ctx) {
     await lifecycle.drain(); assert(!stopped && controller && !controller.closing && controller.ownerSession === String(ctx.sessionManager.getSessionId()), 'Pair is not ready; run /pair doctor');
@@ -567,8 +614,20 @@ These reports will not be delivered automatically: call pair_yield to receive th
     if (migration && (behaviorChanged || explicitMigration)) {
       if (!await ctxRef.ui.confirm('Migrate Pair configuration', `Source: ${migration.sourceFile}\nTarget: ${migration.targetFile}\n${migration.warnings.join('\n')}\nThe legacy source will be archived. Save this scoped migration${behaviorChanged ? ' and edited setting' : ''}?`)) return before;
     }
-    const selectedLayer = updateConfigLayer(configState.layers[targetScope], before, { ...next, indicator: before.indicator });
-    const saved = behaviorChanged || (explicitMigration && migration) ? await saveConfig(files[targetScope], selectedLayer, { migration, layer: true }) : null;
+    // Re-read the layer from disk immediately before saving and write only the fields this edit changed. The
+    // session's copy dates from when it loaded (or from the last save), so a key another writer added to the file
+    // between then and now — the bug that deleted mainSupervision — must survive this save. An external change to
+    // the very field being edited is replaced by the edit: the screen shows what the human is changing.
+    const baseline = configState.layers[targetScope];
+    const fresh = await readScopeLayer(ctxRef.cwd, targetScope, ctxRef.isProjectTrusted?.() === true);
+    // "Merged" is only worth saying when a config layer is actually written.
+    const external = layerChangedExternally(fresh, baseline);
+    // The layer carries indicator separately (it lives in the UI file), so keep it out of the merged fields.
+    const selectedLayer = changedLayer(fresh, before, { ...next, indicator: before.indicator });
+    // An explicit migration writes the fresh layer even when the edit itself changed nothing: the legacy source is
+    // archived and its migrated fields become the canonical file.
+    const saved = behaviorChanged || (explicitMigration && migration) ? await saveConfig(files[targetScope], selectedLayer ?? fresh, { migration, layer: true }) : null;
+    lastSaveMerged = external && saved !== null;
     if (indicatorChanged) await saveIndicator(files.ui, next.indicator);
     const backup = saved?.backup ? ` Legacy source archived at ${saved.backup}.` : '';
     try {
@@ -576,7 +635,8 @@ These reports will not be delivered automatically: call pair_yield to receive th
       configState = loaded; config = loaded.config; scope = targetScope;
       await controller.updateConfig(config); render();
       const boundary = controller.pendingConfig ? ' Runtime settings staged: finish/cancel the current task, then /pair start to reconcile the retained worker. No work is replayed.' : behaviorChanged ? ' Used for new tasks; /pair start when ready. Existing tasks keep their authorization.' : '';
-      ctxRef.ui.notify(`Pair settings saved.${backup}${boundary}`, 'info');
+      const mergeNote = lastSaveMerged ? ' The file changed outside this screen; your change was merged.' : '';
+      ctxRef.ui.notify(`Pair settings saved.${backup}${boundary}${mergeNote}`, 'info');
       return configForScope(loaded, targetScope);
     } catch (error) {
       ctxRef.ui.notify(`Pair settings saved.${backup} Runtime reload/reconciliation required: ${briefError(error)}`, 'warning');
@@ -593,7 +653,24 @@ These reports will not be delivered automatically: call pair_yield to receive th
         return apply(current, target, true);
       },
       // apply() asks to confirm a pending migration itself, so a save on that scope has to run outside the overlay.
-      migrationPending: target => !!configState?.migrations.some(item => item.scope === target)
+      migrationPending: target => !!configState?.migrations.some(item => item.scope === target),
+      // The screen shows the merge in its own status line; apply() also notifies, for routes with no screen.
+      merged: () => lastSaveMerged,
+      // Removing a worker from the settings screen asks about its conversation and needs the controller, so it runs
+      // here; the screen reopens with the outcome. Null means it was refused or cancelled and nothing changed.
+      removeWorker: async workerId => {
+        const bound = controller; assert(bound && config, 'Pair configuration is not loaded');
+        // Keep is the default choice, and the only one that is not destructive: discard deletes the conversation.
+        const choice = await ctx.ui.select(`Remove worker ${workerId} — what about its conversation?`,
+          ['Keep it (adding the same id later resumes it)', 'Discard it (delete its session, inbox, archive and mesh)', 'Cancel']);
+        if (!choice || choice.startsWith('Cancel')) return null;
+        const keepConversation = choice.startsWith('Keep');
+        try {
+          await bound.removeWorker(workerId, { keepConversation, save: next => apply(next, scope) });
+        } catch (error) { ctx.ui.notify(`Pair: ${briefError(error)}`, 'error'); return null; }
+        ctx.ui.notify(`Removed worker ${workerId}; its conversation was ${keepConversation ? 'kept' : 'discarded'}.`, 'info');
+        return config ?? null;
+      }
     });
   }
   /** @param {BoundMainContext} ctx @param {boolean} [notify] */
@@ -638,20 +715,92 @@ These reports will not be delivered automatically: call pair_yield to receive th
     ctx.ui.notify(`Pair fixed ${repairs.length} Fabric setting${repairs.length === 1 ? '' : 's'}.${backups.length ? ` Backups: ${backups.join(', ')}` : ''}`, 'info');
   }
   /** @param {string} id @param {boolean} [restart] */
-  async function startWorker(id, restart = false) {
+  /**
+   * @param {string} id
+   * @param {boolean} [restart]
+   * @param {{switchWorker?: boolean}} [options] switchWorker stops an idle live worker first (an explicit /pair start <id>)
+   */
+  async function startWorker(id, restart = false, { switchWorker = false } = {}) {
     assert(config && controller && ctxRef, 'Pair configuration is not loaded');
     const spec = config.workers.find(worker => worker.id === id);
-    if (spec && (!spec.provider || !spec.model)) {
+    assert(spec, `Unknown worker ${id}. Configure it in /pair settings.`);
+    if (!spec.provider || !spec.model) {
       ctxRef.ui.notify(`Pair setup: choose a provider/model for ${id} in /pair settings, then run /pair start.`, 'info'); return;
     }
     await offerProfileRepair(controller, id);
     const bound = controller, ctx = ctxRef, epoch = bindingEpoch;
     const retained = !!bound.state.workers[id]?.sessionFile;
-    const record = restart ? await bound.restart(id) : await bound.start(id);
+    const switched = switchWorker ? await bound.switchTo(id) : null;
+    const record = restart ? await bound.restart(id) : switched ? switched.record : await bound.start(id);
     if (stopped || controller !== bound || epoch !== bindingEpoch) return;
     const held = record?.task && ['interrupted', 'paused'].includes(record.task.status) ? ' Work remains held; inspect changes, then /pair resume to continue.' : '';
     const outcome = restart ? retained ? 'restarted; conversation retained' : 'started' : 'ready';
-    ctx.ui.notify(`Worker ${id} ${outcome}; no model turn was requested.${held}`, 'info');
+    const stepped = switched?.steppedDown ? ` Worker ${switched.steppedDown} was stopped first: Pair runs one worker at a time.` : '';
+    ctx.ui.notify(`Worker ${id} ${outcome}; no model turn was requested.${stepped}${held}`, 'info');
+  }
+  /**
+   * Ask for a new worker's id and model in the menu, so adding one is not a command-line-only feature.
+   * Returns the arguments workerCommand('add') takes, or null when the human cancelled.
+   * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx
+   * @returns {Promise<string[] | null>}
+   */
+  async function addWorkerInteractive(ctx) {
+    assert(config, 'Pair configuration is not loaded');
+    const id = (await ctx.ui.input('New worker ID (letters, digits, - or _)', ''))?.trim();
+    if (!id) return null;
+    const known = config.workers.map(worker => worker.provider).find(Boolean);
+    const modelText = (await ctx.ui.input(`Model as provider/model${known ? ` (blank: same provider, ${known})` : ''}`, ''))?.trim();
+    if (modelText === undefined) return null;
+    const effort = (await ctx.ui.select('Thinking effort', ['low', 'medium', 'high', 'max'])) || 'medium';
+    return [id, ...(modelText ? [modelText] : []), effort];
+  }
+  /**
+   * /pair worker list|add|remove|default. Removing and defaulting write the config through apply(), which is the
+   * merge-on-save path, so a settings edit made meanwhile survives and a failed save changes nothing.
+   * @param {import('@earendil-works/pi-coding-agent').ExtensionCommandContext} ctx
+   * @param {PairController} c
+   * @param {string} verb
+   * @param {string[]} rest
+   */
+  async function workerCommand(ctx, c, verb, rest) {
+    const [first, second, third] = rest;
+    assert(config, 'Pair configuration is not loaded');
+    const current = config;
+    if (!verb || verb === 'list') {
+      await textView(ctx, 'Pair · Workers', workerListText(c.summary().workers), { panel: true });
+      return;
+    }
+    if (verb === 'add') {
+      assert(first, 'Use /pair worker add <id> [provider/model] [effort]');
+      const model = splitModel(current, second), effort = third || 'medium';
+      const next = addWorker(current, { id: first, provider: model.provider, model: model.model, effort });
+      await apply(next, scope);
+      const added = next.workers.find(worker => worker.id === first);
+      ctx.ui.notify(`Added worker ${first}${model.model ? ` (${model.provider}/${model.model}, ${effort})` : ''}. ${added ? describeWorker(added) : ''}`, 'info');
+      return;
+    }
+    if (verb === 'default') {
+      assert(first, 'Use /pair worker default <id>');
+      const next = makeDefault(current, first);
+      if (next !== current) await apply(next, scope);
+      ctx.ui.notify(`Worker ${first} is now first: /pair start and a dispatch to a worker both use it.`, 'info');
+      return;
+    }
+    assert(verb === 'remove', `Unknown /pair worker command "${verb}". Use list, add, remove or default.`);
+    assert(first, 'Use /pair worker remove <id> [keep|discard]');
+    const choice = (second || '').toLowerCase();
+    assert(['', 'keep', 'discard'].includes(choice), 'Use /pair worker remove <id> [keep|discard]');
+    const keepConversation = choice !== 'discard';
+    const target = c.summary().workers.find(worker => worker.id === first);
+    assert(target, `Unknown worker ${first}. Configured: ${current.workers.map(worker => worker.id).join(', ')}`);
+    // Removing is destructive in the config, and 'discard' also deletes the conversation: always ask.
+    const detail = keepConversation ? 'Its conversation is kept, so adding a worker with the same id later resumes it.'
+      : 'Its session, inbox, archive and Fabric mesh are deleted. The task history inside them is not recoverable.';
+    if (!await ctx.ui.confirm('Remove worker', `Remove worker ${first}?
+
+${detail}`)) return;
+    const removed = await c.removeWorker(first, { keepConversation, save: next => apply(next, scope) });
+    ctx.ui.notify(`Removed worker ${first}${removed.archived ? ' (its state record was archived)' : ''}; ${removed.conversation === 'kept' ? 'its conversation was kept' : 'its conversation was discarded'}.`, 'info');
   }
   /**
    * Restarting interrupts the step in flight, so a worker with a current task asks first — on every route,
@@ -801,7 +950,13 @@ These reports will not be delivered automatically: call pair_yield to receive th
           const next = await readScope(scope); next.indicator = idArg;
           await apply(next, scope); return;
         }
-        if (command === 'start') return await startWorker(id);
+        if (command === 'start') {
+          // Starting a different worker stops an idle live one first (never two processes), and never displaces
+          // a worker that holds a task: switchTo refuses and names it.
+          const target = idArg || c.config.workers[0].id;
+          return await startWorker(target, false, { switchWorker: !!idArg });
+        }
+        if (command === 'worker') return await workerCommand(ctx, c, idArg, rest);
         if (command === 'stop') {
           const targets = idArg && idArg !== 'all' ? [id] : [...c.handles.keys()];
           if (await confirmStop(ctx, c, targets)) for (const worker of targets) await c.stop(worker);
@@ -938,7 +1093,8 @@ These reports will not be delivered automatically: call pair_yield to receive th
           if (action === 'status') { await showStatus(); return { reopen: true }; }
           if (action === 'inbox') { await showInbox(); return { reopen: !deliveredToMain }; }
           if (action === 'reconcile') { await reconcileWorker(target); return { reopen: !deliveredToMain, ...(deliveredToMain ? { notice: `Worker ${target} reconciled.` } : {}) }; }
-          if (action === 'start') { await startWorker(target); return { reopen: true }; }
+          // The dashboard start is an explicit choice of this worker, so it switches like /pair start <id>.
+          if (action === 'start') { await startWorker(target, false, { switchWorker: true }); return { reopen: true }; }
           if (action === 'settings') { await openSettings(ctx); return { reopen: true }; }
           if (action === 'restart') {
             if (!await confirmRestart(ctx, c, target)) return { reopen: true };
@@ -959,7 +1115,7 @@ These reports will not be delivered automatically: call pair_yield to receive th
           if (item.action === 'diff') return await showDiff(target);
           if (item.action === 'yield') return await showYield();
           if (item.action === 'transcript') return await followTranscript(ctx, target);
-          if (item.action === 'start') return await startWorker(target);
+          if (item.action === 'start') return await startWorker(target, false, { switchWorker: true });
           if (item.action === 'reconcile') return await reconcileWorker(target);
           if (item.action === 'model' || item.action === 'effort') {
             const edited = await (item.action === 'model' ? chooseWorkerModel : chooseWorkerEffort)(ctx, await readScope(scope), target);
@@ -985,6 +1141,13 @@ These reports will not be delivered automatically: call pair_yield to receive th
           if (item.action === 'settings') return await openSettings(ctx);
           if (item.action === 'reload') { await reloadConfiguration(ctx, true); return; }
           if (item.action === 'doctor') return await showDoctor(current.requirements);
+          if (item.action === 'default-worker') return await workerCommand(ctx, c, 'default', [target]);
+          if (item.action === 'add-worker') {
+            const added = await addWorkerInteractive(ctx);
+            if (added) await workerCommand(ctx, c, 'add', added);
+            return;
+          }
+          if (item.action === 'remove-worker') return await workerCommand(ctx, c, 'remove', [target]);
         };
         // TUI: the live dashboard overlay. Outside a TUI the select-based menu stays the fallback.
         if (ctx.mode === 'tui' && typeof ctx.ui.custom === 'function') return await runDashboard(ctx);
@@ -1069,7 +1232,7 @@ These reports will not be delivered automatically: call pair_yield to receive th
   const mainFixing = () => !!(controller && Object.values(controller.state.workers).some(r => r.task && !['completed', 'cancelled'].includes(r.task.status) && r.task.mainFix));
   pi.on('tool_call', (event) => {
     if (controller && typeof event.toolName === 'string' && !event.toolName.startsWith('pair_')) controller.noteActivity();
-    if (supervising()) {
+    if (supervising() && !writesOnlyPairConfig(event.toolName, event.input, ctxRef?.cwd)) {
       if (isDirectMutation(event.toolName)) return { block: true, reason: 'Main is supervising an active Pair task. Delegate source edits or cancel the task before editing directly.' };
       const writers = event.toolName === 'fabric_exec' && event.input !== null && typeof event.input === 'object' ? programCalls(Reflect.get(event.input, 'code'), [...FABRIC_FILE_WRITERS, ...FABRIC_PROGRAM_RUNNERS]) : [];
       if (writers.length) return { block: true, reason: `Main is supervising an active Pair task. ${writers.join(', ')} can write source files; delegate the edit or cancel the task first.` };
